@@ -293,11 +293,27 @@ function liveTarget(ev) {
   return null
 }
 
+// Tool calls seen in-process that the server does not report yet, as provisional turns for the tree.
+function pendingTurns(r) {
+  if (r.toolCalls == null) return []
+  return (local.liveCalls || []).filter((c) => c.calls > r.toolCalls).map((c) => {
+    const [label, group] = liveLabel(c)
+    return { intent: null, label, group, cw: 0, tools: [c.tool === 'Bash' && c.target ? 'Bash ' + c.target : c.tool],
+             targets: [c.tool === 'Bash' ? null : c.target], toolErr: [false], error: false, agents: [] }
+  })
+}
+
+function liveLabel(l) {
+  let [label, group] = LIVE_LABELS[l.tool] || (l.tool.startsWith('mcp__') ? ['calling ' + l.tool.split('__')[1], 'research'] : ['running a command', 'verify'])
+  if (l.tool === 'Bash' && /test|pytest|unittest|jest|vitest/i.test(l.target || '')) label = 'running tests'
+  if (l.tool === 'Bash' && /^git /.test(l.target || '')) [label, group] = ['checking git state', 'investigate']
+  return [label, group]
+}
+
 function liveNow(r) {
   const l = local.live
   if (!l || r.toolCalls == null || l.calls <= r.toolCalls) return null
-  let [label, group] = LIVE_LABELS[l.tool] || (l.tool.startsWith('mcp__') ? ['calling ' + l.tool.split('__')[1], 'research'] : ['running a command', 'verify'])
-  if (l.tool === 'Bash' && /test|pytest|unittest|jest|vitest/i.test(l.target || '')) label = 'running tests'
+  const [label, group] = liveLabel(l)
   return [
     { text: '▶ ' + label, color: GROUP_COLORS[group], bold: true },
     l.target && { text: ' · ' + l.target },
@@ -459,7 +475,8 @@ function unplacedAgents(r) {
 }
 
 function drawRemote(Box, Text, width) {
-  const r = remote
+  const pending = pendingTurns(remote)
+  const r = pending.length ? { ...remote, turns: [...remote.turns, ...pending] } : remote
   const top = [header(Box, Text, width, 'tokenscope', r.status, r.elapsed_s != null ? fmtDur(r.elapsed_s) : '')]
   top.push(row(Box, Text, 'asked', 'ASKED', [
     { text: r.goal || '(no prompt yet)', bold: !!r.goal, dimColor: !r.goal },
@@ -580,7 +597,8 @@ export function register(onEvent) {
     remoteText = ''
     seenRules = null
     local.calls = 0
-    local.live = null   // tool calls are matched against this session's server-side count
+    local.live = null
+    local.liveCalls = []   // tool calls are matched against this session's server-side count
     local.startMs = local.nowMs = await $.clock.now()
     timers = [$.clock.every(POLL_MS, () => poll($)), $.clock.every(FLUSH_MS, () => flush($))]
     void poll($)
@@ -607,6 +625,7 @@ export function register(onEvent) {
     local.working = true
     local.recent = [...local.recent, name].slice(-12)
     local.live = { tool: name, target: liveTarget(e), calls: local.calls }
+    local.liveCalls = [...(local.liveCalls || []), local.live].slice(-12)
     dirty = true
     return next(e)
   }).catch(async ($, e, next) => next(e)) // counting must never block a tool call

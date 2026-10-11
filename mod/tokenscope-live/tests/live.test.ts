@@ -306,6 +306,7 @@ describe('tokenscope-live', () => {
     ui = await $.ui.mount({ plugin: 'tokenscope-live', surface: 'terminal', component: 'Pane', requestId: 'tokenscope-live', props: PANE_PROPS })
     expect(await ui.find({ type: 'Text', text: /^▶ editing files$/ })).toBeDefined()
     expect(await ui.find({ type: 'Text', text: /stats\.py/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /Write/ })).toBeDefined()   // provisional tree line for the pending call
   })
 
   test('a burst of tool calls is coalesced into few redraws', async ($: any, on: any) => {
