@@ -689,6 +689,20 @@ class LiveState:
         d["agents"] = self.agents_summary(s)
         return d
 
+    def _turn_agents(self, s, turn):
+        """Subagents launched by one turn's Agent/Task calls: [{type, status, turns, cw}]."""
+        out = []
+        for x in turn["tools"]:
+            tid = x.get("id")
+            if not tid or tid not in s.fanouts:
+                continue
+            a = next((a for a in s.agents.values() if a["tool_use_id"] == tid), None)
+            f = s.fanouts[tid]
+            out.append({"type": (a and a["type"]) or f.get("agent_type") or "agent",
+                        "status": a["status"] if a else "starting", "turns": a["turns"] if a else 0,
+                        "cw": round(a["cw"]) if a else 0})
+        return out
+
     def session_compact(self, s, now=None, recent_n=60):
         """Small payload for the in-terminal mod / status line (see docs/live-spec.md)."""
         now = self.clock() if now is None else now
@@ -705,6 +719,7 @@ class LiveState:
                 "recent": [{"intent": t["intent"], "group": t["group"], "cw": round(t.get("cw") or 0),
                             "tools": [x["label"] for x in t["tools"]],
                             "tool_err": [bool(x.get("err")) for x in t["tools"]],
+                            "agents": self._turn_agents(s, t),
                             "err": bool(t.get("err"))} for t in recent],
                 "cw_series": [round(t.get("cw") or 0) for t in turns[-120:]],
                 "agents": [{"type": a["type"], "status": a["status"], "turns": a["turns"]} for a in s.agents.values()]}

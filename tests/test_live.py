@@ -379,6 +379,8 @@ class TestServer(LiveFixture):
         self.assertEqual(set(c), {"goal", "status", "cw", "usd", "context_tokens", "current_intent", "flags",
                                   "recent", "agents", "elapsed_s", "turns", "tool_calls", "errors", "cw_series"})
         r3 = c["recent"][3]
+        launched = [a for t in c["recent"] for a in t["agents"]]
+        self.assertEqual([a["type"] for a in launched], ["Explore"])
         self.assertEqual({k: r3[k] for k in ("intent", "group", "tools", "err", "tool_err")},
                          {"intent": "test", "group": "verify", "tools": ["Bash pytest"], "err": True, "tool_err": [True]})
         self.assertEqual(len(c["cw_series"]), len(c["recent"]))   # one value per main-thread tool turn
