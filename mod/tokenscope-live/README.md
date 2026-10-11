@@ -4,35 +4,48 @@ A Claude Code mod that adds a live **tokenscope** pane to the session. It uses
 only `Box`/`Text`, so it works in any terminal, and every row is cut to the pane width:
 
 ```
-◆ Fix invoice rounding                                 ● working  2:31
-CW 412k · $1.23 · ctx 84k · 23 turns · 4 ✗  ⣀⣤⣶⣿
+tokenscope                                             ● working  2:31
+CW 412k · $1.23 · ctx 84k · 23 turns · 3 ✗  ⣀⣤⣶⣿
 ctx ▕██████████░░░░░░░░░░░░░░▏ 42%
 ◆ Fix invoice rounding
 ├─ INVESTIGATE · 2 turns · 120k
 │  └ Read ×3 · Grep
+├─ DELEGATE · 1 turn · 11k
+│  ├ Agent ×2
+│  ├─↳ Explore         ● running · 5 turns · 40k
+│  └─↳ general-purpose ✓ done · 3 turns · 22k
 ├─ CHANGE · 1 turn · 18k
 │  └ Edit
-├─ VERIFY · 2 turns · 30k ✗
-│  └ Bash run_tests.sh ×2 ✗2
-└─ CHANGE · 1 turn  ◀ now
-   └ Edit
- ⚠ re-read file · .py ×3   ⚠ dead tool · Bash run_tests.sh ×3
-↳ Explore running · 5 turns
+├─ VERIFY · 1 turn · 15k ✗
+│  └ Bash run_tests.sh ✗1
+├─ CHANGE · 1 turn · 6k
+│  └ Edit
+└─ ↺ VERIFY · 1 turn · 15k ✗ retry 1  ◀ now
+   └ Bash run_tests.sh ×3 ✗3 ↺
+ ⚠ dead tool · Bash run_tests.sh ×3
 ```
 
-- **header**: the goal, a status pill (`● working` green, `◐ waiting` yellow, `○ idle` gray)
+- **header**: `tokenscope`, a status pill (`● working` green, `◐ waiting` yellow, `○ idle` gray)
   and the elapsed time
 - **metrics**: cost-weighted tokens (CW), cost, context, turns and errors, then a cyan braille
   sparkline of cumulative CW per turn (two turns per character, up to 30 characters)
 - **context gauge** against 200k tokens: yellow above 50%, red above 75%
-- **flow tree**: consecutive turns of the same intent group folded into phases; the last 8
-  phases are shown (`┊ +N earlier phases` above when there are more), each with its turns,
-  CW, and tools as `Name ×n`, failed ones as a red `✗n`. The current phase is marked `◀ now`.
+- **flow tree**: the goal in bold as its root, then consecutive turns of the same intent group
+  folded into phases, each with its turns and CW. Tools show as `Name ×n` (failed ones as a red
+  `✗n`) on one `└` line when they fit, otherwise one `├`/`└` line per tool (up to 3, then
+  `+N more`). The current phase is marked `◀ now`.
   Phase colours: investigate blue, change red, verify yellow, ship magenta, delegate bright
   yellow, research cyan, wait gray, plan bright magenta, other gray
+- **subagents** launched by a phase show as `↳` sub-branches under its tools: green `● running`,
+  dim `✓ done` and `○ starting`, red `✗ error`. Agents in `agents` that no turn claims are listed
+  at the bottom (`↳ Explore running · 5 turns`)
+- **retries**: a phase whose group failed in one of the 3 phases before it (`VERIFY ✗ → CHANGE →
+  VERIFY`) is marked in yellow as `↺ VERIFY … retry N`, with N counting that group's retries so far.
+  A tool that fails again after failing in an earlier phase gets a yellow `↺`
 - **flag badges** (`⚠ dead tool · …`); a flag that appears after the first payload also raises
   a toast once
-- **subagents** (`↳ Explore running · 5 turns`)
+- the pane stays within 38 rows: the last 8 phases at most, fewer when they don't fit, with
+  `┊ +N earlier phases` above them
 
 The flow, flags and subagents come from a running `tokenscope live` server. Without
 one, the pane runs in **local mode**: the same header, metrics, sparkline and gauge, drawn from
@@ -78,7 +91,8 @@ pane in local mode. The fields it reads (all optional) are:
   "current_intent": "test",
   "flags": [{ "flag": "dead_tool", "count": 1, "detail": "Bash run_tests.sh ×3" }],
   "recent": [{ "intent": "read_code", "group": "investigate", "cw": 12000,
-               "tools": ["Read", "Grep"], "tool_err": [false, false], "err": false }],
+               "tools": ["Read", "Grep"], "tool_err": [false, false], "err": false,
+               "agents": [{ "type": "Explore", "status": "running", "turns": 5, "cw": 40000 }] }],
   "cw_series": [12000, 9000],
   "agents": [{ "type": "Explore", "status": "running", "turns": 5 }]
 }

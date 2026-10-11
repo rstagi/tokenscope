@@ -80,7 +80,7 @@ describe('tokenscope-live', () => {
     await clock.advance(65_000)
 
     const ui = await $.ui.mount({ plugin: 'tokenscope-live', surface: 'terminal', component: 'Pane', requestId: 'tokenscope-live', props: PANE_PROPS })
-    expect(await ui.find({ type: 'Text', text: /^◆ tokenscope · local$/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /^tokenscope · local$/ })).toBeDefined()
     expect(await ui.find({ type: 'Text', text: /^○ idle$/ })).toBeDefined()
     expect(await ui.find({ type: 'Text', text: /^ {2}1:0[56]$/ })).toBeDefined()
     // CW per turn = 1000 + 1.25*2000 + 0.1*10000 + 5*100 = 5000
@@ -104,7 +104,9 @@ describe('tokenscope-live', () => {
     await clock.advance(1000)
     const ui = await $.ui.mount({ plugin: 'tokenscope-live', surface: 'terminal', component: 'Pane', requestId: 'tokenscope-live', props: { ...PANE_PROPS, bodyColumns: 70 } })
     expect(urls[0]).toBe('http://127.0.0.1:9999/api/session/sess-1/compact')
-    expect(await ui.find({ type: 'Text', text: /^◆ Fix invoice rounding$/ })).toBeDefined()
+    // the header no longer carries the goal; it is the flow tree's root, once
+    expect(await ui.find({ type: 'Text', text: /^tokenscope$/ })).toBeDefined()
+    expect(await ui.findAll({ type: 'Text', text: /Fix invoice rounding/ })).toHaveLength(1)
     expect(await ui.find({ type: 'Text', text: /^● working$/ })).toBeDefined()
     expect(await ui.find({ type: 'Text', text: /^ {2}2:31$/ })).toBeDefined()
     expect(await ui.find({ type: 'Text', text: /^CW 412k · \$1\.23 · ctx 84k · 23 turns · 4 ✗$/ })).toBeDefined()
@@ -116,7 +118,8 @@ describe('tokenscope-live', () => {
     expect(await ui.find({ type: 'Text', text: /^█{10}$/ })).toBeDefined()
 
     // flow tree: investigate(2) -> change -> verify(2) -> change (now)
-    expect(await ui.find({ type: 'Text', text: /^◆ Fix invoice rounding$/, in: undefined })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /^◆ Fix invoice rounding$/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /retry/ })).toBeUndefined()
     const labels = await ui.findAll({ type: 'Text', text: /^(INVESTIGATE|CHANGE|VERIFY)$/ })
     expect(labels).toHaveLength(4)
     expect(await ui.find({ type: 'Text', text: /^ · 2 turns · 120k$/ })).toBeDefined()
@@ -134,6 +137,67 @@ describe('tokenscope-live', () => {
     expect(await ui.find({ type: 'Text', text: /^↳ Explore $/ })).toBeDefined()
     expect(await ui.find({ type: 'Text', text: /^running$/ })).toBeDefined()
     expect(await ui.find({ type: 'Text', text: /^ · 5 turns$/ })).toBeDefined()
+  })
+
+  test('subagents hang under the phase that launched them; VERIFY ✗ → CHANGE → VERIFY is a retry', async ($: any, on: any) => {
+    const clock = base(on)
+    const payload = {
+      goal: 'Fix invoice rounding', status: 'working',
+      recent: [
+        { group: 'investigate', cw: 9_000, tools: ['Read', 'Read', 'Grep'] },
+        { group: 'delegate', cw: 11_000, tools: ['Agent', 'Agent'], agents: [
+          { type: 'Explore', status: 'running', turns: 5, cw: 40_000 },
+          { type: 'general-purpose', status: 'done', turns: 3, cw: 22_000 },
+        ] },
+        { group: 'verify', cw: 5_000, tools: ['Bash run_tests.sh'], tool_err: [true], err: true },
+        { group: 'change', cw: 4_000, tools: ['Edit'] },
+        { group: 'verify', cw: 5_000, tools: ['Bash run_tests.sh'], tool_err: [true], err: true },
+        { group: 'change', cw: 4_000, tools: ['Edit'] },
+        { group: 'verify', cw: 5_000, tools: ['Bash run_tests.sh'] },
+      ],
+      agents: [{ type: 'Explore', status: 'running', turns: 5 }, { type: 'general-purpose', status: 'done', turns: 3 }],
+    }
+    on('http.fetch', () => ({ value: { status: 200, ok: true, headers: {}, text: JSON.stringify(payload) } }))
+    await $.session.start(SESSION)
+    await clock.advance(1000)
+    const ui = await $.ui.mount({ plugin: 'tokenscope-live', surface: 'terminal', component: 'Pane', requestId: 'tokenscope-live', props: { ...PANE_PROPS, bodyColumns: 70 } })
+    // DELEGATE: tools first (├ since agents follow), then one sub-branch per agent
+    expect(await ui.find({ type: 'Text', text: /^│ {2}├ $/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /^Agent ×2$/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /^│ {2}├─↳ $/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /^Explore {9}$/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /^● running$/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /^ · 5 turns · 40k$/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /^│ {2}└─↳ $/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /^general-purpose $/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /^✓ done$/ })).toBeDefined()
+    // all payload agents are in the tree: no separate rows at the bottom
+    expect(await ui.find({ type: 'Text', text: /^↳ / })).toBeUndefined()
+    // second and third VERIFY are retries; the tool that failed again is marked
+    expect(await ui.findAll({ type: 'Text', text: /^↺ $/ })).toHaveLength(2)
+    expect(await ui.find({ type: 'Text', text: /^ retry 1$/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /^ retry 2$/ })).toBeDefined()
+    expect(await ui.findAll({ type: 'Text', text: /^ ↺$/ })).toHaveLength(1)
+    // CHANGE after VERIFY ✗ is not itself a retry
+    expect(await ui.findAll({ type: 'Text', text: /retry/ })).toHaveLength(2)
+  })
+
+  test('the pane stays within 38 rows; many tool groups go one per line', async ($: any, on: any) => {
+    const clock = base(on)
+    const groups = ['investigate', 'change', 'verify', 'plan', 'research', 'ship', 'delegate', 'change']
+    const tools = ['Read', 'Grep', 'Glob', 'WebFetch', 'Bash some-long-command.sh', 'Edit']
+    const agents = [{ type: 'Explore', status: 'running', turns: 1 }, { type: 'Plan', status: 'starting' }]
+    const payload = { goal: 'g', recent: groups.map(group => ({ group, tools, agents, cw: 1000 })) }
+    on('http.fetch', () => ({ value: { status: 200, ok: true, headers: {}, text: JSON.stringify(payload) } }))
+    await $.session.start(SESSION)
+    await clock.advance(1000)
+    const ui = await $.ui.mount({ plugin: 'tokenscope-live', surface: 'terminal', component: 'Pane', requestId: 'tokenscope-live', props: PANE_PROPS })
+    const boxes = await ui.findAll({ type: 'Box' })
+    expect(boxes.length - 1).toBeLessThanOrEqual(38)
+    expect(await ui.find({ type: 'Text', text: /^┊ \+\d+ earlier phases$/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /^ {3}├ \+3 more$/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /^ {3}└─↳ $/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /^○ starting$/ })).toBeDefined()
   })
 
   test('older phases fold into a "+N earlier" row', async ($: any, on: any) => {
