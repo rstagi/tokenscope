@@ -1,54 +1,59 @@
 # tokenscope-live (Claude Code mod)
 
-A Claude Code mod that adds a live **tokenscope** pane to the session. It uses
-only `Box`/`Text`, so it works in any terminal, and every row is cut to the pane width:
+A Claude Code mod that adds a live **tokenscope** pane to the session: what you asked, and
+what the agent is doing right now. It uses only `Box`/`Text`, so it works in any terminal, and
+every row is cut to the pane width with `…` (never wrapped):
 
 ```
-tokenscope                                             ● working  2:31
-CW 412k · $1.23 · ctx 84k · 23 turns · 3 ✗  ⣀⣤⣶⣿
-ctx ▕██████████░░░░░░░░░░░░░░▏ 42%
-◆ Fix invoice rounding
-├─ INVESTIGATE · 2 turns · 120k
-│  └ Read ×3 · Grep
-├─ DELEGATE · 1 turn · 11k
-│  ├ Agent ×2
-│  ├─↳ Explore         ● running · 5 turns · 40k
-│  └─↳ general-purpose ✓ done · 3 turns · 22k
-├─ CHANGE · 1 turn · 18k
-│  └ Edit
-├─ VERIFY · 1 turn · 15k ✗
-│  └ Bash run_tests.sh ✗1
-├─ CHANGE · 1 turn · 6k
-│  └ Edit
-└─ ↺ VERIFY · 1 turn · 15k ✗ retry 1  ◀ now
-   └ Bash run_tests.sh ×3 ✗3 ↺
- ⚠ dead tool · Bash run_tests.sh ×3
+tokenscope  ● working  3m12s
+ASKED  Fix: failing tests in invoice
+       ↳ now: also check tax rounding
+NOW    ▶ running tests · run_tests.sh · 4s
+TESTS  ✗4 → ✗2 → ✓ 12 passed
+FILES  edited 3: invoice.py, money.py, tax.py
+COST   ⣀⣤⣶⣿ 182k CW · $0.41 · ctx ▕███░░░░░░░▏ 34%
+── flow ──
+◆ Fix: failing tests in invoice
+├ INVESTIGATE · reading code · 3 turns
+│ ├ Read money.py, tax.py ×4
+│ └ Grep round, Decimal ×2
+├ DELEGATE · delegating
+│ ├ Agent(Explore)
+│ └─↳ Explore · 6 turns · done
+├ CHANGE · editing files
+│ └ Edit money.py
+└ VERIFY · ▶ running tests
+  └ Bash run_tests.sh ✗1
+⚠ same error ×3, no edits since — try a different approach
 ```
 
-- **header**: `tokenscope`, a status pill (`● working` green, `◐ waiting` yellow, `○ idle` gray)
-  and the elapsed time
-- **metrics**: cost-weighted tokens (CW), cost, context, turns and errors, then a cyan braille
-  sparkline of cumulative CW per turn (two turns per character, up to 30 characters)
-- **context gauge** against 200k tokens: yellow above 50%, red above 75%
-- **flow tree**: the goal in bold as its root, then consecutive turns of the same intent group
-  folded into phases, each with its turns and CW. Tools show as `Name ×n` (failed ones as a red
-  `✗n`) on one `└` line when they fit, otherwise one `├`/`└` line per tool (up to 3, then
-  `+N more`). The current phase is marked `◀ now`.
+- **header**: `tokenscope`, a status pill (`● working` green, `● waiting for you` yellow,
+  `● idle` dim) and the elapsed time
+- **ASKED**: the goal from your prompt in bold (a dim `(haiku)` when a model named it); with
+  more than one prompt, `↳ now:` shows the latest
+- **NOW**: the current intent in plain words, its target (or tool) and how long this phase has
+  run; `◼ done, waiting for you` when Claude is waiting, `◼ idle` when idle
+- **TESTS**: failures per test run (`✗4 → ✗2`) then the last result; omitted before any test run
+- **FILES**: the files edited so far (or `edited N files` when the server redacts names)
+- **COST**: a cyan braille sparkline of cumulative CW per turn, CW, cost, and a context gauge
+  against 200k tokens (yellow above 50%, red above 75%)
+- **flow**: the goal as root, then phases: runs of consecutive turns with the same intent
+  group, named `GROUP · <dominant intent>` (most turns, ties to the latest). Under a phase,
+  consecutive calls of one tool fold into one line with up to 3 targets (`+N` more) and `×N`;
+  failed calls show as a dim red `✗N`. The last phase is the live one (`▶`, brighter, always
+  expanded). When rows run short, older phases collapse to one line
+  (`├ INVESTIGATE · reading code · 3 turns · Read ×4 Grep ×2`), then the oldest drop behind
+  `… N earlier phases`. The pane stays within 38 rows.
   Phase colours: investigate blue, change red, verify yellow, ship magenta, delegate bright
   yellow, research cyan, wait gray, plan bright magenta, other gray
-- **subagents** launched by a phase show as `↳` sub-branches under its tools: green `● running`,
-  dim `✓ done` and `○ starting`, red `✗ error`. Agents in `agents` that no turn claims are listed
-  at the bottom (`↳ Explore running · 5 turns`)
-- **retries**: a phase whose group failed in one of the 3 phases before it (`VERIFY ✗ → CHANGE →
-  VERIFY`) is marked in yellow as `↺ VERIFY … retry N`, with N counting that group's retries so far.
-  A tool that fails again after failing in an earlier phase gets a yellow `↺`
-- **flag badges** (`⚠ dead tool · …`); a flag that appears after the first payload also raises
-  a toast once
-- the pane stays within 38 rows: the last 8 phases at most, fewer when they don't fit, with
-  `┊ +N earlier phases` above them
+- **subagents** launched by a phase are sub-branches under it (`├─↳ Explore · 6 turns · done`).
+  Agents in `agents` that no turn claims are listed at the bottom
+- **warnings** are rare and come only from the server's `warnings`: one yellow line each,
+  `⚠ <text> — <hint>`. A warning rule that appears after the first payload also raises one
+  toast. A session without warnings shows no `⚠` anywhere
 
-The flow, flags and subagents come from a running `tokenscope live` server. Without
-one, the pane runs in **local mode**: the same header, metrics, sparkline and gauge, drawn from
+Everything but the header, NOW and COST comes from a running `tokenscope live` server. Without
+one, the pane runs in **local mode**: the header, the last tool as NOW, and COST (sparkline and gauge) drawn from
 per-turn cost-weighted tokens of each model response's usage, plus tool-call counts per tool and
 the last 12 tool names:
 
@@ -76,7 +81,7 @@ Then type `/tokenscope` to toggle the pane (it works while Claude is busy, too).
 | --- | --- | --- |
 | `TOKENSCOPE_LIVE_URL` | `http://127.0.0.1:8765` | Base URL of the `tokenscope live` server |
 | `TOKENSCOPE_LIVE_PANE` | unset | `1` opens the pane when the session starts |
-| `TOKENSCOPE_LIVE_BAND` | unset | `1` shows a one-line summary above the prompt |
+| `TOKENSCOPE_LIVE_BAND` | unset | `1` shows a one-line summary above the prompt: `◆ <goal> · ▶ <now> · <cw> CW · $x`, plus `⚠` only when there are warnings |
 
 ## Network
 
@@ -86,12 +91,19 @@ pane in local mode. The fields it reads (all optional) are:
 
 ```json
 {
-  "goal": "Fix invoice rounding", "status": "working", "cw": 412000, "usd": 1.23,
-  "context_tokens": 84000, "elapsed_s": 151, "turns": 23, "tool_calls": 31, "errors": 4,
-  "current_intent": "test",
-  "flags": [{ "flag": "dead_tool", "count": 1, "detail": "Bash run_tests.sh ×3" }],
-  "recent": [{ "intent": "read_code", "group": "investigate", "cw": 12000,
-               "tools": ["Read", "Grep"], "tool_err": [false, false], "err": false,
+  "goal": "Fix: failing tests in invoice", "status": "working", "cw": 182000, "usd": 0.41,
+  "context_tokens": 68000, "elapsed_s": 192, "turns": 9, "tool_calls": 14, "errors": 1,
+  "asked": { "goal": "Fix: failing tests in invoice", "source": "keyword", "prompt_n": 2,
+             "latest": "also check tax rounding" },
+  "now": { "intent": "run_tests", "label": "running tests", "group": "verify",
+           "tool": "Bash run_tests.sh", "target": "run_tests.sh", "since_s": 4 },
+  "tests": { "passed": 12, "failed": 0, "ok": true, "runs": 3, "trend": [4, 2, 0] },
+  "files_edited": ["invoice.py", "money.py", "tax.py"], "files_edited_n": 3,
+  "warnings": [{ "rule": "stuck_error", "text": "same error ×3, no edits since",
+                 "hint": "try a different approach", "count": 3, "ts": 1760000000 }],
+  "recent": [{ "intent": "read_code", "group": "investigate", "label": "reading code", "cw": 12000,
+               "tools": ["Read", "Grep"], "targets": ["money.py", "round"],
+               "tool_err": [false, false], "err": false,
                "agents": [{ "type": "Explore", "status": "running", "turns": 5, "cw": 40000 }] }],
   "cw_series": [12000, 9000],
   "agents": [{ "type": "Explore", "status": "running", "turns": 5 }]
@@ -99,9 +111,11 @@ pane in local mode. The fields it reads (all optional) are:
 ```
 
 `recent` is oldest first (up to 60 turns) and `cw_series` holds one CW value per main turn
-(without it, the sparkline uses `recent[].cw`). The older shape still reads: `goal` as
-`{ "name" }`, `cost_usd`, `ctx_tokens`, `turns` as a list of `{ intent, tools, error }`, and
-`subagents`.
+(without it, the sparkline uses `recent[].cw`). `tests` is null before the first test run and
+`tests.trend` holds the failures of the last runs (null when unknown). With redaction on, the
+server sends only `files_edited_n`. The old `flags` list is ignored. The older shape still reads:
+`goal` as `{ "name", "source" }`, `cost_usd`, `ctx_tokens`, `turns` as a list of
+`{ intent, tools, error }`, and `subagents`.
 
 This is the server's `/compact` payload (see `docs/live-spec.md` in the repository root).
 

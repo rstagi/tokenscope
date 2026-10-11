@@ -1,6 +1,7 @@
-// tokenscope-live: a pane (and optional band) showing what this session is
-// doing. With `tokenscope live` running it shows the server's flow of phases,
-// flags and subagents; without it, counters this module keeps from the events.
+// tokenscope-live: a pane (and optional band) showing what the user asked and
+// what the agent is doing right now. With `tokenscope live` running it shows the
+// goal, the current intent, tests, edited files, cost and the flow of phases;
+// without it, counters this module keeps from the events.
 //
 // Redraws never come straight from events: polls and local counters set
 // `dirty`, and a 250 ms timer flushes it, so a burst of tool calls costs at
@@ -10,12 +11,13 @@ const PANE = 'tokenscope-live'
 const DEFAULT_BASE = 'http://127.0.0.1:8765'
 const POLL_MS = 1000
 const FLUSH_MS = 250
-const MAX_PHASES = 8
+const MAX_PHASES = 10
 const MAX_ROWS = 38 // the pane is ~40 rows tall
-const MAX_TOOL_ROWS = 3
-const RETRY_WINDOW = 3
-const SPARK_CHARS = 30
+const MAX_TOOL_ROWS = 4
+const MAX_TARGETS = 3
+const SPARK_CHARS = 16
 const CTX_LIMIT = 200_000
+const LABEL_W = 7 // "ASKED  "
 
 // What the server last answered (null: local mode) and its text, to spot changes
 let remote = null
@@ -23,8 +25,8 @@ let remoteText = ''
 let inFlight = false
 let dirty = false
 let timers = []
-// Flag keys already seen (null until the first payload, which only seeds it)
-let seenFlags = null
+// Warning rules already seen (null until the first payload, which only seeds it)
+let seenRules = null
 
 // Local fallback counters
 const local = { tools: {}, recent: [], calls: 0, turns: 0, cw: 0, ctx: 0, turnCw: 0, series: [], working: false, startMs: null, nowMs: 0 }
@@ -52,15 +54,10 @@ const GROUP_WORDS = [
   ['plan', /plan|design|think/],
 ]
 
-const FLAG_NAMES = {
-  retry_loop: 'retry loop', same_intent_after_error: 'same intent after error', browser_loop: 'browser loop',
-  reread_file: 're-read file', dead_tool: 'dead tool', context_large: 'large context', compaction: 'compacted',
-}
-
 const STATUS_PILLS = {
   working: { text: '● working', color: 'green' },
-  waiting: { text: '◐ waiting', color: 'yellow' },
-  idle: { text: '○ idle', color: 'gray' },
+  waiting: { text: '● waiting for you', color: 'yellow' },
+  idle: { text: '● idle', dimColor: true },
 }
 
 export function groupOf(intent, group) {
@@ -87,51 +84,56 @@ export function fmtTokens(n) {
   return String(Math.round(v))
 }
 
-export function fmtElapsed(s) {
+// 4s, 3m12s, 1h05m
+export function fmtDur(s) {
   const v = Math.max(0, Math.floor(Number(s) || 0))
   const h = Math.floor(v / 3600)
   const m = Math.floor((v % 3600) / 60)
-  const ss = String(v % 60).padStart(2, '0')
-  return h > 0 ? h + ':' + String(m).padStart(2, '0') + ':' + ss : m + ':' + ss
+  if (h > 0) return h + 'h' + String(m).padStart(2, '0') + 'm'
+  if (m > 0) return m + 'm' + String(v % 60).padStart(2, '0') + 's'
+  return v + 's'
 }
 
-function flagText(f) {
-  if (typeof f === 'string') return f
-  const name = FLAG_NAMES[f.flag] || String(f.flag || '').replace(/_/g, ' ')
-  const extra = f.detail != null && f.detail !== '' ? ' · ' + f.detail : f.count > 1 ? ' ×' + f.count : ''
-  return name + extra
-}
+const intentLabel = (intent) => (intent ? String(intent).replace(/_/g, ' ') : '')
 
 // The server's /compact payload (see docs/live-spec.md) -> the shape the pane draws.
 // Every field is optional, and the older shape (goal object, cost_usd, turns, ...) still reads.
 function normalize(d) {
-  const goal = d.goal && typeof d.goal === 'object' ? d.goal.name : d.goal
+  const goalName = d.goal && typeof d.goal === 'object' ? d.goal.name : d.goal
+  const asked = d.asked && typeof d.asked === 'object' ? d.asked : {}
   const recent = Array.isArray(d.recent) ? d.recent : Array.isArray(d.turns) ? d.turns : []
   const turns = recent.map((t) => ({
     intent: t.intent,
+    label: t.label || intentLabel(t.intent),
     group: groupOf(t.intent, t.group),
     cw: Number(t.cw) || 0,
     tools: Array.isArray(t.tools) ? t.tools.map(String) : [],
+    targets: Array.isArray(t.targets) ? t.targets : [],
     toolErr: Array.isArray(t.tool_err) ? t.tool_err : [],
     error: t.err != null ? !!t.err : !!t.error,
     agents: Array.isArray(t.agents) ? t.agents.filter((a) => a && typeof a === 'object') : [],
   }))
   const series = Array.isArray(d.cw_series) ? d.cw_series.map((v) => Number(v) || 0) : turns.map((t) => t.cw)
+  const files = Array.isArray(d.files_edited) ? d.files_edited.map(String) : []
   return {
-    goal,
+    goal: asked.goal || goalName,
+    goalSource: asked.source || (d.goal && typeof d.goal === 'object' ? d.goal.source : null),
+    latest: (asked.prompt_n || 0) > 1 ? asked.latest : null,
+    now: d.now && typeof d.now === 'object' ? d.now : null,
+    currentIntent: d.current_intent,
+    tests: d.tests && typeof d.tests === 'object' ? d.tests : null,
+    files,
+    filesN: typeof d.files_edited_n === 'number' ? d.files_edited_n : files.length,
     status: d.status,
     cw: d.cw,
     cost_usd: typeof d.usd === 'number' ? d.usd : d.cost_usd,
     ctx_tokens: d.context_tokens != null ? d.context_tokens : d.ctx_tokens,
     elapsed_s: d.elapsed_s,
-    turnCount: typeof d.turns === 'number' ? d.turns : null,
-    errors: typeof d.errors === 'number' ? d.errors : turns.filter((t) => t.error).length,
     turns,
     series,
-    flags: (Array.isArray(d.flags) ? d.flags : []).map((f) => ({
-      key: typeof f === 'string' ? f : String(f.flag || ''),
-      text: flagText(f),
-    })),
+    warnings: (Array.isArray(d.warnings) ? d.warnings : [])
+      .filter((w) => w && typeof w === 'object')
+      .map((w) => ({ rule: String(w.rule || w.text || ''), text: String(w.text || w.rule || ''), hint: w.hint ? String(w.hint) : '' })),
     subagents: Array.isArray(d.agents) ? d.agents : Array.isArray(d.subagents) ? d.subagents : [],
   }
 }
@@ -156,6 +158,11 @@ function line(Box, Text, key, segs, width) {
     children.push(Text({ ...style, wrap: 'truncate-end', children: [shown] }))
   }
   return Box({ key, flexDirection: 'row', children })
+}
+
+// A labelled row: "ASKED  <segs>"
+function row(Box, Text, key, label, segs, width) {
+  return line(Box, Text, key, [{ text: label.padEnd(LABEL_W), dimColor: true }, ...segs], width)
 }
 
 // Cumulative sums, resampled to at most `maxPoints` (the last point always kept).
@@ -187,188 +194,212 @@ export function sparkline(values, maxChars) {
   return s
 }
 
-// Consecutive turns with the same group, folded into phases. A phase whose group
-// already failed within the last RETRY_WINDOW phases is a retry (`retry` counts
-// them per group), and a tool failing again after failing in an earlier phase is
-// marked `again`.
+// Consecutive turns with the same group, folded into phases. Each phase keeps its
+// intents (to name it), runs of consecutive same-name tools and its subagents.
 export function phasesOf(turns) {
   const phases = []
   for (const t of turns) {
     let p = phases[phases.length - 1]
     if (!p || p.group !== t.group) {
-      phases.push((p = { group: t.group, turns: 0, cw: 0, error: false, retry: 0, tools: new Map(), agents: [] }))
+      phases.push((p = { group: t.group, turns: 0, cw: 0, errors: 0, intents: new Map(), runs: [], agents: [] }))
     }
     p.turns += 1
     p.cw += t.cw
-    p.error = p.error || t.error
+    if (t.label) {
+      const it = p.intents.get(t.label) || { n: 0, last: 0 }
+      p.intents.set(t.label, { n: it.n + 1, last: p.turns })
+    }
     p.agents.push(...t.agents)
+    let toolErrs = 0
     t.tools.forEach((name, i) => {
-      const agg = p.tools.get(name) || { n: 0, err: 0, again: false }
-      agg.n += 1
-      if (t.toolErr[i]) agg.err += 1
-      p.tools.set(name, agg)
+      let run = p.runs[p.runs.length - 1]
+      if (!run || run.name !== name) p.runs.push((run = { name, n: 0, err: 0, targets: [] }))
+      run.n += 1
+      const target = t.targets[i]
+      if (target && !name.endsWith(' ' + target) && !run.targets.includes(String(target))) run.targets.push(String(target))
+      if (t.toolErr[i]) (run.err += 1), (toolErrs += 1)
     })
+    p.errors += toolErrs || (t.error ? 1 : 0)
   }
-  const retries = {}
-  const failed = new Set()
-  phases.forEach((p, i) => {
-    const window = phases.slice(Math.max(0, i - RETRY_WINDOW), i)
-    if (window.some((q) => q.group === p.group && q.error)) p.retry = retries[p.group] = (retries[p.group] || 0) + 1
-    for (const [name, agg] of p.tools) if (agg.err > 0 && failed.has(name)) agg.again = true
-    for (const [name, agg] of p.tools) if (agg.err > 0) failed.add(name)
-  })
+  for (const p of phases) {
+    let best = null
+    for (const [label, it] of p.intents) if (!best || it.n > best.n || (it.n === best.n && it.last > best.last)) best = { label, ...it }
+    p.label = best ? best.label : ''
+  }
   return phases
 }
 
 function header(Box, Text, width, label, status, elapsed) {
-  const pill = STATUS_PILLS[status] || (status ? { text: '○ ' + status, color: 'gray' } : null)
-  const right = [pill && pill.text, elapsed].filter(Boolean).join('  ')
-  const left = fit(label, Math.max(1, width - right.length - 2))
-  const gap = ' '.repeat(Math.max(1, width - left.length - right.length))
+  const pill = STATUS_PILLS[status] || (status ? { text: '● ' + status, dimColor: true } : null)
   return line(Box, Text, 'head', [
-    { text: left, dimColor: true },
-    { text: gap },
-    pill && { text: pill.text, color: pill.color, bold: true },
-    elapsed && { text: (pill ? '  ' : '') + elapsed, dimColor: true },
+    { text: label, bold: true },
+    pill && { text: '  ' + pill.text, color: pill.color, dimColor: pill.dimColor, bold: !pill.dimColor },
+    elapsed && { text: '  ' + elapsed, dimColor: true },
   ], width)
 }
 
-function metrics(Box, Text, width, text, series) {
-  const rows = []
-  const values = cumulative(series, SPARK_CHARS * 2)
-  const room = Math.min(SPARK_CHARS, width - text.length - 2)
-  if (values.length > 1 && room >= 8) {
-    rows.push(line(Box, Text, 'metrics', [{ text }, { text: '  ' }, { text: sparkline(values, room), color: 'cyan' }], width))
-  } else {
-    rows.push(line(Box, Text, 'metrics', [{ text }], width))
-    if (values.length > 1) {
-      rows.push(line(Box, Text, 'spark', [{ text: sparkline(values, Math.min(SPARK_CHARS, width)), color: 'cyan' }], width))
-    }
-  }
-  return rows
-}
-
-function gauge(Box, Text, width, ctx) {
-  if (ctx == null) return []
+function gaugeSegs(ctx, cells) {
   const ratio = Math.max(0, Math.min(1, (Number(ctx) || 0) / CTX_LIMIT))
-  const pct = Math.round(ratio * 100) + '%'
-  const cells = Math.max(4, Math.min(24, width - 'ctx ▕▏ 100%'.length))
   const full = Math.round(ratio * cells)
   const color = ratio > 0.75 ? 'red' : ratio > 0.5 ? 'yellow' : 'green'
-  return [line(Box, Text, 'gauge', [
+  return [
     { text: 'ctx ', dimColor: true },
     { text: '▕', dimColor: true },
     { text: '█'.repeat(full), color },
     { text: '░'.repeat(cells - full), dimColor: true },
     { text: '▏ ', dimColor: true },
-    { text: pct, color, bold: ratio > 0.75 },
-  ], width)]
+    { text: Math.round(ratio * 100) + '%', color, bold: ratio > 0.75 },
+  ]
+}
+
+const segsLen = (segs) => segs.reduce((n, seg) => n + (seg && seg.text ? seg.text.length : 0), 0)
+
+// "⣀⣤⣶⣿ 182k CW · $0.41 · ctx ▕██░░░▏ 34%": the sparkline gets the room left over.
+function costSegs(width, cw, usd, ctx, series) {
+  const text = [fmtTokens(cw) + ' CW', typeof usd === 'number' && '$' + usd.toFixed(2)].filter(Boolean).join(' · ')
+  const gauge = ctx != null ? [{ text: ' · ', dimColor: true }, ...gaugeSegs(ctx, width - LABEL_W >= 52 ? 10 : 5)] : []
+  const segs = [{ text }, ...gauge]
+  const values = cumulative(series, SPARK_CHARS * 2)
+  const room = Math.min(SPARK_CHARS, width - LABEL_W - segsLen(segs) - 1)
+  if (values.length > 1 && room >= 3) segs.unshift({ text: sparkline(values, room), color: 'cyan' }, { text: ' ' })
+  return segs
+}
+
+function nowSegs(r) {
+  if (r.status === 'waiting') return [{ text: '◼ done, waiting for you', color: 'yellow' }]
+  if (r.status === 'idle') return [{ text: '◼ idle', dimColor: true }]
+  const n = r.now
+  const last = r.turns[r.turns.length - 1]
+  const label = (n && n.label) || intentLabel(n ? n.intent : r.currentIntent) || (last && last.label) || 'working'
+  const group = groupOf(n && n.intent, (n && n.group) || (last && last.group))
+  const what = n ? n.target || n.tool : null
+  return [
+    { text: '▶ ' + label, color: GROUP_COLORS[group], bold: true },
+    what && { text: ' · ' + what },
+    n && n.since_s != null && { text: ' · ' + fmtDur(n.since_s), dimColor: true },
+  ]
+}
+
+// "✗4 → ✗2 → ✓ 12 passed"
+function testSegs(t) {
+  const trend = Array.isArray(t.trend) ? t.trend.slice(0, -1).slice(-4) : []
+  const segs = []
+  for (const f of trend) {
+    segs.push(f == null ? { text: '?', dimColor: true } : f > 0 ? { text: '✗' + f, color: 'red' } : { text: '✓', color: 'green' })
+    segs.push({ text: ' → ', dimColor: true })
+  }
+  if (t.ok && !(t.failed > 0)) segs.push({ text: '✓ ' + (t.passed != null ? t.passed + ' passed' : 'passed'), color: 'green', bold: true })
+  else if (t.failed > 0) segs.push({ text: '✗ ' + t.failed + ' failed', color: 'red', bold: true }, t.passed != null && { text: ' · ' + t.passed + ' passed', dimColor: true })
+  else segs.push({ text: '? ran ' + (t.runs || 1) + '×', dimColor: true })
+  return segs
+}
+
+function filesText(r) {
+  if (!r.filesN && !r.files.length) return null
+  const n = Math.max(r.filesN, r.files.length)
+  return r.files.length ? 'edited ' + n + ': ' + r.files.slice(-6).join(', ') : 'edited ' + n + (n === 1 ? ' file' : ' files')
 }
 
 const AGENT_STATUS = {
-  running: { text: '● running', color: 'green' },
-  done: { text: '✓ done', dimColor: true },
-  completed: { text: '✓ done', dimColor: true },
-  error: { text: '✗ error', color: 'red' },
-  failed: { text: '✗ error', color: 'red' },
-  starting: { text: '○ starting', dimColor: true },
+  running: { text: 'running', color: 'green' },
+  done: { text: 'done', dimColor: true },
+  completed: { text: 'done', dimColor: true },
+  error: { text: 'error', color: 'red' },
+  failed: { text: 'error', color: 'red' },
+  starting: { text: 'starting', dimColor: true },
 }
 
-function chipSegs(name, agg) {
+function runSegs(run) {
+  const shown = run.targets.slice(0, MAX_TARGETS)
+  const more = run.targets.length - shown.length
   return [
-    { text: name + (agg.n > 1 ? ' ×' + agg.n : '') },
-    agg.err > 0 && { text: ' ✗' + agg.err, color: 'red' },
-    agg.again && { text: ' ↺', color: 'yellow', bold: true },
-  ].filter(Boolean)
+    { text: run.name },
+    shown.length && { text: ' ' + shown.join(', ') + (more > 0 ? ' +' + more : '') },
+    run.n > 1 && { text: ' ×' + run.n, dimColor: true },
+    run.err > 0 && { text: ' ✗' + run.err, color: 'red', dimColor: true },
+  ]
 }
 
-const segsLen = (segs) => segs.reduce((n, seg) => n + seg.text.length, 0)
+// "Read ×4 Grep ×2" for a collapsed phase
+function toolTotals(p) {
+  const totals = new Map()
+  for (const run of p.runs) totals.set(run.name, (totals.get(run.name) || 0) + run.n)
+  return [...totals].map(([name, n]) => name + (n > 1 ? ' ×' + n : '')).join(' ')
+}
 
-// The rows under one phase: its tools (one line when they fit, else one per tool
-// group), then the subagents it launched.
-function phaseRows(Box, Text, width, p, id, last) {
-  const rows = []
-  const stem = last ? '   ' : '│  '
-  const stats = ' · ' + p.turns + (p.turns === 1 ? ' turn' : ' turns') + (p.cw > 0 ? ' · ' + fmtTokens(p.cw) : '')
-  rows.push(line(Box, Text, 'phase-' + id, [
-    { text: last ? '└─ ' : '├─ ', dimColor: true },
-    p.retry > 0 && { text: '↺ ', color: 'yellow', bold: true },
-    { text: p.group.toUpperCase(), color: GROUP_COLORS[p.group], bold: true },
-    { text: stats, bold: last, dimColor: !last },
-    p.error && { text: ' ✗', color: 'red', bold: true },
-    p.retry > 0 && { text: ' retry ' + p.retry, color: 'yellow' },
-    last && { text: '  ◀ now', bold: true },
-  ], width))
-  const chips = [...p.tools].map(([name, agg]) => chipSegs(name, agg))
-  const agents = p.agents
-  if (chips.length > 0) {
-    const glyph = (isLast) => (isLast && !agents.length ? '└ ' : '├ ')
-    const one = chips.flatMap((c, i) => (i ? [{ ...c[0], text: ' · ' + c[0].text }, ...c.slice(1)] : c))
-    if (chips.length === 1 || stem.length + 2 + segsLen(one) <= width) {
-      rows.push(line(Box, Text, 'tools-' + id, [{ text: stem + glyph(true), dimColor: true }, ...one], width))
-    } else {
-      const shown = chips.length > MAX_TOOL_ROWS ? chips.slice(0, MAX_TOOL_ROWS) : chips
-      const more = chips.length - shown.length
-      shown.forEach((c, i) => {
-        const isLast = i === shown.length - 1 && !more
-        rows.push(line(Box, Text, 'tools-' + id + '-' + i, [{ text: stem + glyph(isLast), dimColor: true }, ...c], width))
-      })
-      if (more) rows.push(line(Box, Text, 'tools-' + id + '-more', [{ text: stem + glyph(true) + '+' + more + ' more', dimColor: true }], width))
-    }
-  }
-  const pad = Math.min(16, Math.max(0, ...agents.map((a) => String(a.type || a.name || 'agent').length)))
-  agents.forEach((a, i) => {
-    const st = AGENT_STATUS[a.status] || { text: a.status ? '○ ' + a.status : '', dimColor: true }
-    const stats = (a.turns != null ? ' · ' + a.turns + (a.turns === 1 ? ' turn' : ' turns') : '') + (a.cw ? ' · ' + fmtTokens(a.cw) : '')
-    rows.push(line(Box, Text, 'agent-' + id + '-' + i, [
-      { text: stem + (i === agents.length - 1 ? '└─↳ ' : '├─↳ '), dimColor: true },
-      { text: String(a.type || a.name || 'agent').padEnd(pad) + ' ' },
-      { text: st.text, color: st.color, dimColor: st.dimColor },
-      { text: stats, dimColor: true },
-    ], width))
+function phaseHead(p, live, last) {
+  const turns = p.turns > 1 ? ' · ' + p.turns + ' turns' : ''
+  return [
+    { text: last ? '└ ' : '├ ', dimColor: true },
+    { text: p.group.toUpperCase(), color: GROUP_COLORS[p.group], bold: true, dimColor: !live },
+    p.label && { text: ' · ' + (live ? '▶ ' : '') + p.label, bold: live, dimColor: !live },
+    { text: turns, dimColor: true },
+  ]
+}
+
+function phaseCollapsed(Box, Text, width, p, id, last) {
+  const tools = toolTotals(p)
+  return [line(Box, Text, 'phase-' + id, [
+    ...phaseHead(p, false, last),
+    tools && { text: ' · ' + tools, dimColor: true },
+    p.agents.length > 0 && { text: ' · ' + p.agents.length + (p.agents.length === 1 ? ' agent' : ' agents'), dimColor: true },
+    p.errors > 0 && { text: ' ✗' + p.errors, color: 'red', dimColor: true },
+  ], width)]
+}
+
+// A phase with its tool runs (the newest MAX_TOOL_ROWS) and subagents under it.
+function phaseExpanded(Box, Text, width, p, id, live, last) {
+  const stem = last ? '  ' : '│ '
+  const rows = [line(Box, Text, 'phase-' + id, phaseHead(p, live, last), width)]
+  const runs = p.runs.slice(-MAX_TOOL_ROWS)
+  const hidden = p.runs.length - runs.length
+  const items = []
+  if (hidden > 0) items.push({ key: 'more', segs: [{ text: '… ' + hidden + ' earlier', dimColor: true }] })
+  runs.forEach((run, i) => items.push({ key: 'tool-' + i, segs: runSegs(run) }))
+  const pad = Math.min(16, Math.max(0, ...p.agents.map((a) => String(a.type || a.name || 'agent').length)))
+  p.agents.forEach((a, i) => {
+    const st = AGENT_STATUS[a.status] || { text: a.status || '', dimColor: true }
+    items.push({ key: 'agent-' + i, agent: true, segs: [
+      { text: String(a.type || a.name || 'agent').padEnd(pad) },
+      a.turns != null && { text: ' · ' + a.turns + (a.turns === 1 ? ' turn' : ' turns'), dimColor: true },
+      st.text && { text: ' · ', dimColor: true },
+      st.text && { text: st.text, color: st.color, dimColor: st.dimColor },
+    ] })
+  })
+  items.forEach((it, i) => {
+    const end = i === items.length - 1
+    const glyph = it.agent ? (end ? '└─↳ ' : '├─↳ ') : end ? '└ ' : '├ '
+    rows.push(line(Box, Text, 'phase-' + id + '-' + it.key, [{ text: stem + glyph, dimColor: true }, ...it.segs], width))
   })
   return rows
 }
 
-// The goal as root, then as many of the newest phases as fit in `budget` rows.
+// The goal as root, then the newest phases: the live one always expanded, older
+// ones collapsed (oldest first) and then dropped when they don't fit `budget`.
 function flowTree(Box, Text, width, r, budget) {
   const phases = phasesOf(r.turns)
   if (!phases.length) return []
   const root = line(Box, Text, 'root', [{ text: '◆ ' + (r.goal || 'session'), bold: true }], width)
-  const blocks = []
-  let used = 1
-  for (let i = phases.length - 1; i >= 0 && blocks.length < MAX_PHASES; i--) {
-    const rows = phaseRows(Box, Text, width, phases[i], i, i === phases.length - 1)
-    const cutRow = i > 0 ? 1 : 0
-    if (blocks.length && used + rows.length + cutRow > budget) break
-    blocks.unshift(blocks.length ? rows : rows.slice(0, Math.max(1, budget - 1 - cutRow)))
-    used += blocks[0].length
+  const lastI = phases.length - 1
+  let from = Math.max(0, phases.length - MAX_PHASES)
+  const expanded = phases.map((p, i) => phaseExpanded(Box, Text, width, p, i, i === lastI, i === lastI))
+  const collapsed = phases.map((p, i) => phaseCollapsed(Box, Text, width, p, i, i === lastI))
+  const live = expanded[lastI].slice(0, Math.max(1, budget - 1))
+  const pick = (fromI, foldBelow) => {
+    const blocks = []
+    for (let i = fromI; i < lastI; i++) blocks.push(i < foldBelow ? collapsed[i] : expanded[i])
+    blocks.push(live)
+    return blocks
   }
-  const cut = phases.length - blocks.length
+  const size = (blocks, fromI) => 1 + (fromI > 0 ? 1 : 0) + blocks.reduce((n, b) => n + b.length, 0)
+  let fold = from
+  let blocks = pick(from, fold)
+  while (size(blocks, from) > budget && fold < lastI) blocks = pick(from, ++fold)
+  while (size(blocks, from) > budget && from < lastI) blocks = pick(++from, lastI)
   const out = [root]
-  if (cut > 0) out.push(line(Box, Text, 'cut', [{ text: '┊ +' + cut + ' earlier phase' + (cut === 1 ? '' : 's'), dimColor: true }], width))
-  for (const rows of blocks) out.push(...rows)
+  if (from > 0) out.push(line(Box, Text, 'cut', [{ text: '… ' + from + ' earlier phase' + (from === 1 ? '' : 's'), dimColor: true }], width))
+  for (const b of blocks) out.push(...b)
   return out
-}
-
-function badges(Box, Text, width, flags) {
-  const rows = []
-  let segs = []
-  let used = 0
-  const flush = () => {
-    if (segs.length) rows.push(line(Box, Text, 'flags-' + rows.length, segs, width))
-    segs = []
-    used = 0
-  }
-  for (const f of flags) {
-    const text = ' ⚠ ' + f.text + ' '
-    if (used > 0 && used + 1 + text.length > width) flush()
-    if (used > 0) segs.push({ text: ' ' }), (used += 1)
-    segs.push({ text, color: 'yellow', inverse: true, bold: true })
-    used += text.length
-  }
-  flush()
-  return rows
 }
 
 // payload.agents not already drawn under the phase that launched them
@@ -388,62 +419,68 @@ function unplacedAgents(r) {
 
 function drawRemote(Box, Text, width) {
   const r = remote
-  const top = [header(Box, Text, width, 'tokenscope', r.status, r.elapsed_s != null ? fmtElapsed(r.elapsed_s) : '')]
-  const parts = ['CW ' + fmtTokens(r.cw)]
-  if (typeof r.cost_usd === 'number') parts.push('$' + r.cost_usd.toFixed(2))
-  if (r.ctx_tokens != null) parts.push('ctx ' + fmtTokens(r.ctx_tokens))
-  if (r.turnCount != null) parts.push(r.turnCount + ' turns')
-  if (r.errors > 0) parts.push(r.errors + ' ✗')
-  top.push(...metrics(Box, Text, width, parts.join(' · '), r.series))
-  top.push(...gauge(Box, Text, width, r.ctx_tokens))
-  const bottom = badges(Box, Text, width, r.flags)
-  unplacedAgents(r).forEach((s, i) => {
-    const turns = ' · ' + (s.turns || 0) + ' turns'
-    bottom.push(line(Box, Text, 'agent-' + i, [
-      { text: '↳ ' + (s.name || s.type || 'agent') + ' ', dimColor: true },
-      { text: s.status || '', color: s.status === 'running' ? 'green' : 'gray' },
-      { text: turns, dimColor: true },
-    ], width))
-  })
+  const top = [header(Box, Text, width, 'tokenscope', r.status, r.elapsed_s != null ? fmtDur(r.elapsed_s) : '')]
+  top.push(row(Box, Text, 'asked', 'ASKED', [
+    { text: r.goal || '(no prompt yet)', bold: !!r.goal, dimColor: !r.goal },
+    r.goalSource === 'haiku' && { text: ' (haiku)', dimColor: true },
+  ], width))
+  if (r.latest) top.push(row(Box, Text, 'latest', '', [{ text: '↳ now: ' + r.latest }], width))
+  top.push(row(Box, Text, 'now', 'NOW', nowSegs(r), width))
+  if (r.tests) top.push(row(Box, Text, 'tests', 'TESTS', testSegs(r.tests), width))
+  const files = filesText(r)
+  if (files) top.push(row(Box, Text, 'files', 'FILES', [{ text: files }], width))
+  top.push(row(Box, Text, 'cost', 'COST', costSegs(width, r.cw, r.cost_usd, r.ctx_tokens, r.series), width))
+  if (r.turns.length) top.push(line(Box, Text, 'flow', [{ text: '── flow ──', dimColor: true }], width))
+
+  const bottom = unplacedAgents(r).map((s, i) => line(Box, Text, 'agent-' + i, [
+    { text: '↳ ' + (s.name || s.type || 'agent'), dimColor: true },
+    { text: ' · ' + (s.turns || 0) + ' turns · ', dimColor: true },
+    { text: s.status || '', color: s.status === 'running' ? 'green' : undefined, dimColor: s.status !== 'running' },
+  ], width))
+  r.warnings.forEach((w, i) => bottom.push(line(Box, Text, 'warn-' + i, [
+    { text: '⚠ ' + w.text, color: 'yellow', bold: true },
+    w.hint && { text: ' — ' + w.hint, color: 'yellow' },
+  ], width)))
   const tree = flowTree(Box, Text, width, r, Math.max(3, MAX_ROWS - top.length - bottom.length))
   return [...top, ...tree, ...bottom].slice(0, MAX_ROWS)
 }
 
 function drawLocal(Box, Text, width) {
-  const elapsed = local.startMs != null ? fmtElapsed((local.nowMs - local.startMs) / 1000) : ''
+  const elapsed = local.startMs != null ? fmtDur((local.nowMs - local.startMs) / 1000) : ''
   const rows = [header(Box, Text, width, 'tokenscope · local', local.working ? 'working' : 'idle', elapsed)]
-  const text = 'CW ' + fmtTokens(local.cw) + ' · ctx ' + fmtTokens(local.ctx) + ' · ' + local.turns + ' turns · ' + local.calls + ' calls'
-  rows.push(...metrics(Box, Text, width, text, local.series))
-  if (local.ctx > 0) rows.push(...gauge(Box, Text, width, local.ctx))
+  const last = local.recent[local.recent.length - 1]
+  rows.push(row(Box, Text, 'now', 'NOW', local.working && last ? [{ text: '▶ ' + last, bold: true }] : [{ text: '◼ idle', dimColor: true }], width))
+  rows.push(row(Box, Text, 'cost', 'COST', costSegs(width, local.cw, null, local.ctx > 0 ? local.ctx : null, local.series), width))
   const top = Object.entries(local.tools)
     .sort((a, b) => b[1] - a[1])
     .slice(0, 6)
     .map(([name, n]) => name + ' ×' + n)
     .join(' · ')
-  if (top) rows.push(line(Box, Text, 'tools', [{ text: top }], width))
+  if (top) rows.push(row(Box, Text, 'tools', 'TOOLS', [{ text: top }], width))
+  rows.push(row(Box, Text, 'turns', '', [{ text: local.turns + ' turns · ' + local.calls + ' calls', dimColor: true }], width))
   if (local.recent.length > 0) {
     rows.push(line(Box, Text, 'recent', [{ text: 'recent: ' + local.recent.slice().reverse().join(', '), dimColor: true }], width))
   }
-  rows.push(line(Box, Text, 'hint', [{ text: 'start `tokenscope live` for the flow tree and flags', dimColor: true }], width))
+  rows.push(line(Box, Text, 'hint', [{ text: 'start `tokenscope live` for the goal and the flow', dimColor: true }], width))
   return rows
 }
 
-function summaryLine() {
-  if (remote) {
-    const parts = ['CW ' + fmtTokens(remote.cw)]
-    if (typeof remote.cost_usd === 'number') parts.push('$' + remote.cost_usd.toFixed(2))
-    if (remote.ctx_tokens != null) parts.push('ctx ' + fmtTokens(remote.ctx_tokens))
-    return parts.join(' · ')
-  }
-  return 'CW ' + fmtTokens(local.cw) + ' · ctx ' + fmtTokens(local.ctx) + ' · ' + local.turns + ' turns · ' + local.calls + ' calls'
+function bandText() {
+  if (!remote) return 'tokenscope (local) · ' + fmtTokens(local.cw) + ' CW · ' + local.turns + ' turns · ' + local.calls + ' calls'
+  const r = remote
+  const now = r.status === 'waiting' ? '◼ waiting for you' : nowSegs(r)[0].text
+  const parts = ['◆ ' + (r.goal || 'session'), now, fmtTokens(r.cw) + ' CW']
+  if (typeof r.cost_usd === 'number') parts.push('$' + r.cost_usd.toFixed(2))
+  return parts.join(' · ') + (r.warnings.length ? ' · ⚠' : '')
 }
 
 // --- polling and redraws ---------------------------------------------------
 
-function toastNewFlags($, flags) {
-  const fresh = seenFlags ? flags.filter((f) => !seenFlags.has(f.key)) : []
-  seenFlags = new Set(flags.map((f) => f.key))
-  if (fresh.length) $.ui.toast(fresh.map((f) => '⚠ ' + f.text).join('  '))
+function toastNewWarnings($, warnings) {
+  const fresh = seenRules ? warnings.filter((w) => !seenRules.has(w.rule)) : []
+  if (!seenRules) seenRules = new Set()
+  for (const w of warnings) seenRules.add(w.rule)
+  if (fresh.length) $.ui.toast(fresh.map((w) => '⚠ ' + w.text).join('  '))
 }
 
 async function poll($) {
@@ -471,7 +508,7 @@ async function poll($) {
   if (text !== remoteText) {
     remote = next ? normalize(next) : null
     remoteText = text
-    if (remote) toastNewFlags($, remote.flags)
+    if (remote) toastNewWarnings($, remote.warnings)
     dirty = true
   }
   if (!remote) {
@@ -497,7 +534,7 @@ export function register(onEvent) {
     timers.forEach((t) => t.cancel())
     remote = null
     remoteText = ''
-    seenFlags = null
+    seenRules = null
     local.startMs = local.nowMs = await $.clock.now()
     timers = [$.clock.every(POLL_MS, () => poll($)), $.clock.every(FLUSH_MS, () => flush($))]
     void poll($)
@@ -564,7 +601,6 @@ export function register(onEvent) {
     if ((await $.env.get('TOKENSCOPE_LIVE_BAND')) !== '1' || e.props.hasSurvey) return next(e)
     const { Text } = $.ui.resolve(e)
     const width = Math.max(10, e.props.bodyColumns || 40)
-    const lead = remote ? (remote.goal || 'session') + ' · ' : 'tokenscope (local) · '
-    return Text({ dimColor: true, wrap: 'truncate-end', children: [fit(lead + summaryLine(), width)] })
+    return Text({ dimColor: true, wrap: 'truncate-end', children: [fit(bandText(), width)] })
   })
 }

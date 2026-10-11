@@ -111,6 +111,15 @@ def keyword_name(text, redact=False):
     return name
 
 
+HAIKU_MAX_LEN = 60
+
+
+def _clip(name, n):
+    """Cut at a word boundary with an ellipsis (never mid-word)."""
+    name = " ".join(str(name).split())
+    return name if len(name) <= n else name[:n - 1].rsplit(" ", 1)[0].rstrip(" ,;:-") + "…"
+
+
 HAIKU_PROMPT = ("Name the goal of this coding-assistant request in 3-7 words. Reply with the name only.\n\n"
                 "Request: %s")
 
@@ -124,7 +133,7 @@ def haiku_name(text, timeout=30, runner=subprocess.run):
             return None
         out = json.loads(p.stdout)
         name = str(out.get("result") if isinstance(out, dict) else out).strip().strip('"').splitlines()[0]
-        return name[:MAX_LEN] if name else None
+        return _clip(name, HAIKU_MAX_LEN) if name else None
     except Exception:  # noqa: BLE001 - naming must never break the tailer
         return None
 

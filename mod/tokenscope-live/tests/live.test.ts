@@ -13,28 +13,34 @@ const SESSION = { cwd: '/tmp', surface: null, isInteractive: true }
 
 const COMPACT = {
   // shape of GET /api/session/<id>/compact (docs/live-spec.md)
-  goal: 'Fix invoice rounding',
+  goal: 'Fix: failing tests in invoice',
   status: 'working',
-  cw: 412_000,
-  usd: 1.23,
-  context_tokens: 84_000,
-  elapsed_s: 151,
-  turns: 23,
-  tool_calls: 31,
-  errors: 4,
-  current_intent: 'test',
+  cw: 182_000,
+  usd: 0.41,
+  context_tokens: 68_000,
+  elapsed_s: 192,
+  turns: 9,
+  tool_calls: 14,
+  errors: 1,
+  current_intent: 'run_tests',
+  asked: { goal: 'Fix: failing tests in invoice', source: 'keyword', prompt_n: 2, latest: 'also check tax rounding', latest_ts: 1 },
+  now: { intent: 'run_tests', label: 'running tests', group: 'verify', tool: 'Bash run_tests.sh', target: 'run_tests.sh', since_s: 4, status: 'working' },
+  tests: { passed: 12, failed: 0, ok: true, runs: 3, last_ts: 1, trend: [4, 2, 0] },
+  files_edited: ['invoice.py', 'money.py', 'tax.py'],
+  files_edited_n: 3,
+  warnings: [],
   recent: [
-    { intent: 'read_code', group: 'investigate', cw: 40_000, tools: ['Read', 'Grep'], tool_err: [false, false], err: false },
-    { intent: 'read_code', group: 'investigate', cw: 80_000, tools: ['Read', 'Read'], tool_err: [false, false], err: false },
-    { intent: 'edit', group: 'change', cw: 18_000, tools: ['Edit'], tool_err: [false], err: false },
-    { intent: 'test', group: 'verify', cw: 15_000, tools: ['Bash run_tests.sh'], tool_err: [true], err: true },
-    { intent: 'test', group: 'verify', cw: 15_000, tools: ['Bash run_tests.sh'], tool_err: [true], err: true },
-    { intent: 'edit', group: 'change', cw: 0, tools: ['Edit'], tool_err: [false], err: false },
+    { intent: 'read_code', group: 'investigate', label: 'reading code', cw: 40_000, tools: ['Read', 'Read'], targets: ['money.py', 'tax.py'], tool_err: [false, false], err: false },
+    { intent: 'read_code', group: 'investigate', label: 'reading code', cw: 80_000, tools: ['Read', 'Read', 'Grep', 'Grep'], targets: ['money.py', 'tax.py', 'round', 'Decimal'], tool_err: [false, false, false, false], err: false },
+    { intent: 'search_code', group: 'investigate', label: 'searching code', cw: 8_000, tools: [], targets: [], tool_err: [], err: false },
+    { intent: 'edit', group: 'change', label: 'editing files', cw: 18_000, tools: ['Edit'], targets: ['money.py'], tool_err: [false], err: false },
+    { intent: 'run_tests', group: 'verify', label: 'running tests', cw: 15_000, tools: ['Bash run_tests.sh'], targets: ['run_tests.sh'], tool_err: [true], err: true },
   ],
   cw_series: [12_000, 9_000, 30_000, 18_000, 15_000, 15_000, 20_000, 8_000],
-  flags: [{ flag: 'reread_file', count: 2, detail: '.py ×3' }],
-  agents: [{ type: 'Explore', status: 'running', turns: 5 }],
+  agents: [],
 }
+
+const WARNING = { rule: 'stuck_error', text: 'same error ×3, no edits since', hint: 'try a different approach', count: 3, ts: 1 }
 
 const OLD_SHAPE = {
   goal: { name: 'Fix login bug', source: 'keyword' },
@@ -81,10 +87,13 @@ describe('tokenscope-live', () => {
 
     const ui = await $.ui.mount({ plugin: 'tokenscope-live', surface: 'terminal', component: 'Pane', requestId: 'tokenscope-live', props: PANE_PROPS })
     expect(await ui.find({ type: 'Text', text: /^tokenscope · local$/ })).toBeDefined()
-    expect(await ui.find({ type: 'Text', text: /^○ idle$/ })).toBeDefined()
-    expect(await ui.find({ type: 'Text', text: /^ {2}1:0[56]$/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /^ {2}● idle$/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /^ {2}1m0[56]s$/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /^◼ idle$/ })).toBeDefined()
     // CW per turn = 1000 + 1.25*2000 + 0.1*10000 + 5*100 = 5000
-    expect(await ui.find({ type: 'Text', text: /^CW 10k · ctx 13k · 2 turns · 3 calls$/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /^10k CW$/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /^7%$/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /^2 turns · 3 calls$/ })).toBeDefined()
     // cumulative 5k, 10k: one braille char, left column 2 dots, right column 4
     expect(await ui.find({ type: 'Text', text: /^\u28fc$/ })).toBeDefined()
     expect(await ui.find({ type: 'Text', text: 'Bash ×2 · Read ×1' })).toBeDefined()
@@ -92,125 +101,178 @@ describe('tokenscope-live', () => {
     expect(await ui.find({ type: 'Text', text: /tokenscope live/ })).toBeDefined()
   })
 
-  test('pane draws header, metrics, gauge, flow tree, flags and subagents', async ($: any, on: any) => {
+  test('pane draws ASKED, NOW, TESTS, FILES, COST and the flow tree', async ($: any, on: any) => {
     const clock = base(on, { TOKENSCOPE_LIVE_URL: 'http://127.0.0.1:9999' })
     const urls: string[] = []
     on('http.fetch', (_$: any, e: any) => {
       urls.push(e.url)
       return { value: { status: 200, ok: true, headers: {}, text: JSON.stringify(COMPACT) } }
     })
-
     await $.session.start(SESSION)
     await clock.advance(1000)
     const ui = await $.ui.mount({ plugin: 'tokenscope-live', surface: 'terminal', component: 'Pane', requestId: 'tokenscope-live', props: { ...PANE_PROPS, bodyColumns: 70 } })
     expect(urls[0]).toBe('http://127.0.0.1:9999/api/session/sess-1/compact')
-    // the header no longer carries the goal; it is the flow tree's root, once
     expect(await ui.find({ type: 'Text', text: /^tokenscope$/ })).toBeDefined()
-    expect(await ui.findAll({ type: 'Text', text: /Fix invoice rounding/ })).toHaveLength(1)
-    expect(await ui.find({ type: 'Text', text: /^● working$/ })).toBeDefined()
-    expect(await ui.find({ type: 'Text', text: /^ {2}2:31$/ })).toBeDefined()
-    expect(await ui.find({ type: 'Text', text: /^CW 412k · \$1\.23 · ctx 84k · 23 turns · 4 ✗$/ })).toBeDefined()
-    // 8 turns -> 4 braille chars of cumulative CW
-    const spark = await ui.findAll({ type: 'Text', text: /^[\u2800-\u28ff]+$/ })
-    expect(spark).toHaveLength(1)
-    expect(await ui.find({ type: 'Text', text: /^[\u2800-\u28ff]{4}$/ })).toBeDefined()
-    expect(await ui.find({ type: 'Text', text: /^42%$/ })).toBeDefined()
-    expect(await ui.find({ type: 'Text', text: /^█{10}$/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /^ {2}● working$/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /^ {2}3m12s$/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /^ASKED {2}$/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /^Fix: failing tests in invoice$/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /haiku/ })).toBeUndefined()
+    expect(await ui.find({ type: 'Text', text: /^↳ now: also check tax rounding$/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /^NOW {4}$/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /^▶ running tests$/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /^ · run_tests\.sh$/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /^ · 4s$/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /^TESTS {2}$/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /^✗4$/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /^✗2$/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /^✓ 12 passed$/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /^edited 3: invoice\.py, money\.py, tax\.py$/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /^COST {3}$/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /^[⠀-⣿]{4}$/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /^182k CW · \$0\.41$/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /^34%$/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /^── flow ──$/ })).toBeDefined()
 
-    // flow tree: investigate(2) -> change -> verify(2) -> change (now)
-    expect(await ui.find({ type: 'Text', text: /^◆ Fix invoice rounding$/ })).toBeDefined()
-    expect(await ui.find({ type: 'Text', text: /retry/ })).toBeUndefined()
-    const labels = await ui.findAll({ type: 'Text', text: /^(INVESTIGATE|CHANGE|VERIFY)$/ })
-    expect(labels).toHaveLength(4)
-    expect(await ui.find({ type: 'Text', text: /^ · 2 turns · 120k$/ })).toBeDefined()
-    expect(await ui.find({ type: 'Text', text: /^Read ×3$/ })).toBeDefined()
-    expect(await ui.find({ type: 'Text', text: /^ · Grep$/ })).toBeDefined()
-    expect(await ui.find({ type: 'Text', text: /^ · 2 turns · 30k$/ })).toBeDefined()
-    expect(await ui.find({ type: 'Text', text: /^Bash run_tests\.sh ×2$/ })).toBeDefined()
-    expect(await ui.find({ type: 'Text', text: /^ ✗2$/ })).toBeDefined()
-    expect(await ui.find({ type: 'Text', text: /^└─ $/ })).toBeDefined()
-    expect(await ui.find({ type: 'Text', text: /^ · 1 turn$/ })).toBeDefined()
-    expect(await ui.find({ type: 'Text', text: /^ {2}◀ now$/ })).toBeDefined()
-    expect(await ui.find({ type: 'Text', text: /earlier phase/ })).toBeUndefined()
-
-    expect(await ui.find({ type: 'Text', text: /^ ⚠ re-read file · \.py ×3 $/ })).toBeDefined()
-    expect(await ui.find({ type: 'Text', text: /^↳ Explore $/ })).toBeDefined()
-    expect(await ui.find({ type: 'Text', text: /^running$/ })).toBeDefined()
-    expect(await ui.find({ type: 'Text', text: /^ · 5 turns$/ })).toBeDefined()
+    // flow: INVESTIGATE (3 turns, dominant "reading code") -> CHANGE -> VERIFY (live)
+    expect(await ui.find({ type: 'Text', text: /^◆ Fix: failing tests in invoice$/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /^INVESTIGATE$/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /^ · reading code$/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /^ · 3 turns$/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /^│ ├ $/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /^ money\.py, tax\.py$/ })).toBeDefined()
+    expect(await ui.findAll({ type: 'Text', text: /^ ×4$/ })).toHaveLength(1)
+    expect(await ui.find({ type: 'Text', text: /^ round, Decimal$/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /^ · editing files$/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /^└ $/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /^ · ▶ running tests$/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /^ {2}└ $/ })).toBeDefined()
+    // the Bash target is already in its label; the error is a dim ✗1, nothing louder
+    expect(await ui.find({ type: 'Text', text: /^Bash run_tests\.sh$/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /^ ✗1$/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /retry|↺/ })).toBeUndefined()
+    // zero warnings: no ⚠ anywhere
+    expect(await ui.find({ type: 'Text', text: /⚠/ })).toBeUndefined()
   })
 
-  test('subagents hang under the phase that launched them; VERIFY ✗ → CHANGE → VERIFY is a retry', async ($: any, on: any) => {
+  test('waiting and idle states; haiku goal; one prompt has no latest row; no tests, no files', async ($: any, on: any) => {
+    const clock = base(on)
+    let payload: any = { ...COMPACT, status: 'waiting', asked: { goal: 'Tidy the README', source: 'haiku', prompt_n: 1, latest: null }, tests: null, files_edited: [], files_edited_n: 0 }
+    on('http.fetch', () => ({ value: { status: 200, ok: true, headers: {}, text: JSON.stringify(payload) } }))
+    await $.session.start(SESSION)
+    await clock.advance(1000)
+    let ui = await $.ui.mount({ plugin: 'tokenscope-live', surface: 'terminal', component: 'Pane', requestId: 'tokenscope-live', props: { ...PANE_PROPS, bodyColumns: 70 } })
+    expect(await ui.find({ type: 'Text', text: /^ {2}● waiting for you$/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /^◼ done, waiting for you$/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /^ \(haiku\)$/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /↳ now/ })).toBeUndefined()
+    expect(await ui.find({ type: 'Text', text: /^TESTS/ })).toBeUndefined()
+    expect(await ui.find({ type: 'Text', text: /^FILES/ })).toBeUndefined()
+
+    payload = { ...COMPACT, status: 'idle', files_edited: undefined, files_edited_n: 5 }
+    await clock.advance(1000)
+    await ui.unmount()
+    ui = await $.ui.mount({ plugin: 'tokenscope-live', surface: 'terminal', component: 'Pane', requestId: 'tokenscope-live', props: PANE_PROPS })
+    expect(await ui.find({ type: 'Text', text: /^ {2}● idle$/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /^◼ idle$/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /^edited 5 files$/ })).toBeDefined()
+  })
+
+  test('a warning renders one line with its hint; a new rule toasts once', async ($: any, on: any) => {
+    const clock = base(on)
+    let payload: any = COMPACT
+    const toasts: string[] = []
+    let redraws = 0
+    on('http.fetch', () => ({ value: { status: 200, ok: true, headers: {}, text: JSON.stringify(payload) } }))
+    on('ui.toast', (_$: any, e: any) => { toasts.push(e.text); return { value: undefined } })
+    on('ui.invalidate', () => { redraws += 1; return { value: undefined } })
+    await $.session.start(SESSION)
+    await clock.advance(1000)
+    const before = redraws
+    await clock.advance(3000)
+    expect(redraws).toBe(before) // unchanged payloads do not redraw
+
+    payload = { ...COMPACT, warnings: [WARNING] }
+    await clock.advance(1000)
+    await clock.advance(1000)
+    expect(toasts).toEqual(['⚠ same error ×3, no edits since'])
+    expect(redraws).toBe(before + 1)
+    payload = { ...COMPACT, warnings: [{ ...WARNING, count: 4 }] }
+    await clock.advance(1000)
+    expect(toasts).toHaveLength(1) // same rule: no second toast
+    const ui = await $.ui.mount({ plugin: 'tokenscope-live', surface: 'terminal', component: 'Pane', requestId: 'tokenscope-live', props: { ...PANE_PROPS, bodyColumns: 70 } })
+    expect(await ui.find({ type: 'Text', text: /^⚠ same error ×3, no edits since$/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /^ — try a different approach$/ })).toBeDefined()
+    expect(await ui.findAll({ type: 'Text', text: /⚠/ })).toHaveLength(1)
+  })
+
+  test('subagents hang under the phase that launched them', async ($: any, on: any) => {
     const clock = base(on)
     const payload = {
       goal: 'Fix invoice rounding', status: 'working',
       recent: [
-        { group: 'investigate', cw: 9_000, tools: ['Read', 'Read', 'Grep'] },
-        { group: 'delegate', cw: 11_000, tools: ['Agent', 'Agent'], agents: [
-          { type: 'Explore', status: 'running', turns: 5, cw: 40_000 },
+        { group: 'investigate', label: 'reading code', tools: ['Read', 'Read', 'Grep'] },
+        { group: 'delegate', label: 'delegating', tools: ['Agent(Explore)', 'Agent(general-purpose)'], agents: [
+          { type: 'Explore', status: 'running', turns: 6, cw: 40_000 },
           { type: 'general-purpose', status: 'done', turns: 3, cw: 22_000 },
         ] },
-        { group: 'verify', cw: 5_000, tools: ['Bash run_tests.sh'], tool_err: [true], err: true },
-        { group: 'change', cw: 4_000, tools: ['Edit'] },
-        { group: 'verify', cw: 5_000, tools: ['Bash run_tests.sh'], tool_err: [true], err: true },
-        { group: 'change', cw: 4_000, tools: ['Edit'] },
-        { group: 'verify', cw: 5_000, tools: ['Bash run_tests.sh'] },
+        { group: 'verify', label: 'running tests', tools: ['Bash run_tests.sh'] },
       ],
-      agents: [{ type: 'Explore', status: 'running', turns: 5 }, { type: 'general-purpose', status: 'done', turns: 3 }],
+      agents: [{ type: 'Explore', status: 'running', turns: 6 }, { type: 'general-purpose', status: 'done', turns: 3 }],
     }
     on('http.fetch', () => ({ value: { status: 200, ok: true, headers: {}, text: JSON.stringify(payload) } }))
     await $.session.start(SESSION)
     await clock.advance(1000)
     const ui = await $.ui.mount({ plugin: 'tokenscope-live', surface: 'terminal', component: 'Pane', requestId: 'tokenscope-live', props: { ...PANE_PROPS, bodyColumns: 70 } })
-    // DELEGATE: tools first (├ since agents follow), then one sub-branch per agent
-    expect(await ui.find({ type: 'Text', text: /^│ {2}├ $/ })).toBeDefined()
-    expect(await ui.find({ type: 'Text', text: /^Agent ×2$/ })).toBeDefined()
-    expect(await ui.find({ type: 'Text', text: /^│ {2}├─↳ $/ })).toBeDefined()
-    expect(await ui.find({ type: 'Text', text: /^Explore {9}$/ })).toBeDefined()
-    expect(await ui.find({ type: 'Text', text: /^● running$/ })).toBeDefined()
-    expect(await ui.find({ type: 'Text', text: /^ · 5 turns · 40k$/ })).toBeDefined()
-    expect(await ui.find({ type: 'Text', text: /^│ {2}└─↳ $/ })).toBeDefined()
-    expect(await ui.find({ type: 'Text', text: /^general-purpose $/ })).toBeDefined()
-    expect(await ui.find({ type: 'Text', text: /^✓ done$/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /^Agent\(Explore\)$/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /^│ ├─↳ $/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /^Explore {8}$/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /^ · 6 turns$/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /^running$/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /^│ └─↳ $/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /^general-purpose$/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /^done$/ })).toBeDefined()
     // all payload agents are in the tree: no separate rows at the bottom
     expect(await ui.find({ type: 'Text', text: /^↳ / })).toBeUndefined()
-    // second and third VERIFY are retries; the tool that failed again is marked
-    expect(await ui.findAll({ type: 'Text', text: /^↺ $/ })).toHaveLength(2)
-    expect(await ui.find({ type: 'Text', text: /^ retry 1$/ })).toBeDefined()
-    expect(await ui.find({ type: 'Text', text: /^ retry 2$/ })).toBeDefined()
-    expect(await ui.findAll({ type: 'Text', text: /^ ↺$/ })).toHaveLength(1)
-    // CHANGE after VERIFY ✗ is not itself a retry
-    expect(await ui.findAll({ type: 'Text', text: /retry/ })).toHaveLength(2)
   })
 
-  test('the pane stays within 38 rows; many tool groups go one per line', async ($: any, on: any) => {
+  test('phases group by intent group and are named by their dominant intent (ties -> latest)', async ($: any, on: any) => {
     const clock = base(on)
-    const groups = ['investigate', 'change', 'verify', 'plan', 'research', 'ship', 'delegate', 'change']
+    const payload = {
+      goal: 'g', status: 'working',
+      recent: [
+        { group: 'change', label: 'editing files', tools: ['Edit'] },
+        { group: 'change', label: 'writing files', tools: ['Write'] },
+        { group: 'verify', label: 'linting', tools: ['Bash ruff'] },
+      ],
+    }
+    on('http.fetch', () => ({ value: { status: 200, ok: true, headers: {}, text: JSON.stringify(payload) } }))
+    await $.session.start(SESSION)
+    await clock.advance(1000)
+    const ui = await $.ui.mount({ plugin: 'tokenscope-live', surface: 'terminal', component: 'Pane', requestId: 'tokenscope-live', props: { ...PANE_PROPS, bodyColumns: 70 } })
+    expect(await ui.findAll({ type: 'Text', text: /^(CHANGE|VERIFY)$/ })).toHaveLength(2)
+    expect(await ui.find({ type: 'Text', text: /^ · writing files$/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /^ · ▶ linting$/ })).toBeDefined()
+  })
+
+  test('older phases collapse to one line, then the oldest drop; the pane stays within 38 rows', async ($: any, on: any) => {
+    const clock = base(on)
+    const groups = ['investigate', 'change', 'verify', 'plan', 'research', 'ship', 'delegate', 'wait', 'other', 'change', 'verify', 'investigate', 'change']
     const tools = ['Read', 'Grep', 'Glob', 'WebFetch', 'Bash some-long-command.sh', 'Edit']
-    const agents = [{ type: 'Explore', status: 'running', turns: 1 }, { type: 'Plan', status: 'starting' }]
-    const payload = { goal: 'g', recent: groups.map(group => ({ group, tools, agents, cw: 1000 })) }
+    const payload = { goal: 'g', status: 'working', recent: groups.map(group => ({ group, label: group + 'ing', tools, targets: ['a', 'b', 'c', 'd', 'e', 'f'] })) }
     on('http.fetch', () => ({ value: { status: 200, ok: true, headers: {}, text: JSON.stringify(payload) } }))
     await $.session.start(SESSION)
     await clock.advance(1000)
     const ui = await $.ui.mount({ plugin: 'tokenscope-live', surface: 'terminal', component: 'Pane', requestId: 'tokenscope-live', props: PANE_PROPS })
     const boxes = await ui.findAll({ type: 'Box' })
     expect(boxes.length - 1).toBeLessThanOrEqual(38)
-    expect(await ui.find({ type: 'Text', text: /^┊ \+\d+ earlier phases$/ })).toBeDefined()
-    expect(await ui.find({ type: 'Text', text: /^ {3}├ \+3 more$/ })).toBeDefined()
-    expect(await ui.find({ type: 'Text', text: /^ {3}└─↳ $/ })).toBeDefined()
-    expect(await ui.find({ type: 'Text', text: /^○ starting$/ })).toBeDefined()
-  })
-
-  test('older phases fold into a "+N earlier" row', async ($: any, on: any) => {
-    const clock = base(on)
-    const groups = ['investigate', 'change', 'verify', 'plan', 'research', 'ship', 'delegate', 'wait', 'other', 'change']
-    const payload = { goal: 'g', recent: groups.map(group => ({ group, tools: ['Read'], cw: 1000 })) }
-    on('http.fetch', () => ({ value: { status: 200, ok: true, headers: {}, text: JSON.stringify(payload) } }))
-    await $.session.start(SESSION)
-    await clock.advance(1000)
-    const ui = await $.ui.mount({ plugin: 'tokenscope-live', surface: 'terminal', component: 'Pane', requestId: 'tokenscope-live', props: PANE_PROPS })
-    expect(await ui.find({ type: 'Text', text: /^┊ \+2 earlier phases$/ })).toBeDefined()
-    expect(await ui.find({ type: 'Text', text: /^INVESTIGATE$/ })).toBeUndefined()
-    expect(await ui.findAll({ type: 'Text', text: /^(├─|└─) $/ })).toHaveLength(8)
+    expect(await ui.find({ type: 'Text', text: /^… \d+ earlier phases$/ })).toBeDefined()
+    // collapsed: tool totals on the phase line
+    expect(await ui.find({ type: 'Text', text: /^ · Read Grep Glob WebFetch/ })).toBeDefined()
+    // the live phase is expanded: its newest 4 runs and a "… 2 earlier" row
+    expect(await ui.find({ type: 'Text', text: /^ · ▶ changeing$/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /^… 2 earlier$/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /^ {2}└ $/ })).toBeDefined()
   })
 
   test('the old payload shape still draws', async ($: any, on: any) => {
@@ -219,35 +281,12 @@ describe('tokenscope-live', () => {
     await $.session.start(SESSION)
     await clock.advance(1000)
     const ui = await $.ui.mount({ plugin: 'tokenscope-live', surface: 'terminal', component: 'Pane', requestId: 'tokenscope-live', props: PANE_PROPS })
+    expect(await ui.find({ type: 'Text', text: /^Fix login bug$/ })).toBeDefined()
     expect(await ui.find({ type: 'Text', text: /^◆ Fix login bug$/ })).toBeDefined()
-    expect(await ui.find({ type: 'Text', text: /^○ idle$/ })).toBeDefined()
-    expect(await ui.find({ type: 'Text', text: /^CW 1\.2M · \$3\.10 · ctx 160k · 1 ✗$/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /^ {2}● idle$/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /^1\.2M CW · \$3\.10$/ })).toBeDefined()
     expect(await ui.find({ type: 'Text', text: /^80%$/ })).toBeDefined()
     expect(await ui.find({ type: 'Text', text: /^VERIFY$/ })).toBeDefined()
-  })
-
-  test('a new flag toasts once; unchanged payloads do not redraw', async ($: any, on: any) => {
-    const clock = base(on)
-    let payload: any = COMPACT
-    const toasts: string[] = []
-    let redraws = 0
-    on('http.fetch', () => ({ value: { status: 200, ok: true, headers: {}, text: JSON.stringify(payload) } }))
-    on('ui.toast', (_$: any, e: any) => { toasts.push(e.text); return { value: undefined } })
-    on('ui.invalidate', (_$: any, e: any) => { redraws += 1; return { value: undefined } })
-    await $.session.start(SESSION)
-    await clock.advance(1000)
-    expect(toasts).toHaveLength(0) // flags already there at the first payload only seed
-    const before = redraws
-    await clock.advance(3000)
-    expect(redraws).toBe(before)
-
-    payload = { ...COMPACT, flags: [...COMPACT.flags, { flag: 'dead_tool', count: 1, detail: 'Bash run_tests.sh ×3' }] }
-    await clock.advance(1000)
-    await clock.advance(1000)
-    expect(toasts).toEqual(['⚠ dead tool · Bash run_tests.sh ×3'])
-    expect(redraws).toBe(before + 1)
-    const ui = await $.ui.mount({ plugin: 'tokenscope-live', surface: 'terminal', component: 'Pane', requestId: 'tokenscope-live', props: PANE_PROPS })
-    expect(await ui.find({ type: 'Text', text: /^ ⚠ dead tool · Bash run_tests\.sh ×3 $/ })).toBeDefined()
   })
 
   test('a burst of tool calls is coalesced into few redraws', async ($: any, on: any) => {
@@ -285,6 +324,21 @@ describe('tokenscope-live', () => {
       props: { hasSurvey: false, isWorking: false, maxRows: 5, bodyColumns: 80, scroll: { offset: 0, bodyRows: 5 }, view: {} },
     })
     expect(await band.find({ text: /tokenscope \(local\)/ })).toBeDefined()
+  })
+
+  test('band shows goal, current intent and cost; ⚠ only with warnings', async ($: any, on: any) => {
+    const clock = base(on, { TOKENSCOPE_LIVE_BAND: '1' })
+    let payload: any = COMPACT
+    on('http.fetch', () => ({ value: { status: 200, ok: true, headers: {}, text: JSON.stringify(payload) } }))
+    await $.session.start(SESSION)
+    await clock.advance(1000)
+    const props = { hasSurvey: false, isWorking: true, maxRows: 5, bodyColumns: 100, scroll: { offset: 0, bodyRows: 5 }, view: {} }
+    let band = await $.ui.mount({ plugin: 'tokenscope-live', surface: 'terminal', component: 'AbovePrompt', props })
+    expect(await band.find({ text: '◆ Fix: failing tests in invoice · ▶ running tests · 182k CW · $0.41' })).toBeDefined()
+    payload = { ...COMPACT, warnings: [WARNING] }
+    await clock.advance(1000)
+    band = await $.ui.mount({ plugin: 'tokenscope-live', surface: 'terminal', component: 'AbovePrompt', props })
+    expect(await band.find({ text: /\$0\.41 · ⚠$/ })).toBeDefined()
   })
 
   test('band is left to the engine when not enabled', async ($: any, on: any) => {
