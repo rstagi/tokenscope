@@ -30,7 +30,7 @@ let timers = []
 let seenRules = null
 
 // Local fallback counters
-const local = { tools: {}, recent: [], calls: 0, turns: 0, cw: 0, ctx: 0, turnCw: 0, series: [], working: false, startMs: null, nowMs: 0 }
+const local = { tools: {}, recent: [], calls: 0, turns: 0, cw: 0, ctx: 0, turnCw: 0, series: [], working: false, startMs: null, nowMs: 0, live: null }
 
 const GROUP_COLORS = {
   investigate: 'blue',
@@ -130,6 +130,7 @@ function normalize(d) {
     cost_usd: typeof d.usd === 'number' ? d.usd : d.cost_usd,
     ctx_tokens: d.context_tokens != null ? d.context_tokens : d.ctx_tokens,
     elapsed_s: d.elapsed_s,
+    toolCalls: typeof d.tool_calls === 'number' ? d.tool_calls : null,
     turns,
     series,
     warnings: (Array.isArray(d.warnings) ? d.warnings : [])
@@ -266,7 +267,46 @@ function costSegs(width, cw, usd, ctx, series) {
   return segs
 }
 
+// The transcript (and so the server) can trail the terminal by a few seconds: Claude Code writes a turn's
+// tool_use lines in batches. The mod sees each tool call in-process the moment it starts, so when it has seen
+// more calls than the server reports, NOW shows that live call instead.
+const LIVE_LABELS = {
+  Read: ['reading code', 'investigate'], Grep: ['searching the code', 'investigate'], Glob: ['searching the code', 'investigate'],
+  LS: ['searching the code', 'investigate'], Edit: ['editing files', 'change'], MultiEdit: ['editing files', 'change'],
+  Write: ['editing files', 'change'], NotebookEdit: ['editing files', 'change'], WebFetch: ['researching the web', 'research'],
+  WebSearch: ['researching the web', 'research'], Agent: ['delegating to a subagent', 'delegate'],
+  Task: ['delegating to a subagent', 'delegate'], Skill: ['using a skill', 'delegate'], TodoWrite: ['planning', 'plan'],
+}
+
+function liveTarget(ev) {
+  const e = ev && ev.input && typeof ev.input === 'object' ? ev.input : ev
+  const f = e && (e.file_path || e.notebook_path || e.path)
+  if (typeof f === 'string' && f) return f.split('/').filter(Boolean).pop() || f
+  if (e && typeof e.command === 'string') {
+    const w = e.command.trim().split(/\s+/)
+    const prog = (w[0] || '').split('/').pop()
+    if (/^python[\d.]*$/.test(prog) && w[1] === '-m' && w[2]) return w[2]
+    return ['git', 'npm', 'pnpm', 'yarn', 'cargo', 'go', 'make', 'uv', 'docker'].includes(prog) && w[1] ? prog + ' ' + w[1] : prog
+  }
+  if (e && typeof e.subagent_type === 'string') return e.subagent_type
+  if (e && typeof e.pattern === 'string') return e.pattern.slice(0, 24)
+  return null
+}
+
+function liveNow(r) {
+  const l = local.live
+  if (!l || r.toolCalls == null || l.calls <= r.toolCalls) return null
+  let [label, group] = LIVE_LABELS[l.tool] || (l.tool.startsWith('mcp__') ? ['calling ' + l.tool.split('__')[1], 'research'] : ['running a command', 'verify'])
+  if (l.tool === 'Bash' && /test|pytest|unittest|jest|vitest/i.test(l.target || '')) label = 'running tests'
+  return [
+    { text: '▶ ' + label, color: GROUP_COLORS[group], bold: true },
+    l.target && { text: ' · ' + l.target },
+  ]
+}
+
 function nowSegs(r) {
+  const live = liveNow(r)
+  if (live) return live
   if (r.status === 'waiting') return [{ text: '◼ done, waiting for you', color: 'yellow' }]
   if (r.status === 'idle') return [{ text: '◼ idle', dimColor: true }]
   const n = r.now
@@ -539,6 +579,8 @@ export function register(onEvent) {
     remote = null
     remoteText = ''
     seenRules = null
+    local.calls = 0
+    local.live = null   // tool calls are matched against this session's server-side count
     local.startMs = local.nowMs = await $.clock.now()
     timers = [$.clock.every(POLL_MS, () => poll($)), $.clock.every(FLUSH_MS, () => flush($))]
     void poll($)
@@ -564,7 +606,8 @@ export function register(onEvent) {
     local.calls += 1
     local.working = true
     local.recent = [...local.recent, name].slice(-12)
-    if (!remote) dirty = true
+    local.live = { tool: name, target: liveTarget(e), calls: local.calls }
+    dirty = true
     return next(e)
   }).catch(async ($, e, next) => next(e)) // counting must never block a tool call
 

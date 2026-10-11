@@ -289,6 +289,25 @@ describe('tokenscope-live', () => {
     expect(await ui.find({ type: 'Text', text: /^VERIFY$/ })).toBeDefined()
   })
 
+  test('NOW follows a tool call the transcript has not caught up with yet', async ($: any, on: any) => {
+    const clock = base(on)
+    on('http.fetch', () => ({ value: { status: 200, ok: true, headers: {}, text: JSON.stringify({ ...COMPACT, tool_calls: 2 }) } }))
+    on('tool.call', () => ({ result: 'ok' }))
+    await $.session.start(SESSION)
+    await clock.advance(1000)
+    await $.tool.call({ tool: 'Read', tool_use_id: 'a', input: { file_path: '/r/money.py' } })
+    await $.tool.call({ tool: 'Edit', tool_use_id: 'b', input: { file_path: '/r/money.py' } })
+    await clock.advance(1000)
+    let ui = await $.ui.mount({ plugin: 'tokenscope-live', surface: 'terminal', component: 'Pane', requestId: 'tokenscope-live', props: PANE_PROPS })
+    expect(await ui.find({ type: 'Text', text: /^▶ running tests$/ })).toBeDefined()   // server already has both calls
+    await $.tool.call({ tool: 'Write', tool_use_id: 'c', input: { file_path: '/r/textkit/stats.py' } })
+    await clock.advance(1000)
+    await ui.unmount()
+    ui = await $.ui.mount({ plugin: 'tokenscope-live', surface: 'terminal', component: 'Pane', requestId: 'tokenscope-live', props: PANE_PROPS })
+    expect(await ui.find({ type: 'Text', text: /^▶ editing files$/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /stats\.py/ })).toBeDefined()
+  })
+
   test('a burst of tool calls is coalesced into few redraws', async ($: any, on: any) => {
     const clock = base(on)
     let redraws = 0
