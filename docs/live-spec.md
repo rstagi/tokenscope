@@ -11,7 +11,7 @@ machine where Claude Code writes transcripts.
     tokenscope/redact.py           redaction helpers (final_pass etc.)
     tokenscope/live/__init__.py
     tokenscope/live/tail.py        incremental transcript tailer
-    tokenscope/live/state.py       per-session live model + pattern flags
+    tokenscope/live/state.py       per-session live model + warning rules
     tokenscope/live/goalname.py    goal name from the first prompt (keyword heuristic; optional Haiku)
     tokenscope/live/hookevents.py  reads hook events written by the hook script (optional source)
     tokenscope/live/hook.py        the hook script: stdin JSON -> one line appended to the events file
@@ -60,7 +60,7 @@ Each line is an event dict with `type` in user / assistant / system / attachment
 ## Live session model (state.py)
 
 Session: id, project (cwd basename; redacted -> `project-A`, `project-B` … stable per run), file path, started,
-last_event_ts, model, goal {name, source: "keyword"|"haiku", prompt_chars}, prompts (list of {ts, chars, text?}),
+last_event_ts, model, goal {name, source: "keyword"|"haiku", prompt_chars}, prompts (list of {ts, chars, name, source, text?}),
 steps (ordered), agents (subagent branches: {id, type, description, tool_use_id, steps, cw, usd, status}),
 totals {cw, usd, input, cache_write, cache_read, output, turns, tool_calls, errors}, context_tokens (last main
 request: input + cache_write + cache_read), status, flags.
@@ -77,21 +77,30 @@ Steps (append-only list per session or per agent branch), each with monotonicall
 - `{"k":"fanout","ts","tool_use_id","agent_type","description"(redacted: omitted),"agent_id"}` emitted for an
   Agent/Task tool_use; the subagent's own steps live in `agents[agent_id].steps` once its transcript appears.
 - `{"k":"compact","ts"}`
-- `{"k":"flag","ts","flag","detail"}` when a pattern flag first fires (also kept in session.flags).
+- `{"k":"flag","ts","flag","rule","detail","text","hint"}` when a warning first fires (also kept in
+  session.warnings; `flag` = `rule`, `detail` = `text`, for compatibility).
 CW per assistant message = input + 1.25*cache_write + 0.1*cache_read + 5*output (use pricing.W_*). $ = API
 list-price equivalent from pricing.price_of(model) (None -> 0 and count as unpriced). Subagent usage counts into
 the session totals and the agent's own totals.
 
-Pattern flags (live; each fires once per session per key and stays listed with a count):
-- `retry_loop`: >= 3 consecutive turns with the same intent where each turn had a tool error.
-- `same_intent_after_error`: after an errored turn, the next turn repeats the same intent; flag when this
-  happens >= 3 times in a session (detail = count).
-- `browser_loop`: >= 10 consecutive turns with intent browse_ui.
-- `reread_file`: the same file path read (Read tool, or Bash pager on a file) >= 3 times in one session/agent
-  with no Edit/Write to it in between (detail = basename, count).
-- `dead_tool`: the same tool label failed >= 3 times in a session with no success of that label in between.
-- `context_large`: context_tokens >= 150_000 (detail = tokens); configurable via --context-warn.
-- `compaction`: a compaction happened.
+Warnings (live; rare by design: a normal sequential bug-fix session -- test fails, edit, test fails differently,
+edit, ..., green -- produces none). Payload shape: `warnings: [{"rule","text","hint","count","ts"}]`; the old
+`flags: [{"flag","count","detail"}]` key is kept as an alias. `count` = number of episodes (firings) in the session.
+- `stuck_error`: the same normalised error repeats on >= 3 failed tool results with no file edit in between
+  (Edit/Write/MultiEdit/NotebookEdit, or any tool whose intent is `edit`), per thread (main and each subagent).
+  Only the first + last 400 chars of a result are kept; normalising strips ANSI, lowercases, replaces timestamps,
+  paths, hex ids, durations, line:col and numbers with placeholders; the signature is the last 1-2 error-ish lines
+  (error|exception|failed|denied|not found|traceback|...), else the last line. Text "same error ×N, no edits
+  since"; hint "try a different approach (read the error, change the code or the command)".
+- `reread_loop`: the same file read in full (Read without offset/limit, or `cat <file>`) >= 4 times in one thread
+  with no edit to that file and no compaction in between. Text "re-read <basename> ×N" (redacted: extension);
+  hint "it is already in context; reference it or read only the lines you need".
+- `browser_loop`: >= 20 consecutive browse_ui turns. Hint "script the flow or check the selector/page state".
+- `context_near_full`: context_tokens >= 85% of the window (1_000_000 when the model id contains "[1m]" or the
+  session ever exceeded 200k, else 200_000). Text "context 91% full"; hint "/compact or start a fresh session
+  with a summary". Live: it disappears again when the context drops (e.g. after a compaction).
+A compaction is a timeline / tree event, not a warning. `tools/eval_warnings.py --root DIR [--limit N] [--show]`
+replays a transcripts tree offline through the same code and prints how often each rule fires.
 Keep each rule a small pure function with unit tests.
 
 Status (per session): `working` if the last event is a user prompt / tool_result / assistant tool_use, or a hook
@@ -100,7 +109,10 @@ if a Notification hook (permission prompt / idle prompt) is newer than the last 
 assistant message has stop_reason end_turn and the session is < 30 min old; `idle` otherwise (> 30 min since
 last activity, or SessionEnd). Document the heuristic in the README; hooks make it exact.
 
-Goal naming (goalname.py): from the first real prompt. Keyword heuristic: lowercase, drop stopwords and filler
+Goal naming (goalname.py): from the first real prompt (every later prompt gets a keyword name too). The
+imperative clause is used: the first sentence starting with a verb (after filler), else the first non-context
+sentence with a verb (context sentences like "The test suite is red." / "You are ..." are skipped). Keyword
+heuristic: lowercase, drop stopwords and filler
 ("please", "can you", "i want", "let's" …), detect a verb class (fix/debug -> "Fix", add/build/implement/create ->
 "Build", refactor/clean -> "Refactor", test -> "Test", review/check/audit -> "Review", explain/what/how/why ->
 "Explain", write/draft -> "Write", deploy/release -> "Ship", research/find/compare -> "Research", else "Work on"),
@@ -109,7 +121,8 @@ file names, CamelCase, snake_case). Result like "Fix: checkout total tax" (<= 48
 paths, emails, URLs, long numbers, hex ids and capitalised proper-noun-looking words before naming (reuse
 tokenscope.redact helpers if suitable). `--haiku` (off by default): after the heuristic, call
 `claude -p --model haiku --tools "" --output-format json` with ONLY the masked first 240 chars, asking for a 3-7
-word goal name; cached per session in memory; 30 s timeout; never blocks the tailer (background thread);
+word goal name; cached per session in memory (later prompts: per (session, prompt n), keyword name until it
+arrives); 30 s timeout; never blocks the tailer (background thread);
 failures keep the heuristic name.
 
 ## Server (server.py)
@@ -118,13 +131,20 @@ ThreadingHTTPServer bound to 127.0.0.1 by default. Background thread runs the ta
 - `GET /` -> static/board.html; `GET /s/<session_id>` -> static/session.html; `GET /static/<file>`.
 - `GET /api/board` -> {"now", "redacted": bool, "sessions":[{"id","short","project","goal","status",
   "current_intent","current_group","last_step":{"label","ts","err"},"started","last_ts","elapsed_s","cw","usd",
-  "turns","tool_calls","errors","agents_running","agents_total","context_tokens","flags":[{"flag","count"}],
+  "turns","tool_calls","errors","agents_running","agents_total","context_tokens","flags":[{"flag","count"}],"warnings":[...],
   "intent_mix":[[group,cw],...]}]} sorted by last_ts desc; sessions idle for more than 6 h dropped.
 - `GET /api/session/<id>` -> full session model (as above, steps of main + agents), plus "seq" (max).
 - `GET /api/session/<id>?since=<seq>` -> only steps with seq > since (+ totals, status, flags, agents summary).
 - `GET /api/session/<id>/compact` -> small payload for the Claude Code mod: {"goal","status","cw","usd","elapsed_s","turns","tool_calls","errors","cw_series" (CW per main turn, last 120),
-  "context_tokens","current_intent","flags":[...], "recent":[last 12 turn steps as {"intent","group","tools":
-  ["label",...],"err"}], "agents":[{"type","status","turns"}]}.
+  "context_tokens","current_intent","warnings":[{"rule","text","hint","count","ts"}],"flags":[alias],
+  "asked":{"goal","source","prompt_n","latest" (keyword/Haiku name of the latest prompt when prompt_n > 1),"latest_ts"},
+  "now":{"intent","label" (human words, intents.LABELS),"group","tool","target","since_s" (current phase = trailing
+  run of same-group main turns),"status"} or null,
+  "tests": null or {"passed","failed","ok","runs","last_ts","trend":[failed of the last 8 runs]} (test-runner results
+  parsed with understand.parse_test_output; an unparsable failed run -> passed/failed null, ok false),
+  "files_edited":[basenames] (unredacted only), "files_edited_n",
+  "recent":[last 60 main turn steps as {"intent","group","label","cw","tools":["label",...],"targets":[...],
+  "tool_err","agents","err"}], "agents":[{"type","status","turns"}]}.
 - `GET /events` -> Server-Sent Events: `event: board` every 1 s when anything changed (same JSON as /api/board),
   and `event: step` {"session","step"} for every new step (so a live view can append without polling).
   Heartbeat comment every 15 s.

@@ -17,6 +17,22 @@ GROUP = {  # coarse phase each intent belongs to
     "edit": "change", "setup": "change", "external_write": "change", "test": "verify", "run_build": "verify",
     "browse_ui": "verify", "commit_pr": "ship", "delegate": "delegate", "use_skill": "delegate", "wait": "wait",
     "report": "report", "communicate": "report", "plan": "plan", "coordinate": "plan", "shell_other": "other", "respond": "respond"}
+LABELS = {  # human words for the live view
+    "locate": "searching the code", "read_code": "reading code", "read_docs": "reading docs", "edit": "editing files",
+    "test": "running tests", "run_build": "running a build/command", "compute": "running a script",
+    "review_changes": "checking git state", "commit_pr": "committing / PR", "setup": "setting up",
+    "delegate": "delegating to a subagent", "research": "researching the web", "browse_ui": "driving the browser",
+    "query_data": "querying data", "external_write": "writing to an external service",
+    "gather_context": "gathering context", "discover_tools": "looking up tools", "use_skill": "using a skill",
+    "plan": "planning", "wait": "waiting", "communicate": "asking you", "report": "reporting",
+    "shell_other": "running a shell command", "coordinate": "coordinating"}
+
+
+def label(intent):
+    """Human label of an intent ("editing files"); unknown -> the intent with _ -> space."""
+    return LABELS.get(intent) or (str(intent).replace("_", " ") if intent else None)
+
+
 DOC_EXT = {".md", ".mdx", ".txt", ".rst", ".pdf", ".png", ".jpg", ".jpeg", ".csv", ".log", ".html"}
 HARNESS = set(os.environ.get("TOKENSCOPE_HARNESS_CLIS", "").split(",")) - {""}  # CLIs of an agent harness -> "coordinate"
 FILTERS = {"head", "tail", "cut", "sort", "uniq", "wc", "tr", "column", "grep", "egrep", "awk", "sed", "jq", "xargs", "cat", "nl", "less", "rg", "date", "sleep", "echo", "printf", "true"}
@@ -163,7 +179,7 @@ def turns(tools):
 
 def turn_intent(ts):
     its = [tool_intent(t) for t in ts]
-    return min(its, key=RANK.get), its
+    return (min(its, key=RANK.get) if its else "shell_other"), its
 
 
 def record(name, inp):

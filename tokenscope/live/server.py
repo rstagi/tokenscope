@@ -23,7 +23,7 @@ from urllib.parse import parse_qs, urlparse
 from ..parse import resolve_root
 from .goalname import HaikuNamer
 from .hookevents import HookEvents
-from .state import CONTEXT_WARN, LiveState
+from .state import LiveState
 from .tail import Tailer
 
 STATIC = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
@@ -34,20 +34,26 @@ HEARTBEAT_S = 15
 class Live:
     """Tailer + hook events + state behind one lock, plus SSE subscriber queues."""
 
-    def __init__(self, root, redact=True, since_minutes=120, context_warn=CONTEXT_WARN, haiku=False,
+    def __init__(self, root, redact=True, since_minutes=120, haiku=False,
                  events_path=None, hooks=True, project="*"):
         self.lock = threading.Lock()
         self.namer = HaikuNamer(self._named) if haiku else None
-        self.state = LiveState(redact=redact, context_warn=context_warn,
-                               on_goal=self.namer.request if self.namer else None)
+        self.state = LiveState(redact=redact, on_goal=self.namer.request if self.namer else None,
+                               on_prompt=self._name_prompt if self.namer else None)
         self.tailer = Tailer(root, since_minutes=since_minutes, project=project)
         self.hooks = HookEvents(events_path) if hooks else None
         self.subscribers = []
         self.stop = threading.Event()
 
-    def _named(self, sid, name):
+    def _name_prompt(self, sid, n, text):
+        self.namer.request((sid, n), text)   # cached per (session, prompt n); keyword name until it arrives
+
+    def _named(self, key, name):
         with self.lock:
-            self.state.set_goal(sid, name, "haiku")
+            if isinstance(key, tuple):
+                self.state.set_prompt_name(key[0], key[1], name, "haiku")
+            else:
+                self.state.set_goal(key, name, "haiku")
 
     def poll_once(self):
         """One tail step: ingest new transcript lines and hook events, fan new steps out to subscribers."""
@@ -218,8 +224,6 @@ def add_arguments(p):
                    help="only watch project dirs matching this glob, e.g. '*myrepo*' (default: all)")
     p.add_argument("--since-minutes", type=int, default=120,
                    help="at startup, track transcripts modified within this many minutes (default 120)")
-    p.add_argument("--context-warn", type=int, default=CONTEXT_WARN,
-                   help="context_large flag threshold in tokens (default %d)" % CONTEXT_WARN)
     return p
 
 
@@ -229,7 +233,7 @@ def main(args=None):
         args = add_arguments(argparse.ArgumentParser(prog="tokenscope live")).parse_args(args)
     ensure_static()
     live = Live(resolve_root(getattr(args, "root", None)), redact=not args.no_redact,
-                since_minutes=args.since_minutes, project=args.project, context_warn=args.context_warn, haiku=args.haiku)
+                since_minutes=args.since_minutes, project=args.project, haiku=args.haiku)
     srv = make_server(live, args.host, args.port)
     threading.Thread(target=live.run, daemon=True).start()
     print("tokenscope live: http://%s:%d/  (redaction %s; Ctrl-C to stop)" % (

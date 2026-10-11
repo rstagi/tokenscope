@@ -54,22 +54,57 @@ def mask(text):
     return PROPER_RE.sub("…", s)
 
 
-def keyword_name(text, redact=False):
-    """Heuristic goal name, e.g. "Fix: checkout total tax"."""
-    s = mask(text) if redact else str(text or "")
-    s = FILLER.sub(" ", s.replace("\n", " "))
-    words = WORD_RE.findall(s)
-    verb = next((VERB_OF[w.lower()] for w in words if w.lower() in VERB_OF), "Work on")
+SENT_RE = re.compile(r"(?<=[.!?])\s+|\n+")
+CONTEXT_RE = re.compile(r"^(you are|you're|i am|i'm|we are|we're|this is|there is|there are|it is|it's|"
+                        r"context|background|note)\b|^(the|this|our|my)\b.*\b(is|are|was|were|has|have)\b", re.I)
+
+
+def main_clause(text):
+    """The imperative sentence of a prompt: the first one starting with a verb (after filler), else the first one
+    with a verb that is not a context sentence ("The test suite is red.", "You are ..."), else the whole text."""
+    sents = [x.strip() for x in SENT_RE.split(str(text or "")) if x.strip()]
+    for x in sents:
+        w = WORD_RE.findall(FILLER.sub(" ", x))
+        if w and w[0].lower() in VERB_OF:
+            return x
+    for x in sents:
+        if not CONTEXT_RE.search(x) and any(w.lower() in VERB_OF for w in WORD_RE.findall(x)):
+            return x
+    return str(text or "")
+
+
+NOUNISH = frozenset({"bug", "broken", "crash", "error", "failing", "new", "test", "tests", "testing", "coverage", "docs",
+                     "what", "how", "why", "look", "support", "make"})   # verb-class words that are rarely the ask
+
+
+def _keywords(words, skip):
     cands = []
     for i, w in enumerate(words):
         lw = w.lower()
-        if lw in STOPWORDS or lw in VERB_OF or len(w) < 3 or w.isdigit():
+        if i == skip or lw in STOPWORDS or len(w) < 3 or w.isdigit():
             continue
         if lw in (c[2].lower() for c in cands):
             continue
         cands.append((0 if CODEISH_RE.search(w) else 1, i, w))
     best = sorted(cands)[:4]
-    kws = [w if CODEISH_RE.search(w) else w.lower() for _, _, w in sorted(best, key=lambda c: c[1])]
+    return [w if CODEISH_RE.search(w) else w.lower() for _, _, w in sorted(best, key=lambda c: c[1])]
+
+
+def keyword_name(text, redact=False):
+    """Heuristic goal name, e.g. "Fix: checkout total tax" (imperative clause first, code identifiers kept)."""
+    full = FILLER.sub(" ", (mask(text) if redact else str(text or "")).replace("\n", " "))
+    words = WORD_RE.findall(FILLER.sub(" ", main_clause(mask(text) if redact else str(text or ""))))
+    verbs = [i for i, w in enumerate(words) if w.lower() in VERB_OF]
+    pick = next((i for i in verbs if words[i].lower() not in NOUNISH), verbs[0] if verbs else None)
+    if pick is None:   # no verb in the clause: look at the whole prompt
+        words = WORD_RE.findall(full)
+        verbs = [i for i, w in enumerate(words) if w.lower() in VERB_OF]
+        pick = next((i for i in verbs if words[i].lower() not in NOUNISH), verbs[0] if verbs else None)
+    verb = VERB_OF[words[pick].lower()] if pick is not None else "Work on"
+    kws = _keywords(words, pick)
+    if len(kws) < 2:   # e.g. "Can you debug why?" after a context sentence
+        extra = [k for k in _keywords(WORD_RE.findall(full), None) if k.lower() not in VERB_OF and k not in kws]
+        kws = (kws + extra)[:4]
     name = ("%s: %s" % (verb, " ".join(kws))) if kws else verb
     if len(name) > MAX_LEN:
         name = name[:MAX_LEN - 1].rsplit(" ", 1)[0] + "…"
@@ -95,18 +130,18 @@ def haiku_name(text, timeout=30, runner=subprocess.run):
 
 
 class HaikuNamer:
-    """Background Haiku naming: cached per session; calls `done(session_id, name)` when a name arrives."""
+    """Background Haiku naming: cached per key (session id, or (session id, prompt n)); calls `done(key, name)`."""
 
     def __init__(self, done, namer=haiku_name):
         self.done, self.namer = done, namer
         self.cache, self.lock = {}, threading.Lock()
 
-    def request(self, session_id, text):
+    def request(self, key, text):
         with self.lock:
-            if session_id in self.cache:
+            if key in self.cache:
                 return
-            self.cache[session_id] = None
-        threading.Thread(target=self._run, args=(session_id, text), daemon=True).start()
+            self.cache[key] = None
+        threading.Thread(target=self._run, args=(key, text), daemon=True).start()
 
     def _run(self, session_id, text):
         name = self.namer(text)

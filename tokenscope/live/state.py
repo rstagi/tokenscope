@@ -26,10 +26,10 @@ from urllib.parse import urlparse
 
 from .. import intents, pricing
 from ..parse import real_prompt_text
+from ..understand import parse_test_output, test_runner
 from ..redact import Redactor
 from . import goalname
 
-CONTEXT_WARN = 150_000
 WORKING_S = 90
 WAITING_S = 30 * 60
 REASON_TEXT_CHARS = 160
@@ -47,63 +47,135 @@ def parse_ts(s):
         return None
 
 
-# ---------------------------------------------------------------- pattern rules (small pure functions)
+# ---------------------------------------------------------------- warning rules (small pure functions)
 
-def retry_loop(turns, n=3):
-    """Number of runs of >= n consecutive turns with the same intent where every turn had a tool error.
-    turns: [(intent, had_error)]."""
-    runs, cur, prev = 0, 0, None
-    for intent, err in turns:
-        cur = cur + 1 if err and intent == prev and cur else (1 if err else 0)
-        prev = intent
-        if cur == n:
-            runs += 1
-    return runs
+STUCK_N = 3
+REREAD_N = 4
+BROWSER_N = 20
+CONTEXT_PCT = 0.85
+EDIT_TOOLS = ("Edit", "Write", "MultiEdit", "NotebookEdit")
+READONLY_INTENTS = {"locate", "read_code", "read_docs", "review_changes", "research", "gather_context",
+                    "discover_tools", "plan", "wait", "communicate", "report", "query_data"}
+BROWSER_ERR_N = 5   # a long browser run is only a loop when it keeps failing
+HINTS = {
+    "stuck_error": "try a different approach (read the error, change the code or the command)",
+    "reread_loop": "it is already in context; reference it or read only the lines you need",
+    "browser_loop": "script the flow or check the selector/page state",
+    "context_near_full": "/compact or start a fresh session with a summary",
+}
+KEEP_CHARS = 400   # a tool result is kept as its first + last KEEP_CHARS chars only
+ANSI_RE = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]")
+NORMS = [
+    (re.compile(r"\d{4}-\d\d-\d\d[t ]\d\d:\d\d(:\d\d)?(\.\d+)?z?|\b\d\d:\d\d:\d\d(\.\d+)?\b"), "<ts>"),
+    # paths stay literal: the same error on a different file is exploration, not a stuck loop
+    (re.compile(r"\b0x[0-9a-f]+\b|\b[0-9a-f]{7,}\b"), "<hex>"),
+    (re.compile(r"\b\d+(?:\.\d+)?\s?(?:ms|s|sec|seconds|m|min|minutes)\b"), "<dur>"),
+    (re.compile(r":\d+(?::\d+)?\b"), ":<n>"),
+    (re.compile(r"\b\d+(?:\.\d+)?\b"), "<n>"),
+]
+ERRISH_RE = re.compile(r"error|exception|failed|failure|denied|not found|no such|traceback|refused|timed out|fatal|"
+                       r"cannot|can't|invalid|panic")
 
 
-def same_intent_after_error(turns):
-    """How often a turn repeated the intent of the errored turn right before it."""
-    return sum(1 for a, b in zip(turns, turns[1:]) if a[1] and b[0] == a[0])
+def keep_ends(text, n=KEEP_CHARS):
+    """First + last n chars of a tool result (never keep the full text)."""
+    text = str(text or "")
+    return text if len(text) <= 2 * n else text[:n] + "\n" + text[-n:]
 
 
-def browser_loop(intents_seq, n=10):
-    """Number of runs of >= n consecutive browse_ui turns."""
-    runs = cur = 0
-    for it in intents_seq:
-        cur = cur + 1 if it == "browse_ui" else 0
-        if cur == n:
-            runs += 1
-    return runs
+def normalise(line):
+    s = ANSI_RE.sub("", line).lower()
+    for rx, rep in NORMS:
+        s = rx.sub(rep, s)
+    return " ".join(s.split())
 
 
-def reread_files(file_events, n=3):
-    """{path: reads} for files read >= n times with no Edit/Write in between. file_events: [("read"|"write", path)]."""
-    count, out = {}, {}
-    for kind, path in file_events:
-        if kind == "write":
-            count[path] = 0
+MSG_RE = re.compile(r'\\*"(?:message|error|detail)\\*"\s*:\s*\\*"((?:[^"\\]|\\[^"])+)')
+
+
+def error_signature(text):
+    """Signature of the last error-ish line(s) of a failed tool result (normalised), or None.
+    JSON-ish errors (MCP / API bodies) are reduced to their message fields, so two different messages wrapped in
+    the same envelope do not look like the same error."""
+    text = str(text or "")
+    msgs = [m for m in MSG_RE.findall(text) if m.strip()]
+    if msgs:
+        return normalise(" | ".join(msgs[-2:]))[:200]
+    lines = [normalise(x) for x in ANSI_RE.sub("", text).splitlines()]
+    lines = [x for x in lines if x.strip("<>n:. ")]
+    if not lines:
+        return None
+    errish = [x for x in lines if ERRISH_RE.search(x)]
+    if errish and len(lines) - len(errish) >= 3 and len(errish) < 0.3 * len(lines):
+        return None   # mostly useful output with an incidental error line (e.g. a trailing shell warning): not stuck
+    return " | ".join(errish[-2:] if errish else lines[-1:])[:200]
+
+
+def stuck_errors(events, n=STUCK_N):
+    """Episodes [(signature, repeats)] where one error signature repeated >= n times with no edit in between.
+    events: [("edit", None) | ("err", signature)] in thread order."""
+    counts, eps, cur = {}, [], {}
+    for kind, sig in events:
+        if kind == "edit":
+            counts, cur = {}, {}
             continue
-        count[path] = count.get(path, 0) + 1
-        if count[path] >= n:
-            out[path] = max(out.get(path, 0), count[path])
-    return out
+        if not sig:
+            continue
+        counts[sig] = counts.get(sig, 0) + 1
+        if counts[sig] == n:
+            cur[sig] = len(eps)
+            eps.append([sig, n])
+        elif counts[sig] > n:
+            eps[cur[sig]][1] = counts[sig]
+    return [tuple(e) for e in eps]
 
 
-def dead_tools(results, n=3):
-    """{label: failures} for tool labels that failed >= n times with no success in between. results: [(label, err)]."""
-    streak, out = {}, {}
-    for label, err in results:
-        if err:
-            streak[label] = streak.get(label, 0) + 1
-            if streak[label] >= n:
-                out[label] = max(out.get(label, 0), streak[label])
-        elif err is False:
-            streak[label] = 0
-    return out
+def reread_loops(events, n=REREAD_N):
+    """Episodes [(path, reads)] of a file read in full >= n times with no edit to it and no compaction in between.
+    events: [("read", path) | ("edit", path) | ("compact", None) | ("mutate", None)]; "mutate" = any tool call
+    that may change files (a build, a test run, a script, a shell command), so the next read may see new content."""
+    counts, eps, cur = {}, [], {}
+    for kind, path in events:
+        if kind in ("compact", "mutate"):
+            counts, cur = {}, {}
+        elif kind == "edit":
+            counts.pop(path, None)
+            cur.pop(path, None)
+        elif kind == "read":
+            counts[path] = counts.get(path, 0) + 1
+            if counts[path] == n:
+                cur[path] = len(eps)
+                eps.append([path, n])
+            elif counts[path] > n:
+                eps[cur[path]][1] = counts[path]
+    return [tuple(e) for e in eps]
 
 
-def context_large(tokens, warn=CONTEXT_WARN):
-    return bool(tokens and tokens >= warn)
+def browser_loops(turns, n=BROWSER_N, min_err=BROWSER_ERR_N):
+    """Run lengths of >= n consecutive browse_ui turns of which >= min_err had a tool error.
+    turns: [(intent, err)] (a bare intent string counts as err=False)."""
+    runs, cur, errs = [], 0, 0
+    for t in list(turns) + [(None, False)]:
+        it, err = t if isinstance(t, tuple) else (t, False)
+        if it == "browse_ui":
+            cur += 1
+            errs += bool(err)
+            continue
+        if cur >= n and errs >= min_err:
+            runs.append(cur)
+        cur, errs = 0, 0
+    return runs
+
+
+def context_window(model, max_seen=0):
+    return 1_000_000 if "[1m]" in str(model or "") or (max_seen or 0) > 200_000 else 200_000
+
+
+def context_near_full(tokens, window, pct=CONTEXT_PCT):
+    """Percent full when tokens >= pct of the window, else None."""
+    if not tokens or not window or tokens < pct * window:
+        return None
+    return int(round(100.0 * tokens / window))
 
 
 def status_of(now, last_ts, last_kind, last_active_ts=None, hook=None):
@@ -173,6 +245,15 @@ def tool_target(name, inp, rec, redact):
     return None
 
 
+def _full_read(name, inp, rec):
+    """Read without offset/limit, or a plain `cat <file>`."""
+    if name == "Read":
+        inp = inp if isinstance(inp, dict) else {}
+        return inp.get("offset") is None and inp.get("limit") is None
+    w = (rec.get("cmd") or "").split()
+    return name == "Bash" and len(w) == 2 and w[0] == "cat"
+
+
 def _usage(msg):
     u = msg.get("usage") if isinstance(msg.get("usage"), dict) else {}
     g = lambda k: int(u.get(k) or 0)  # noqa: E731
@@ -185,11 +266,11 @@ def _new_totals():
             "tool_calls": 0, "errors": 0, "unpriced": 0}
 
 
-def _result_text(b):
+def _result_text(b, n=200):
     c = b.get("content")
     if isinstance(c, list):
-        c = " ".join(str(x.get("text", "")) for x in c if isinstance(x, dict))
-    return str(c or "")[:200]
+        c = "\n".join(str(x.get("text", "")) for x in c if isinstance(x, dict))
+    return keep_ends(c, n)
 
 
 class Branch:
@@ -197,8 +278,9 @@ class Branch:
 
     def __init__(self):
         self.steps = []
-        self.turn_steps = []      # turn steps in order (intent + err feed retry/same-intent/browser rules)
-        self.file_events = []     # ("read"|"write", path)
+        self.turn_steps = []      # turn steps in order (intents feed browser_loop)
+        self.err_events = []      # ("edit", None) | ("err", signature) -> stuck_error
+        self.file_events = []     # ("read", path) full reads | ("edit", path) | ("compact", None) -> reread_loop
         self.msgs = {}            # message.id -> {"usage", "cw", "usd", "priced", "step"}
 
 
@@ -220,10 +302,13 @@ class Session:
         self.branches = {}
         self.fanouts = {}         # tool_use_id -> fanout step
         self.tools = {}           # tool_use_id -> (step, tool dict, branch, ts)
-        self.results = []         # (label, err) in arrival order (dead_tool)
         self.totals = _new_totals()
         self.context_tokens = 0
-        self.flags = {}           # flag -> {"flag", "detail", "count", "ts"}
+        self.max_context = 0
+        self.warnings = {}        # rule -> {"rule", "text", "hint", "count", "ts", "detail"}
+        self.tests = []           # test runs: {"passed", "failed", "ok", "ts"}
+        self.edited = set()       # paths of edited files
+        self.recs = {}            # tool_use_id -> intents.record until its result arrives
         self.compactions = 0
         self.seq = 0
         self.hook = {"last": (None, 0), "stop_ts": 0, "active_ts": 0, "notify_ts": 0, "end_ts": 0, "open_tools": 0}
@@ -234,9 +319,9 @@ class Session:
 
 
 class LiveState:
-    def __init__(self, redact=True, context_warn=CONTEXT_WARN, on_goal=None, clock=time.time):
+    def __init__(self, redact=True, on_goal=None, on_prompt=None, clock=time.time):
         self.redact = redact
-        self.context_warn = context_warn
+        self.on_prompt = on_prompt   # callback(session_id, prompt n, text) for later prompts (Haiku naming)
         self.clock = clock
         self.sessions = {}
         self.redactor = Redactor() if redact else None
@@ -302,7 +387,7 @@ class LiveState:
             branch = s.main
         for r in records:
             self._record(s, branch, agent_id, r)
-        self._flags(s)
+        self._warnings(s)
         self.version += 1
         return s
 
@@ -345,6 +430,7 @@ class LiveState:
         if r.get("isCompactSummary") or (typ == "system" and "compact" in str(r.get("subtype") or "")):
             if not agent_id:
                 s.compactions += 1
+                s.main.file_events.append(("compact", None))
                 self._emit(s, branch, {"k": "compact", "ts": ts})
             return
         if typ == "assistant":
@@ -358,7 +444,7 @@ class LiveState:
         if isinstance(content, list):
             for b in content:
                 if isinstance(b, dict) and b.get("type") == "tool_result":
-                    self._tool_result(s, b, ts)
+                    self._tool_result(s, b, ts, r)
                     if not agent_id:
                         s.last_kind, s.last_active_ts = "tool_result", ts
         if agent_id:
@@ -377,7 +463,7 @@ class LiveState:
                     self.version += 1
             return
         n = len(s.prompts) + 1
-        p = {"ts": ts, "chars": len(text)}
+        p = {"ts": ts, "chars": len(text), "name": goalname.keyword_name(text, redact=self.redact), "source": "keyword"}
         step = {"k": "prompt", "ts": ts, "chars": len(text), "n": n}
         if not self.redact:
             p["text"] = step["text"] = text
@@ -388,6 +474,8 @@ class LiveState:
                       "prompt_chars": len(text)}
             if self.on_goal:
                 self.on_goal(s.id, text)
+        elif self.on_prompt:
+            self.on_prompt(s.id, n, text)
 
     def set_goal(self, sid, name, source="haiku"):
         s = self.sessions.get(sid)
@@ -395,7 +483,13 @@ class LiveState:
             s.goal = dict(s.goal, name=name, source=source)
             self.version += 1
 
-    def _tool_result(self, s, b, ts):
+    def set_prompt_name(self, sid, n, name, source="haiku"):
+        s = self.sessions.get(sid)
+        if s and 0 < n <= len(s.prompts):
+            s.prompts[n - 1].update(name=name, source=source)
+            self.version += 1
+
+    def _tool_result(self, s, b, ts, r=None):
         hit = s.tools.get(b.get("tool_use_id"))
         if not hit:
             return
@@ -411,8 +505,20 @@ class LiveState:
             step["err"] = True
         elif "err" not in step:
             step["err"] = False
-        s.results.append((tool["label"], err))
         self._touch(s, step)
+        text = _result_text(b, KEEP_CHARS)
+        if err:
+            br.err_events.append(("err", error_signature(text)))
+        rec = s.recs.pop(tool["id"], None) or {}
+        if rec.get("cmd") and test_runner(rec["cmd"]):
+            tr = r.get("toolUseResult") if isinstance(r, dict) and isinstance(r.get("toolUseResult"), dict) else {}
+            out = keep_ends("\n".join(str(tr.get(k) or "") for k in ("stdout", "stderr")), KEEP_CHARS) if tr else ""
+            got = parse_test_output(out) or parse_test_output(text)
+            if got:
+                s.tests.append({"passed": got.get("passed"), "failed": got.get("failed"),
+                                "ok": not got.get("failed") and not err, "ts": ts})
+            elif err:
+                s.tests.append({"passed": None, "failed": None, "ok": False, "ts": ts})
         if not err and tool["name"] in ("Agent", "Task") and _result_text(b).lstrip().startswith("Async agent launched"):
             tool["async"] = True
         a = next((a for a in s.agents.values() if a["tool_use_id"] == tool["id"]), None)
@@ -489,6 +595,7 @@ class LiveState:
             s.agents[agent_id]["usd"] += m["usd"]
         else:
             s.context_tokens = u["input"] + u["cache_write"] + u["cache_read"]
+            s.max_context = max(s.max_context, s.context_tokens)
         if m["step"] is not None:
             m["step"]["cw"], m["step"]["usd"] = round(cw, 1), round(m["usd"], 6)
             self._touch(s, m["step"])
@@ -511,14 +618,20 @@ class LiveState:
             step["_recs"].append(rec)
             tool = {"name": name, "label": tool_label(name, inp, rec, self.redactor),
                     "target": tool_target(name, inp, rec, self.redact), "id": tid, "err": None}
+            s.recs[tid] = rec
             step["tools"].append(tool)
             s.tools[tid] = (step, tool, branch, ts)
             s.totals["tool_calls"] += 1
             f = rec.get("file")
-            if f and name in ("Read", "Bash"):
+            if intents.tool_intent(rec) == "edit":
+                branch.err_events.append(("edit", None))
+                if name in EDIT_TOOLS and f:
+                    branch.file_events.append(("edit", f))
+                    s.edited.add(f)
+            elif f and _full_read(name, inp, rec):
                 branch.file_events.append(("read", f))
-            elif f:
-                branch.file_events.append(("write", f))
+            elif intents.tool_intent(rec) not in READONLY_INTENTS:
+                branch.file_events.append(("mutate", None))
             if name in ("Agent", "Task"):
                 fo = {"k": "fanout", "ts": ts, "tool_use_id": tid, "agent_type": rec.get("target"), "agent_id": None}
                 if not self.redact and isinstance(inp, dict):
@@ -531,46 +644,39 @@ class LiveState:
         intent, _ = intents.turn_intent(step["_recs"])
         step["intent"], step["group"] = intent, intents.GROUP.get(intent, "other")
 
-    # ------------------------------------------------------------ flags
-    def _flag(self, s, flag, count, detail, ts):
-        if count <= 0:
-            return
-        f = s.flags.get(flag)
-        if f is None:
-            s.flags[flag] = {"flag": flag, "detail": detail, "count": count, "ts": ts}
-            self._emit(s, s.main, {"k": "flag", "ts": ts, "flag": flag, "detail": detail})
-        elif f["count"] != count or f["detail"] != detail:
-            f["count"], f["detail"] = count, detail
+    # ------------------------------------------------------------ warnings
+    def _warn(self, s, rule, count, text, detail, ts):
+        w = s.warnings.get(rule)
+        if w is None:
+            s.warnings[rule] = {"rule": rule, "text": text, "hint": HINTS[rule], "count": count, "ts": ts,
+                                "detail": detail}
+            self._emit(s, s.main, {"k": "flag", "ts": ts, "flag": rule, "rule": rule, "detail": text, "text": text,
+                                   "hint": HINTS[rule]})
+        elif (w["count"], w["text"]) != (count, text):
+            w.update(count=count, text=text, detail=detail)
 
-    def _flags(self, s):
+    def _warnings(self, s):
         ts = s.last_ts
-        retry = same = browser = 0
-        rereads, last_reread = 0, None
+        stuck, rereads, browser = [], [], []
         for br in [s.main] + list(s.branches.values()):
-            turns = [(t["intent"], bool(t.get("err"))) for t in br.turn_steps]
-            retry += retry_loop(turns)
-            same += same_intent_after_error(turns)
-            browser += browser_loop([t[0] for t in turns])
-            rr = reread_files(br.file_events)
-            rereads += len(rr)
-            if rr:
-                last_reread = max(rr.items(), key=lambda kv: kv[1])
-        self._flag(s, "retry_loop", retry, retry, ts)
-        if same >= 3:
-            self._flag(s, "same_intent_after_error", same, same, ts)
-        self._flag(s, "browser_loop", browser, browser, ts)
-        if last_reread:
-            path, n = last_reread
+            stuck += stuck_errors(br.err_events)
+            rereads += reread_loops(br.file_events)
+            browser += browser_loops((t["intent"], bool(t.get("err"))) for t in br.turn_steps)
+        if stuck:
+            sig, n = stuck[-1]
+            self._warn(s, "stuck_error", len(stuck), "same error \u00d7%d, no edits since" % n,
+                       None if self.redact else sig, ts)
+        if rereads:
+            path, n = rereads[-1]
             name = (os.path.splitext(path)[1] or "…") if self.redact else os.path.basename(path)
-            self._flag(s, "reread_file", rereads, "%s x%d" % (name, n), ts)
-        dead = dead_tools(s.results)
-        if dead:
-            label, n = max(dead.items(), key=lambda kv: kv[1])
-            self._flag(s, "dead_tool", len(dead), "%s x%d" % (label, n), ts)
-        if context_large(s.context_tokens, self.context_warn):
-            self._flag(s, "context_large", 1, s.context_tokens, ts)
-            s.flags["context_large"]["detail"] = s.context_tokens
-        self._flag(s, "compaction", s.compactions, s.compactions, ts)
+            self._warn(s, "reread_loop", len(rereads), "re-read %s \u00d7%d" % (name, n), name, ts)
+        if browser:
+            self._warn(s, "browser_loop", len(browser), "%d browser turns in a row" % browser[-1], None, ts)
+        pct = context_near_full(s.context_tokens, context_window(s.model, s.max_context))
+        if pct:
+            self._warn(s, "context_near_full", 1, "context %d%% full" % pct, s.context_tokens, ts)
+        else:
+            s.warnings.pop("context_near_full", None)   # live: goes away after a compaction
 
     # ------------------------------------------------------------ hooks
     def apply_hook(self, ev):
@@ -619,8 +725,13 @@ class LiveState:
                  "cw": round(a["cw"], 1), "usd": round(a["usd"], 6), "turns": a["turns"], "status": a["status"],
                  "steps": len(a["steps"])} for a in s.agents.values()]
 
-    def flags_list(self, s):
-        return [dict(f) for f in s.flags.values()]
+    def warnings_list(self, s):
+        return [{k: w[k] for k in ("rule", "text", "hint", "count", "ts")} for w in s.warnings.values()]
+
+    @staticmethod
+    def flags_alias(s):
+        """Old `flags` shape, kept for compatibility: [{"flag", "count", "detail"}]."""
+        return [{"flag": w["rule"], "count": w["count"], "detail": w["text"]} for w in s.warnings.values()]
 
     def totals(self, s):
         t = dict(s.totals)
@@ -645,7 +756,8 @@ class LiveState:
                 "tool_calls": s.totals["tool_calls"], "errors": s.totals["errors"],
                 "agents_running": sum(1 for a in s.agents.values() if a["status"] == "running"),
                 "agents_total": len(s.agents), "context_tokens": s.context_tokens,
-                "flags": [{"flag": f["flag"], "count": f["count"]} for f in s.flags.values()],
+                "flags": [{"flag": w["rule"], "count": w["count"]} for w in s.warnings.values()],
+                "warnings": self.warnings_list(s),
                 "intent_mix": sorted([[g, round(c, 1)] for g, c in mix.items()], key=lambda x: -x[1])}
 
     def board(self, now=None, max_idle_s=6 * 3600):
@@ -666,7 +778,7 @@ class LiveState:
         return {"id": s.id, "short": s.id[:8], "project": self._project(s.project_raw), "file": None if self.redact else s.path,
                 "started": s.started, "last_event_ts": s.last_ts, "model": s.model, "goal": s.goal,
                 "totals": self.totals(s), "context_tokens": s.context_tokens, "status": self.status(s, now),
-                "flags": self.flags_list(s), "seq": s.seq, "redacted": self.redact}
+                "flags": self.flags_alias(s), "warnings": self.warnings_list(s), "seq": s.seq, "redacted": self.redact}
 
     def session_full(self, s, now=None):
         now = self.clock() if now is None else now
@@ -715,11 +827,52 @@ class LiveState:
                 "elapsed_s": round(now - started, 1) if started else None,
                 "turns": s.totals["turns"], "tool_calls": s.totals["tool_calls"], "errors": s.totals["errors"],
                 "current_intent": last["intent"] if last else None,
-                "flags": [{"flag": f["flag"], "count": f["count"], "detail": f["detail"]} for f in s.flags.values()],
-                "recent": [{"intent": t["intent"], "group": t["group"], "cw": round(t.get("cw") or 0),
+                "flags": self.flags_alias(s), "warnings": self.warnings_list(s),
+                "asked": self._asked(s), "now": self._now(s, now), "tests": self._tests(s),
+                "recent": [{"intent": t["intent"], "group": t["group"], "label": intents.label(t["intent"]),
+                            "cw": round(t.get("cw") or 0),
                             "tools": [x["label"] for x in t["tools"]],
+                            "targets": [x.get("target") for x in t["tools"]],
                             "tool_err": [bool(x.get("err")) for x in t["tools"]],
                             "agents": self._turn_agents(s, t),
                             "err": bool(t.get("err"))} for t in recent],
                 "cw_series": [round(t.get("cw") or 0) for t in turns[-120:]],
-                "agents": [{"type": a["type"], "status": a["status"], "turns": a["turns"]} for a in s.agents.values()]}
+                "agents": [{"type": a["type"], "status": a["status"], "turns": a["turns"]} for a in s.agents.values()],
+                **self._edited(s)}
+
+    def _asked(self, s):
+        n = len(s.prompts)
+        latest = s.prompts[-1] if n > 1 else None
+        return {"goal": s.goal["name"] if s.goal else None, "source": s.goal["source"] if s.goal else None,
+                "prompt_n": n, "latest": latest["name"] if latest else None,
+                "latest_ts": s.prompts[-1]["ts"] if n else None}
+
+    def _now(self, s, now):
+        turns = s.main.turn_steps
+        if not turns:
+            return None
+        last = turns[-1]
+        i = len(turns) - 1
+        while i > 0 and turns[i - 1]["group"] == last["group"]:
+            i -= 1
+        tool = last["tools"][-1] if last["tools"] else {}
+        t0 = turns[i]["ts"]
+        return {"intent": last["intent"], "label": intents.label(last["intent"]), "group": last["group"],
+                "tool": tool.get("label"), "target": tool.get("target"),
+                "since_s": round(max(0.0, now - t0), 1) if t0 else None, "status": self.status(s, now)}
+
+    @staticmethod
+    def _tests(s):
+        if not s.tests:
+            return None
+        last = s.tests[-1]
+        if last["passed"] is None and last["failed"] is None:
+            return {"passed": None, "failed": None, "ok": False, "runs": len(s.tests), "last_ts": last["ts"],
+                    "trend": [t["failed"] for t in s.tests[-8:]]}
+        return {"passed": last["passed"], "failed": last["failed"], "ok": last["ok"], "runs": len(s.tests),
+                "last_ts": last["ts"], "trend": [t["failed"] for t in s.tests[-8:]]}
+
+    def _edited(self, s):
+        if self.redact:
+            return {"files_edited_n": len(s.edited)}
+        return {"files_edited": sorted({os.path.basename(p) for p in s.edited}), "files_edited_n": len(s.edited)}

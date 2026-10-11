@@ -162,7 +162,7 @@ class TestState(LiveFixture):
         self.assertEqual(kinds[0], "prompt")
         self.assertNotIn("text", s.main.steps[0])           # redacted
         self.assertIn("fanout", kinds)
-        self.assertIn("flag", kinds)
+        self.assertIn("flag", kinds)              # the stuck_error warning step
         turns = s.main.turn_steps
         self.assertEqual([t["intent"] for t in turns[:3]], ["read_code"] * 3)
         self.assertEqual([t["intent"] for t in turns[3:6]], ["test"] * 3)
@@ -182,9 +182,9 @@ class TestState(LiveFixture):
         self.assertEqual(s.context_tokens, 160000)
         self.assertAlmostEqual(s.main.msgs["m5"]["cw"], 1000 + 1.25 * 9000 + 15000 + 500)
         self.assertEqual(u["cache_read"], 150000)
-        flags = set(s.flags)
-        self.assertTrue({"retry_loop", "reread_file", "dead_tool", "context_large"} <= flags, flags)
-        self.assertEqual(s.flags["reread_file"]["detail"], ".py x3")
+        # 3 identical failing test runs with no edit in between -> stuck_error; 3 reads < 4; 160k = 80% of 200k
+        self.assertEqual(set(s.warnings), {"stuck_error"})
+        self.assertEqual(s.warnings["stuck_error"]["text"], "same error \u00d73, no edits since")
         # subagent branch linked to the fan-out
         a = s.agents["x1"]
         self.assertEqual((a["type"], a["tool_use_id"], a["status"], a["turns"]), ("Explore", "tA", "done", 1))
@@ -239,31 +239,62 @@ class TestState(LiveFixture):
 
 
 class TestRules(unittest.TestCase):
-    def test_retry_loop(self):
-        self.assertEqual(st.retry_loop([("test", True)] * 3), 1)
-        self.assertEqual(st.retry_loop([("test", True), ("edit", True), ("test", True)]), 0)
-        self.assertEqual(st.retry_loop([("test", True)] * 2 + [("test", False)]), 0)
+    def test_error_signature(self):
+        a = "\x1b[31mTraceback (most recent call last):\n  File \"/srv/app/x.py\", line 12\nImportError: cannot import name 'Foo' (/srv/app/y.py) in 0.31s"
+        b = "Traceback (most recent call last):\n  File \"/tmp/w/x.py\", line 99\nImportError: cannot import name 'Foo' (/srv/app/y.py) in 1.2s"
+        self.assertEqual(st.error_signature(a), st.error_signature(b))   # timings / line numbers / colour differ
+        self.assertNotEqual(st.error_signature(a), st.error_signature(b.replace("/srv/app/y.py", "/tmp/z.py")))
+        self.assertNotEqual(st.error_signature(a), st.error_signature("ImportError: cannot import name 'Bar'"))
+        self.assertIsNone(st.error_signature("  \n"))
+        self.assertEqual(len(st.keep_ends("a" * 5000)), 2 * st.KEEP_CHARS + 1)
 
-    def test_same_intent_after_error(self):
-        t = [("test", True), ("test", False), ("edit", True), ("edit", True), ("edit", False)]
-        self.assertEqual(st.same_intent_after_error(t), 3)
+    def test_stuck_errors(self):
+        e = ("err", "importerror: x")
+        self.assertEqual(st.stuck_errors([e] * 3), [("importerror: x", 3)])
+        self.assertEqual(st.stuck_errors([e] * 5), [("importerror: x", 5)])
+        self.assertEqual(st.stuck_errors([e, e, ("edit", None), e]), [])
+        self.assertEqual(st.stuck_errors([("err", "a"), ("edit", None), ("err", "b"), ("edit", None), ("err", "c")]), [])
+        self.assertEqual(st.stuck_errors([e] * 3 + [("edit", None)] + [e] * 3), [("importerror: x", 3)] * 2)
 
-    def test_browser_loop(self):
-        self.assertEqual(st.browser_loop(["browse_ui"] * 10), 1)
-        self.assertEqual(st.browser_loop(["browse_ui"] * 9 + ["edit"]), 0)
+    def test_error_signature_ignores_incidental_errors(self):
+        out = "line one of output\nline two\nline three\n(eval):1: === not found"
+        self.assertIsNone(st.error_signature(out))
+        self.assertTrue(st.error_signature("API error: 401 Unauthorized | invalid api key"))
 
-    def test_reread(self):
-        ev = [("read", "a.py")] * 2 + [("write", "a.py")] + [("read", "a.py")] * 2
-        self.assertEqual(st.reread_files(ev), {})
-        self.assertEqual(st.reread_files([("read", "a.py")] * 3), {"a.py": 3})
+    def test_reread_reset_by_mutation(self):
+        ev = [("read", "a.png"), ("read", "a.png"), ("mutate", None), ("read", "a.png"), ("read", "a.png")]
+        self.assertEqual(st.reread_loops(ev), [])
+        self.assertEqual(st.reread_loops([("read", "a.py")] * 4), [("a.py", 4)])
 
-    def test_dead_tools(self):
-        self.assertEqual(st.dead_tools([("Bash x", True)] * 3), {"Bash x": 3})
-        self.assertEqual(st.dead_tools([("Bash x", True), ("Bash x", False), ("Bash x", True)]), {})
+    def test_browser_loops(self):
+        self.assertEqual(st.browser_loops(["browse_ui"] * 20), [])            # long but healthy browser work
+        self.assertEqual(st.browser_loops([("browse_ui", k % 3 == 0) for k in range(20)]), [20])   # 7 errors
+        self.assertEqual(st.browser_loops(["browse_ui"] * 19 + ["edit"] + ["browse_ui"] * 5), [])
 
-    def test_context_large(self):
-        self.assertTrue(st.context_large(150_000))
-        self.assertFalse(st.context_large(149_999))
+    def test_reread_loops(self):
+        self.assertEqual(st.reread_loops([("read", "a.py")] * 4), [("a.py", 4)])
+        self.assertEqual(st.reread_loops([("read", "a.py")] * 3), [])
+        ev = [("read", "a.py")] * 2 + [("edit", "a.py")] + [("read", "a.py")] * 2
+        self.assertEqual(st.reread_loops(ev), [])
+        ev = [("read", "a.py")] * 2 + [("compact", None)] + [("read", "a.py")] * 2
+        self.assertEqual(st.reread_loops(ev), [])
+        self.assertEqual(st.reread_loops([("read", "a.py")] * 2 + [("edit", "b.py")] + [("read", "a.py")] * 2),
+                         [("a.py", 4)])
+
+    def test_context_near_full(self):
+        self.assertEqual(st.context_window("claude-opus-4-6"), 200_000)
+        self.assertEqual(st.context_window("claude-opus-4-6[1m]"), 1_000_000)
+        self.assertEqual(st.context_window("claude-opus-4-6", max_seen=250_000), 1_000_000)
+        self.assertEqual(st.context_near_full(170_000, 200_000), 85)
+        self.assertIsNone(st.context_near_full(169_999, 200_000))
+        self.assertEqual(st.context_near_full(182_000, 200_000), 91)
+        self.assertIsNone(st.context_near_full(300_000, 1_000_000))
+
+    def test_labels(self):
+        from tokenscope import intents
+        self.assertEqual(intents.label("edit"), "editing files")
+        self.assertEqual(intents.label("respond"), "respond")
+        self.assertEqual(intents.label("some_new"), "some new")
 
     def test_status_of(self):
         now = 1000.0
@@ -367,7 +398,8 @@ class TestServer(LiveFixture):
                   "agents_total", "context_tokens", "flags", "intent_mix"):
             self.assertIn(k, row)
         self.assertEqual(row["agents_total"], 1)
-        self.assertIn({"flag": "retry_loop", "count": 1}, row["flags"])
+        self.assertIn({"flag": "stuck_error", "count": 1}, row["flags"])
+        self.assertEqual(row["warnings"][0]["rule"], "stuck_error")
         full = self.get("/api/session/" + SID)
         self.assertEqual(full["seq"], max(x["useq"] for x in full["steps"] + full["agents"][0]["steps"]))
         self.assertEqual(full["agents"][0]["steps"][0]["agent"], "x1")
@@ -377,7 +409,15 @@ class TestServer(LiveFixture):
         self.assertEqual(part["agents"][0]["type"], "Explore")
         c = self.get("/api/session/%s/compact" % SID)
         self.assertEqual(set(c), {"goal", "status", "cw", "usd", "context_tokens", "current_intent", "flags",
-                                  "recent", "agents", "elapsed_s", "turns", "tool_calls", "errors", "cw_series"})
+                                  "recent", "agents", "elapsed_s", "turns", "tool_calls", "errors", "cw_series",
+                                  "warnings", "asked", "now", "tests", "files_edited_n"})
+        self.assertEqual(set(c["warnings"][0]), {"rule", "text", "hint", "count", "ts"})
+        self.assertEqual(c["tests"]["runs"], 3)
+        self.assertFalse(c["tests"]["ok"])
+        self.assertEqual(c["asked"]["prompt_n"], 1)
+        self.assertIsNone(c["asked"]["latest"])
+        self.assertEqual(c["recent"][0]["targets"], [".py"])
+        self.assertEqual(c["recent"][3]["label"], "running tests")
         r3 = c["recent"][3]
         launched = [a for t in c["recent"] for a in t["agents"]]
         self.assertEqual([a["type"] for a in launched], ["Explore"])

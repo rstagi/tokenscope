@@ -23,15 +23,17 @@ truncation handled) and shows:
 
 - **Board** (`/`): one card per active session, most recent first: project (masked as `project-A` … unless
   `--no-redact`), goal, status (working / waiting for you / idle), current intent, last step, elapsed time, cost-weighted
-  tokens and API-equivalent $ so far, intent mix bar, subagents running, live pattern flags. Click a card to open it.
+  tokens and API-equivalent $ so far, intent mix bar, subagents running, live warnings. Click a card to open it.
 - **Session view** (`/s/<id>`): the goal -> intent -> tool flow building up in real time: a flow map (goal node, one
   node per phase of same-group intents with its tools, subagent fan-out as a branch), an intent ribbon, a timeline
-  (prompts, reasoning steps, turns with nested tool chips, errors, compactions, flags), running CW / $ counters and a
+  (prompts, reasoning steps, turns with nested tool chips, errors, compactions, warnings), running CW / $ counters and a
   context gauge. `?replay=1` replays a finished session step by step (handy for demos).
-- **Live flags**: `retry_loop` (3+ consecutive errored turns with the same intent), `same_intent_after_error`
-  (3+ times), `browser_loop` (10+ consecutive browser turns), `reread_file` (same file read 3+ times without an edit in
-  between), `dead_tool` (same tool failing 3+ times with no success), `context_large` (>= 150k context tokens,
-  `--context-warn`), `compaction`.
+- **Live warnings** (rare by design; a normal fail -> edit -> fail -> edit -> green session shows none; each comes
+  with a short hint): `stuck_error` (the same normalised error 3+ times with no edit in between, per thread),
+  `reread_loop` (the same file read in full 4+ times with no edit to it and no compaction in between),
+  `browser_loop` (20+ consecutive browser turns), `context_near_full` (>= 85% of the 200k / 1M context window).
+  `python3 tools/eval_warnings.py --root ~/.claude/projects --show` replays your transcripts offline and shows how
+  often each rule fires.
 
 Options: `--root DIR`, `--project GLOB` (only matching project dirs, e.g. `'*myrepo*'`), `--since-minutes N` (which
 existing transcripts to pick up at start, default 120), `--port`, `--host` (default 127.0.0.1), `--no-redact`,
