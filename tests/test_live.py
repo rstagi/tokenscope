@@ -377,8 +377,11 @@ class TestServer(LiveFixture):
         self.assertEqual(part["agents"][0]["type"], "Explore")
         c = self.get("/api/session/%s/compact" % SID)
         self.assertEqual(set(c), {"goal", "status", "cw", "usd", "context_tokens", "current_intent", "flags",
-                                  "recent", "agents"})
-        self.assertEqual(c["recent"][3], {"intent": "test", "group": "verify", "tools": ["Bash pytest"], "err": True})
+                                  "recent", "agents", "elapsed_s", "turns", "tool_calls", "errors", "cw_series"})
+        r3 = c["recent"][3]
+        self.assertEqual({k: r3[k] for k in ("intent", "group", "tools", "err", "tool_err")},
+                         {"intent": "test", "group": "verify", "tools": ["Bash pytest"], "err": True, "tool_err": [True]})
+        self.assertEqual(len(c["cw_series"]), len(c["recent"]))   # one value per main-thread tool turn
         self.assertEqual(c["agents"], [{"type": "Explore", "status": "done", "turns": 1}])
         with self.assertRaises(urllib.error.HTTPError):
             self.get("/api/session/nope")

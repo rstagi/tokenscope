@@ -689,14 +689,22 @@ class LiveState:
         d["agents"] = self.agents_summary(s)
         return d
 
-    def session_compact(self, s, now=None):
+    def session_compact(self, s, now=None, recent_n=60):
+        """Small payload for the in-terminal mod / status line (see docs/live-spec.md)."""
         now = self.clock() if now is None else now
-        recent = s.main.turn_steps[-12:]
+        turns = s.main.turn_steps
+        recent = turns[-recent_n:]
         last = recent[-1] if recent else None
+        started = s.started or (turns[0]["ts"] if turns else None)
         return {"goal": s.goal["name"] if s.goal else None, "status": self.status(s, now),
                 "cw": round(s.totals["cw"], 1), "usd": round(s.totals["usd"], 6), "context_tokens": s.context_tokens,
+                "elapsed_s": round(now - started, 1) if started else None,
+                "turns": s.totals["turns"], "tool_calls": s.totals["tool_calls"], "errors": s.totals["errors"],
                 "current_intent": last["intent"] if last else None,
                 "flags": [{"flag": f["flag"], "count": f["count"], "detail": f["detail"]} for f in s.flags.values()],
-                "recent": [{"intent": t["intent"], "group": t["group"], "tools": [x["label"] for x in t["tools"]],
+                "recent": [{"intent": t["intent"], "group": t["group"], "cw": round(t.get("cw") or 0),
+                            "tools": [x["label"] for x in t["tools"]],
+                            "tool_err": [bool(x.get("err")) for x in t["tools"]],
                             "err": bool(t.get("err"))} for t in recent],
+                "cw_series": [round(t.get("cw") or 0) for t in turns[-120:]],
                 "agents": [{"type": a["type"], "status": a["status"], "turns": a["turns"]} for a in s.agents.values()]}

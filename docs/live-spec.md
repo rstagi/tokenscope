@@ -122,7 +122,7 @@ ThreadingHTTPServer bound to 127.0.0.1 by default. Background thread runs the ta
   "intent_mix":[[group,cw],...]}]} sorted by last_ts desc; sessions idle for more than 6 h dropped.
 - `GET /api/session/<id>` -> full session model (as above, steps of main + agents), plus "seq" (max).
 - `GET /api/session/<id>?since=<seq>` -> only steps with seq > since (+ totals, status, flags, agents summary).
-- `GET /api/session/<id>/compact` -> small payload for the Claude Code mod: {"goal","status","cw","usd",
+- `GET /api/session/<id>/compact` -> small payload for the Claude Code mod: {"goal","status","cw","usd","elapsed_s","turns","tool_calls","errors","cw_series" (CW per main turn, last 120),
   "context_tokens","current_intent","flags":[...], "recent":[last 12 turn steps as {"intent","group","tools":
   ["label",...],"err"}], "agents":[{"type","status","turns"}]}.
 - `GET /events` -> Server-Sent Events: `event: board` every 1 s when anything changed (same JSON as /api/board),
