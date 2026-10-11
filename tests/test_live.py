@@ -308,7 +308,7 @@ class TestRules(unittest.TestCase):
         from tokenscope.intents import record
         self.assertEqual(st.tool_label("mcp__srv__op", {}, record("mcp__srv__op", {})), "mcp:srv.op")
         self.assertEqual(st.tool_label("Skill", {}, record("Skill", {"skill": "pdf"})), "skill:pdf")
-        self.assertEqual(st.tool_label("Bash", {}, record("Bash", {"command": "git status"})), "Bash git")
+        self.assertEqual(st.tool_label("Bash", {}, record("Bash", {"command": "git status"})), "Bash git status")
         r = record("WebFetch", {"url": "https://example.org/x"})
         self.assertEqual(st.tool_target("WebFetch", {"url": "https://example.org/x"}, r, False), "example.org")
         self.assertEqual(st.tool_target("WebFetch", {"url": "https://example.org/x"}, r, True), "…")

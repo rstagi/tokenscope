@@ -53,6 +53,9 @@ _GO_PKG_FAIL_RE = re.compile(r"^FAIL\s+\S+\s+[\d.]+s", re.M)
 _MOCHA_RE = re.compile(r"^\s*(\d+) (passing|failing)\b", re.M)
 
 
+_UNITTEST_RE = re.compile(r"^Ran (\d+) tests? in [\d.]+s\s*\n\s*\n?((?:OK|FAILED)(?: \([^)]*\))?)", re.M)
+
+
 def parse_test_output(text):
     """{passed, failed, framework} from the last test summary in `text`, or None if there is none."""
     if not text:
@@ -85,6 +88,11 @@ def parse_test_output(text):
             res = {"passed": len(_GO_PKG_OK_RE.findall(text)), "failed": len(_GO_PKG_FAIL_RE.findall(text))}
         last = max(m.end() for m in list(_GO_FAIL_RE.finditer(text)) + list(_GO_PKG_OK_RE.finditer(text)))
         hits.append((last, dict(res, framework="go test")))
+    for m in _UNITTEST_RE.finditer(text):   # "Ran 9 tests in 0.003s\n\nOK" / "FAILED (failures=1, errors=2)"
+        n, verdict = int(m.group(1)), m.group(2)
+        f = sum(int(x) for x in re.findall(r"(?:failures|errors)=(\d+)", verdict or ""))
+        sk = sum(int(x) for x in re.findall(r"(?:skipped|expected failures)=(\d+)", verdict or ""))
+        hits.append((m.end(), {"passed": max(0, n - f - sk), "failed": f, "framework": "unittest"}))
     mocha = {}
     for m in _MOCHA_RE.finditer(text):
         mocha[m.group(2)] = (int(m.group(1)), m.end())
@@ -207,6 +215,8 @@ def _runner_of(toks):
         return norm if re.search(r"test", os.path.basename(words[0]), re.I) else None
     if norm in ("pytest", "python -m pytest", "python3 -m pytest"):
         return "pytest"
+    if len(toks) >= 3 and re.fullmatch(r"python[\d.]*", os.path.basename(toks[0])) and toks[1] == "-m" and toks[2] in ("pytest", "unittest"):
+        return toks[2]
     if norm == "node --test":
         return norm
     if len(words) == 2 and _RUNNER_SUB.get(words[0]) == words[1]:

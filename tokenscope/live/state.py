@@ -207,12 +207,32 @@ def status_of(now, last_ts, last_kind, last_active_ts=None, hook=None):
 
 # ---------------------------------------------------------------- labels & targets
 
+GENERIC_SUB = {"git", "npm", "pnpm", "yarn", "cargo", "go", "docker", "uv", "make", "gh", "kubectl", "bun"}
+
+
+def bash_what(rec, redact=True):
+    """What a shell command runs: the test runner ("unittest", "./run_tests.sh"), "git status", "python3 -m mod"
+    (module only when not redacting), else the program of the first segment."""
+    cmd = rec.get("cmd") or ""
+    tr = test_runner(cmd)
+    if tr:
+        return tr if not redact or not tr.startswith(("./", "../", "/")) else "test script"
+    segs = rec.get("segs") or []
+    words = segs[0].split() if segs else []
+    if not words:
+        return None
+    prog = os.path.basename(words[0])
+    if prog in GENERIC_SUB and len(words) > 1 and re.fullmatch(r"[a-z][\w-]*", words[1]):
+        return "%s %s" % (prog, words[1])
+    if re.fullmatch(r"python[\d.]*", prog) and len(words) > 2 and words[1] == "-m" and not redact:
+        return "%s -m %s" % (prog, words[2])
+    return prog
+
+
 def tool_label(name, inp, rec, redactor=None):
     """Short tool label: "Bash git", "mcp:srv.op", "skill:<name>", "Agent(<type>)", else the tool name."""
     if name == "Bash":
-        segs = rec.get("segs") or []
-        prog = segs[0].split()[0] if segs and segs[0].split() else ""
-        return ("Bash " + os.path.basename(prog)).strip()
+        return ("Bash " + (bash_what(rec, redactor is not None) or "")).strip()
     if name.startswith("mcp__"):
         parts = name.split("__")
         srv = parts[1] if len(parts) > 1 else "?"
@@ -230,8 +250,7 @@ def tool_target(name, inp, rec, redact):
     """File basename / bash program / url host / pattern; redacted: extension only / program only / "…"."""
     inp = inp if isinstance(inp, dict) else {}
     if name == "Bash":
-        segs = rec.get("segs") or []
-        return os.path.basename(segs[0].split()[0]) if segs and segs[0].split() else None
+        return bash_what(rec, redact)
     f = rec.get("file")
     if f:
         return (os.path.splitext(f)[1] or "…") if redact else os.path.basename(f)

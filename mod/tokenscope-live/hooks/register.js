@@ -21,6 +21,7 @@ const LABEL_W = 7 // "ASKED  "
 
 // What the server last answered (null: local mode) and its text, to spot changes
 let remote = null
+let serverUp = false   // the server answered (maybe 404: this session is not in a transcript yet)
 let remoteText = ''
 let inFlight = false
 let dirty = false
@@ -449,7 +450,7 @@ function drawLocal(Box, Text, width) {
   const elapsed = local.startMs != null ? fmtDur((local.nowMs - local.startMs) / 1000) : ''
   const rows = [header(Box, Text, width, 'tokenscope · local', local.working ? 'working' : 'idle', elapsed)]
   const last = local.recent[local.recent.length - 1]
-  rows.push(row(Box, Text, 'now', 'NOW', local.working && last ? [{ text: '▶ ' + last, bold: true }] : [{ text: '◼ idle', dimColor: true }], width))
+  rows.push(row(Box, Text, 'now', 'NOW', local.working ? [{ text: '▶ ' + (last || 'thinking'), bold: true }] : [{ text: '◼ idle', dimColor: true }], width))
   rows.push(row(Box, Text, 'cost', 'COST', costSegs(width, local.cw, null, local.ctx > 0 ? local.ctx : null, local.series), width))
   const top = Object.entries(local.tools)
     .sort((a, b) => b[1] - a[1])
@@ -461,7 +462,8 @@ function drawLocal(Box, Text, width) {
   if (local.recent.length > 0) {
     rows.push(line(Box, Text, 'recent', [{ text: 'recent: ' + local.recent.slice().reverse().join(', '), dimColor: true }], width))
   }
-  rows.push(line(Box, Text, 'hint', [{ text: 'start `tokenscope live` for the goal and the flow', dimColor: true }], width))
+  const hint = serverUp ? 'connecting to tokenscope live… (waiting for the transcript)' : 'start `tokenscope live` for the goal and the flow'
+  rows.push(line(Box, Text, 'hint', [{ text: hint, dimColor: true }], width))
   return rows
 }
 
@@ -494,6 +496,7 @@ async function poll($) {
     const res = await $.http.fetch(
       base.replace(/\/+$/, '') + '/api/session/' + encodeURIComponent(sessionId) + '/compact',
     )
+    serverUp = true
     if (res.ok) {
       text = res.text
       next = JSON.parse(text)
@@ -501,6 +504,7 @@ async function poll($) {
     }
   } catch {
     next = null
+    serverUp = false
   } finally {
     inFlight = false
   }

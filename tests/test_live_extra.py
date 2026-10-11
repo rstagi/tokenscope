@@ -102,7 +102,7 @@ class TestWarningScenarios(Scenario):
         self.assertEqual(c["files_edited"], ["invoice.py"])
         self.assertEqual(c["now"]["intent"], "test")
         self.assertEqual(c["now"]["label"], "running tests")
-        self.assertEqual(c["now"]["tool"], "Bash python")
+        self.assertEqual(c["now"]["tool"], "Bash pytest")
         self.assertEqual(c["asked"]["goal"], "Fix: failing tests invoice.py")
         self.assertEqual(c["asked"]["prompt_n"], 1)
 
@@ -174,3 +174,12 @@ class TestGoalNames(unittest.TestCase):
             self.assertEqual(got, want, prompt)
             self.assertLessEqual(len(got), MAX_LEN)
         self.assertEqual(keyword_name(self.CASES[0][0], redact=True), "Fix: failing tests")
+
+
+class TestUnittestRunner(unittest.TestCase):
+    def test_python_m_unittest_is_a_test_run(self):
+        from tokenscope.understand import parse_test_output, test_runner
+        self.assertEqual(test_runner("python3 -m unittest discover -s tests -q"), "unittest")
+        self.assertEqual(parse_test_output("..\n----\nRan 9 tests in 0.003s\n\nOK\n"),
+                         {"passed": 9, "failed": 0, "framework": "unittest"})
+        self.assertEqual(parse_test_output("Ran 3 tests in 0.01s\n\nFAILED (failures=1, errors=1)")["failed"], 2)
