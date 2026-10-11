@@ -8,7 +8,7 @@ from .understand import test_runner
 
 # priority order (first = wins when a turn mixes intents)
 PRIORITY = ["edit", "test", "commit_pr", "delegate", "use_skill", "external_write", "run_build", "compute", "browse_ui",
-            "research", "query_data", "gather_context", "review_changes", "read_docs", "read_code", "locate",
+            "research", "query_data", "gather_context", "review_changes", "read_code", "read_docs", "locate",
             "discover_tools", "wait", "report", "communicate", "coordinate", "plan", "setup", "shell_other", "respond"]
 RANK = {k: i for i, k in enumerate(PRIORITY)}
 GROUP = {  # coarse phase each intent belongs to
