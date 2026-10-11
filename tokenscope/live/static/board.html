@@ -1,0 +1,22 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>tokenscope · live</title><link rel="stylesheet" href="/static/live.css"></head>
+<body data-page="board">
+<header>
+  <div class="topbar">
+    <div><h1>tokenscope live <span id="redacted" class="badge" style="display:none" title="prompts, paths and project names are masked">redacted</span></h1>
+      <div class="sub">Claude Code sessions on this machine · CW = cost-weighted tokens · $ = API list-price equivalent · <span id="conn" class="conn"></span></div></div>
+    <div class="kpis">
+      <div class="kpi"><div class="l">sessions</div><div class="v" id="k-sessions">–</div></div>
+      <div class="kpi"><div class="l">working</div><div class="v" id="k-working" style="color:var(--ok)">–</div></div>
+      <div class="kpi"><div class="l">total CW</div><div class="v" id="k-cw">–</div></div>
+      <div class="kpi"><div class="l">API-equiv $</div><div class="v" id="k-usd">–</div></div>
+    </div>
+  </div>
+</header>
+<main>
+  <div id="grid" class="grid"></div>
+  <div id="empty" class="empty" style="display:none">No active sessions in the last 6 h. Start Claude Code and it will show up here.</div>
+</main>
+<script src="/static/live.js"></script>
+</body></html>

@@ -1,0 +1,185 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>tokenscope live · demo</title><link rel="stylesheet" href="live.css"></head>
+<body>
+<div class="demo-bar">DEMO — synthetic in-page feed, no server.
+  <a href="demo.html">board</a><a href="demo.html?view=session&amp;id=demo-a">session (live)</a>
+  <a href="demo.html?view=session&amp;id=demo-long">long session</a><a href="demo.html?view=session&amp;id=demo-empty">empty</a>
+  <a href="demo.html?view=session&amp;id=nope">unknown</a><button id="sse">SSE: on</button></div>
+<div id="mount"></div>
+<template id="t-board">
+<header><div class="topbar"><div><h1>tokenscope live <span id="redacted" class="badge" style="display:none">redacted</span></h1>
+  <div class="sub">demo feed · <span id="conn" class="conn"></span></div></div>
+  <div class="kpis"><div class="kpi"><div class="l">sessions</div><div class="v" id="k-sessions">–</div></div>
+  <div class="kpi"><div class="l">working</div><div class="v" id="k-working" style="color:var(--ok)">–</div></div>
+  <div class="kpi"><div class="l">total CW</div><div class="v" id="k-cw">–</div></div>
+  <div class="kpi"><div class="l">API-equiv $</div><div class="v" id="k-usd">–</div></div></div></div></header>
+<main><div id="grid" class="grid"></div><div id="empty" class="empty" style="display:none">No active sessions.</div></main>
+</template>
+<template id="t-session">
+<header><a id="back" class="back" href="#">← board</a> <span id="conn" class="conn"></span>
+  <div class="shead"><div><div class="goal" id="h-goal">loading…</div>
+    <div class="sub"><span id="h-proj"></span> &nbsp; <span id="h-pill"></span> &nbsp; ⏱ <b id="h-el">–</b> &nbsp; <span id="h-turns"></span></div>
+    <div class="flaglist" id="h-flags"></div></div>
+  <div class="kpis"><div class="kpi"><div class="l">CW so far</div><div class="v" id="h-cw">–</div></div>
+    <div class="kpi"><div class="l">API-equiv $</div><div class="v" id="h-usd">–</div></div>
+    <div class="kpi gauge"><div class="l">context <span id="h-ctx" class="mut"></span></div><div class="bar"><i id="h-gauge" style="width:0"></i></div></div></div></div>
+  <div id="ribbon" class="ribbon"></div><div id="legend" class="legend"></div></header>
+<main><div id="notfound" class="empty" style="display:none"></div><div id="body">
+  <div class="tools"><span class="sub">Flow — consecutive turns of the same phase are collapsed; click to expand.</span>
+  <label class="toggle"><input type="checkbox" id="follow" checked> follow</label></div>
+  <div id="s-empty" class="empty" style="display:none">Nothing happened in this session yet.</div>
+  <div id="timeline" class="timeline"></div></div></main>
+<button id="jump" class="jump">↓ new steps</button>
+</template>
+<script>
+(function () {
+  var q = new URLSearchParams(location.search), view = q.get("view") || "board";
+  document.getElementById("mount").innerHTML = document.getElementById("t-" + (view === "session" ? "session" : "board")).innerHTML;
+  document.body.setAttribute("data-page", view === "session" ? "session" : "board");
+  if (view === "session") window.TS_SESSION_ID = q.get("id");
+
+  // --- deterministic synthetic data ---
+  var seed = 7; function rnd() { seed = (seed * 16807) % 2147483647; return seed / 2147483647; }
+  function pick(a) { return a[Math.floor(rnd() * a.length)]; }
+  var now = Date.now() / 1000;
+  var INT = [["locate", "investigate", ["Grep", "Glob"]], ["read_code", "investigate", ["Read"]], ["edit", "change", ["Edit", "Write"]],
+    ["test", "verify", ["Bash pytest"]], ["run_build", "verify", ["Bash npm"]], ["commit_pr", "ship", ["Bash git"]],
+    ["research", "research", ["WebSearch"]], ["plan", "plan", ["TodoWrite"]], ["wait", "wait", ["Bash sleep"]], ["report", "report", ["Bash echo"]]];
+  var FILES = ["checkout.py", "tax.py", "cart.ts", "README.md", "test_tax.py", "api.go"];
+  function mk(id, project, goal, status, age) {
+    return {id: id, project: project, goal: {name: goal, source: "keyword"}, model: "claude-opus-5-5", status: status,
+      started: now - age, last_event_ts: now - (status === "idle" ? 3600 : 2), steps: [], agents: {}, flags: [],
+      totals: {cw: 0, usd: 0, turns: 0, tool_calls: 0, errors: 0}, context_tokens: 12000, seq: 0};
+  }
+  var S = {
+    "demo-a": mk("demo-a", "project-A", "Fix: checkout total tax", "working", 412),
+    "demo-b": mk("demo-b", "project-B", "Build: CSV export endpoint", "waiting", 2240),
+    "demo-c": mk("demo-c", "project-C", "Refactor: auth middleware", "idle", 9800),
+    "demo-long": mk("demo-long", "project-A", "Review: billing pipeline audit", "working", 14000),
+    "demo-empty": mk("demo-empty", "project-D", "", "working", 5)
+  };
+  var listeners = [], seq = 0, flagged = {};
+  function emitStep(sid, step, agent) {
+    if (agent) step.agent_id = agent;
+    listeners.forEach(function (h) { h.step && h.step({session: sid, step: step}); });
+  }
+  function addStep(s, st, agent, quiet) {
+    st.seq = ++seq; st.ts = Date.now() / 1000;
+    if (agent) { var a = s.agents[agent]; a.steps.push(st); if (st.k === "turn") { a.cw += st.cw; a.usd += st.usd; } }
+    else s.steps.push(st);
+    if (st.k === "turn") {
+      s.totals.cw += st.cw; s.totals.usd += st.usd; s.totals.turns++; s.totals.tool_calls += st.tools.length;
+      s.totals.errors += st.tools.filter(function (t) { return t.err; }).length;
+      s.context_tokens = Math.min(199000, s.context_tokens + st.cw / 6);
+      s.last = st;
+    }
+    s.seq = seq; s.last_event_ts = st.ts;
+    if (!quiet) emitStep(s.id, JSON.parse(JSON.stringify(st)), agent);
+  }
+  function flag(s, f, detail, quiet) {
+    var ex = s.flags.filter(function (x) { return x.flag === f; })[0];
+    if (ex) { ex.count++; return; }
+    s.flags.push({flag: f, detail: detail, count: 1});
+    addStep(s, {k: "flag", flag: f, detail: detail}, null, quiet);
+  }
+  var errStreak = {};
+  function turn(s, agent, quiet, forceErr) {
+    var it = s._it && rnd() < .65 ? s._it : (s._it = pick(INT)), n = 1 + Math.floor(rnd() * 3), tools = [];
+    for (var i = 0; i < n; i++) {
+      var lab = pick(it[2]);
+      tools.push({name: lab.split(" ")[0], label: lab, target: /Read|Edit|Write|Grep/.test(lab) ? pick(FILES) : lab.split(" ")[1] || "",
+        id: "tu" + seq + i, err: forceErr || rnd() < .12});
+    }
+    var cw = Math.round(8000 + rnd() * 60000);
+    addStep(s, {k: "turn", intent: it[0], group: it[1], tools: tools, cw: cw, usd: cw * 0.000015}, agent, quiet);
+    var e = tools.some(function (t) { return t.err; });
+    errStreak[s.id] = e ? (errStreak[s.id] || 0) + 1 : 0;
+    if (!agent && errStreak[s.id] >= 3) flag(s, "retry_loop", null, quiet);
+    if (!agent && s.context_tokens >= 150000) flag(s, "context_large", Math.round(s.context_tokens), quiet);
+  }
+  function script(s, k, quiet) { // one "tick" of a plausible session
+    var r = rnd();
+    if (k === 0 || r < .05) return addStep(s, {k: "prompt", chars: Math.round(40 + rnd() * 900), n: s.steps.filter(function (x) { return x.k === "prompt"; }).length + 1}, null, quiet);
+    if (r < .25) return addStep(s, {k: "reason", kind: "thinking", chars: Math.round(200 + rnd() * 4000)}, null, quiet);
+    if (r < .29) {
+      var aid = "ag" + seq;
+      s.agents[aid] = {id: aid, type: "Explore", description: "find tax rounding call sites", steps: [], cw: 0, usd: 0, status: "running"};
+      addStep(s, {k: "fanout", tool_use_id: "tu" + seq, agent_type: "Explore", description: "find tax rounding call sites", agent_id: aid}, null, quiet);
+      s._agent = aid; s._agentLeft = 4 + Math.floor(rnd() * 4);
+      return;
+    }
+    if (s._agent && s._agentLeft > 0 && r < .6) { s._agentLeft--; turn(s, s._agent, quiet); if (!s._agentLeft) s.agents[s._agent].status = "done"; return; }
+    if (r < .31) { addStep(s, {k: "compact"}, null, quiet); return flag(s, "compaction", null, quiet); }
+    if (r < .33) return flag(s, "reread_file", {basename: pick(FILES), count: 3}, quiet);
+    turn(s, null, quiet);
+  }
+  var i;
+  for (i = 0; i < 30; i++) script(S["demo-a"], i, true);
+  for (i = 0; i < 18; i++) script(S["demo-b"], i, true);
+  for (i = 0; i < 12; i++) script(S["demo-c"], i, true);
+  for (i = 0; i < 2500; i++) script(S["demo-long"], i, true);
+  S["demo-a"].steps.forEach(function () {}); turn(S["demo-a"], null, true, true); turn(S["demo-a"], null, true, true);
+
+  function boardRow(s) {
+    var mix = {}; s.steps.concat.apply(s.steps, Object.keys(s.agents).map(function (k) { return s.agents[k].steps; }))
+      .forEach(function (x) { if (x.k === "turn") mix[x.group] = (mix[x.group] || 0) + x.cw; });
+    var ag = Object.keys(s.agents).map(function (k) { return s.agents[k]; });
+    var l = s.last;
+    return {id: s.id, short: s.id.slice(0, 8), project: s.project, goal: s.goal.name, status: s.status,
+      current_intent: l && l.intent, current_group: l && l.group,
+      last_step: l ? {label: l.tools[l.tools.length - 1].label + " " + (l.tools[l.tools.length - 1].target || ""), ts: l.ts, err: l.tools.some(function (t) { return t.err; })} : {},
+      started: s.started, last_ts: s.last_event_ts, elapsed_s: Date.now() / 1000 - s.started, cw: s.totals.cw, usd: s.totals.usd,
+      turns: s.totals.turns, tool_calls: s.totals.tool_calls, errors: s.totals.errors,
+      agents_running: ag.filter(function (a) { return a.status === "running"; }).length, agents_total: ag.length,
+      context_tokens: s.context_tokens, flags: s.flags.map(function (f) { return {flag: f.flag, count: f.count}; }),
+      intent_mix: Object.keys(mix).map(function (g) { return [g, mix[g]]; })};
+  }
+  var visible = ["demo-a", "demo-b", "demo-c", "demo-long"], extra = 0;
+  function board() {
+    var ss = visible.map(function (id) { return S[id]; }).sort(function (a, b) { return b.last_event_ts - a.last_event_ts; });
+    return {now: Date.now() / 1000, redacted: true, sessions: ss.map(boardRow)};
+  }
+  var sseOn = true;
+  document.getElementById("sse").onclick = function () {
+    sseOn = !sseOn; this.textContent = "SSE: " + (sseOn ? "on" : "off (polling)");
+    listeners.forEach(function (h) { sseOn ? h.up && h.up() : h.down && h.down(); });
+  };
+  function clone(x) { return JSON.parse(JSON.stringify(x)); }
+  window.TS_SOURCE = {
+    boardHref: "demo.html",
+    sessionHref: function (id) { return "demo.html?view=session&id=" + encodeURIComponent(id); },
+    board: function () { return Promise.resolve(clone(board())); },
+    session: function (id, since) {
+      var s = S[id];
+      if (!s) { var e = new Error("nf"); e.status = 404; return Promise.reject(e); }
+      if (since == null) return Promise.resolve(clone(s));
+      var d = {status: s.status, flags: s.flags, totals: s.totals, context_tokens: s.context_tokens, seq: s.seq, agents: [],
+        steps: s.steps.filter(function (x) { return x.seq > since; })};
+      Object.keys(s.agents).forEach(function (k) {
+        var a = s.agents[k]; d.agents.push({id: k, type: a.type, status: a.status, cw: a.cw, usd: a.usd});
+        a.steps.forEach(function (x) { if (x.seq > since) { var y = clone(x); y.agent_id = k; d.steps.push(y); } });
+      });
+      return Promise.resolve(clone(d));
+    },
+    subscribe: function (h) {
+      var w = {board: function (d) { sseOn && h.board(d); }, step: function (m) { sseOn && h.step(m); }, up: h.up, down: h.down};
+      listeners.push(w); setTimeout(function () { sseOn && h.up(); }, 50); return true;
+    }
+  };
+  // live activity
+  var k = 100;
+  setInterval(function () {
+    script(S["demo-a"], k++, false);
+    if (rnd() < .3) script(S["demo-long"], k++, false);
+    if (rnd() < .08) { var b = S["demo-b"]; b.status = b.status === "waiting" ? "working" : "waiting"; b.last_event_ts = Date.now() / 1000; }
+  }, 900);
+  setInterval(function () { var b = clone(board()); listeners.forEach(function (h) { h.board(b); }); }, 1000);
+  setInterval(function () { // sessions come and go
+    if (visible.length < 5) { visible.push("demo-empty"); S["demo-empty"].last_event_ts = Date.now() / 1000; }
+    else visible.pop();
+  }, 9000);
+})();
+</script>
+<script src="live.js"></script>
+</body></html>

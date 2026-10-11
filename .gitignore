@@ -1,0 +1,12 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.venv/
+.build-logs/
+node_modules/
+.DS_Store
+# local outputs: never commit reports or recordings made from real transcripts
+out/
+*.local.*

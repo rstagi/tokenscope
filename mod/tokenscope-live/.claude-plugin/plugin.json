@@ -1,0 +1,7 @@
+{
+  "name": "tokenscope-live",
+  "version": "0.1.0",
+  "description": "Live tokenscope pane: intents, cost-weighted tokens, flags and subagents for the current session",
+  "license": "MIT",
+  "author": { "name": "tokenscope" }
+}

@@ -1,0 +1,22 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "tokenscope"
+version = "0.1.0"
+description = "Explain where Claude Code tokens go, from local transcripts, and watch sessions live"
+readme = "README.md"
+license = {text = "MIT"}
+classifiers = ["License :: OSI Approved :: MIT License", "Programming Language :: Python :: 3", "Operating System :: OS Independent"]
+requires-python = ">=3.11"
+dependencies = []
+
+[project.scripts]
+tokenscope = "tokenscope.cli:main"
+
+[tool.setuptools]
+packages = ["tokenscope", "tokenscope.live"]
+
+[tool.setuptools.package-data]
+"tokenscope.live" = ["static/*"]
