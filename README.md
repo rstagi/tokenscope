@@ -7,12 +7,23 @@ file read or command output caused it, how much of it was re-read on every later
 next time. It is a single Python package, standard library only, and writes self-contained HTML reports
 (no network, no external assets).
 
-It also has a **live mode**: a local board of your running Claude Code sessions and a per-session view where the goal -> intent -> tool flow builds up as the agent works, plus an optional in-terminal pane (a Claude Code mod).
+It also has a **live mode**: a local board of your running Claude Code sessions and a per-session infinite canvas where
+the goal -> intent -> tool flow builds up as the agent works, plus an optional in-terminal pane (a Claude Code mod), and
+a **top spenders** view: the costliest sessions, goals, prompts or intents of the last 5 h, day, week or month.
 
 ## Live: watch sessions as they happen
 
 ![board](docs/img/live-board.png)
-![session view](docs/img/live-session.png)
+
+![session canvas: a recorded session replayed, intents building up, idle recap](docs/media/canvas-replay.gif)
+
+*Session view, replayed with `?replay=1`: intents and steps appear as the agent works; the recap overlay shows while
+the session waits for you.*
+
+![session canvas: parallel subagents as sub-flows](docs/media/canvas-subagents.gif)
+
+*Subagents branch off the step that launched them as their own flows (parallel fan-outs side by side) and rejoin the
+main flow when they return.*
 
 ```sh
 ./bin/tokenscope live            # http://127.0.0.1:8765/  (redaction ON by default)
@@ -46,8 +57,9 @@ existing transcripts to pick up at start, default 120), `--port`, `--host` (defa
 `--haiku` (name goals with `claude -p --model haiku` from the *masked* first 240 prompt characters; off by default,
 the default namer is a local keyword heuristic).
 
-API: `GET /api/board`, `GET /api/session/<id>[?since=<seq>]`, `GET /api/session/<id>/compact`, `GET /events`
-(Server-Sent Events: `board` and `step`). See `docs/live-spec.md`.
+API: `GET /api/board`, `GET /api/top?window=5h|24h|7d|30d&by=session|goal|turn|intent`,
+`GET /api/session/<id>[?since=<seq>]`, `GET /api/session/<id>/compact`, `GET /events` (Server-Sent Events: `board`
+and `step`). See `docs/live-spec.md`.
 
 **Status heuristic.** From transcripts alone: *working* while the last event is a prompt / tool call / tool result
 and is less than 90 s old; *waiting* after the assistant ended its turn (for up to 30 min); *idle* after that. For
@@ -65,6 +77,11 @@ tool_name, notification_type, message (Notification only, 200 chars)}` to `~/.ca
 ### Inside Claude Code: the mod and the status line
 
 ![mod pane](docs/img/mod-pane.png)
+
+![mod pane: recap appears when the turn ends, cleared when the agent resumes](docs/media/pane-recap.gif)
+
+*The pane while the agent works, the `DONE · recap` box when it ends its turn, and the live view again on the next
+prompt.*
 
 - **Mod** (`mod/tokenscope-live/`, Claude Code mods, tested on Claude Code 2.1.296): adds a `/tokenscope` command that
   toggles a side pane in the terminal: ASKED (the goal from the first prompt, plus a `↳ now:` line for the latest
@@ -202,7 +219,10 @@ on the first prompt: bugfix / feature / docs / ...), first prompt. Use `goals` f
 
 ```sh
 tokenscope top [--window 5h|24h|7d|30d] [--by session|goal|turn|intent] [--index-root DIR] [--now ISO] [--limit N] [--json]
+python3 -m tokenscope top --window 5h --by goal
 ```
+
+![top spenders panel on the live board, 5 h window by goal](docs/media/top-5h-goal.png)
 
 The costliest sessions, intents and steps of the last 5 h (the usage-limit window), day, week or month: $, share of
 the window's $, CW, tokens, wall and active time. Only calls whose own timestamp falls in the window count, so a
@@ -211,7 +231,8 @@ session straddling its start is split. `--by` ranks something else instead: `ses
 goal, so a goal can span turns and resumed sessions) or `turn` (one row per real user prompt, labelled with its text);
 each row names its session's goal. Reads the cross-session index (cached per transcript). Also on the live board (a
 "Top spenders" panel with window and grouping toggles, `GET /api/top?window=5h&by=goal`) and in the mod
-(`/tokenscope top 5h`, `/tokenscope top 5h turn`).
+(`/tokenscope top 5h`, `/tokenscope top 5h session`, `/tokenscope top 24h goal`; window and grouping are optional,
+default `5h` and `intent`).
 
 ### `analyze` – one session in the terminal
 
