@@ -361,6 +361,8 @@ class Session:
         self.recap_cache = None   # ((steps key, index version), recap)
         self.labeller = stepsmod.Labeller()
         self.intents_cache = None  # (key, payload)
+        self.agent_labellers = {}  # agent id -> Labeller (subagent steps: signal / rule labels, never the model)
+        self.agent_steps_cache = {}   # agent id -> (key, (steps, groups))
         self.skills = Counter()   # skill name -> invocations (Skill tool in any thread + slash-command skills)
         self.skill_scan = SkillScanner()   # main thread: slash-command skills
         self.slash_skills = []    # {"at": main-thread turn count, "name", "user": typed} per slash-command skill
@@ -705,10 +707,10 @@ class LiveState:
                 if bt == "text" and not self.redact:
                     step["text"] = body[:REASON_TEXT_CHARS]
                 self._emit(s, branch, step, agent_id)
-                if not agent_id:   # kept privately for step labels (masked before any model sees it)
-                    branch.pending_thinking += bt != "text"
-                    if body and len(branch.pending_text) < stepsmod.TEXT_CHARS:
-                        branch.pending_text = (branch.pending_text + " " + " ".join(body.split()))[:stepsmod.TEXT_CHARS]
+                # kept privately for step labels (masked before any model sees it)
+                branch.pending_thinking += bt != "text"
+                if body and len(branch.pending_text) < stepsmod.TEXT_CHARS:
+                    branch.pending_text = (branch.pending_text + " " + " ".join(body.split()))[:stepsmod.TEXT_CHARS]
             elif bt == "tool_use":
                 tool_blocks.append(b)
         if tool_blocks:
@@ -757,9 +759,8 @@ class LiveState:
         if step is None:
             step = {"k": "turn", "ts": ts, "intent": None, "group": None, "tools": [],
                     "cw": round(m["cw"], 1), "usd": round(m["usd"], 6), "_recs": []}
-            if not agent_id:
-                step.update(_raw=[], _thinking=branch.pending_thinking, _text=branch.pending_text.strip())
-                branch.pending_thinking, branch.pending_text = 0, ""
+            step.update(_raw=[], _thinking=branch.pending_thinking, _text=branch.pending_text.strip())
+            branch.pending_thinking, branch.pending_text = 0, ""
             m["step"] = step
             self._emit(s, branch, step, agent_id)
             branch.turn_steps.append(step)
@@ -1045,6 +1046,49 @@ class LiveState:
                 "skills": [{"name": n, "count": c} for n, c in sorted(s.skills.items(), key=lambda kv: (-kv[1], kv[0]))],
                 **self._edited(s), **self._recap_key(s, now)}
 
+    def session_flow(self, s, now=None):
+        """The web canvas payload (/api/session/<id>/flow): the compact payload with every step's calls, the header
+        (totals, flags, model), each main step's times, and "flow": one entry per subagent with its own intents and
+        the step that launched it ({"agent": launching agent id or None for the main thread, "step": step index})."""
+        now = self.clock() if now is None else now
+        d = self.session_compact(s, now, all_ops=True)
+        d["intents"] = self.intents(s, now, all_ops=True, flow=True)
+        d["header"] = self._header(s, now)
+        d["now_ts"] = now
+        wf = {a["id"]: tid for tid, ags in self.workflow_agents(s).items() for a in ags} if s.wf_calls else {}
+        out = []
+        for a in sorted(s.agents.values(), key=lambda a: (a.get("first_ts") or 0, a["id"])):
+            row = self._agent_row(s, a, None)
+            f = s.fanouts.get(a["tool_use_id"]) or {}
+            row.update(usd=round(a["usd"], 6), first_ts=a.get("first_ts"), last_ts=a.get("last_ts"),
+                       launch=self._launch(s, a["tool_use_id"] or wf.get(a["id"]), now), launch_ts=f.get("ts"),
+                       intents=self.intents(s, now, all_ops=True, aid=a["id"], flow=True))
+            out.append(row)
+        linked = {a["tool_use_id"] for a in s.agents.values()}
+        for tid, f in s.fanouts.items():   # launched, no transcript yet
+            if tid not in linked and not f.get("agent_id"):
+                out.append({"id": "pending:" + str(tid)[-12:], "type": f.get("agent_type") or "agent",
+                            "description": None if self.redact else f.get("description"), "status": "starting",
+                            "turns": 0, "cw": 0, "usd": 0, "parent": None, "first_ts": f.get("ts"), "last_ts": f.get("ts"),
+                            "launch": self._launch(s, tid, now), "launch_ts": f.get("ts"), "intents": None})
+        d["flow"] = {"agents": out}
+        return d
+
+    def _launch(self, s, tid, now):
+        """{"agent": id of the branch whose call `tid` was (None: main thread), "step": that branch's step index}."""
+        hit = s.tools.get(tid)
+        if not hit:
+            return None
+        turn, _, br = hit[0], hit[1], hit[2]
+        aid = None if br is s.main else next((k for k, b in s.branches.items() if b is br), None)
+        try:
+            k = br.turn_steps.index(turn)
+        except ValueError:
+            return {"agent": aid, "step": None}
+        steps, _ = self.steps(s, now) if aid is None else self.agent_steps(s, aid, now)
+        st = next((x for x in steps if x["turn_first"] <= k <= x["turn_last"]), None)
+        return {"agent": aid, "step": st["i"] if st else None}
+
     # ------------------------------------------------------------ idle recap (recap.py)
     def _recap_key(self, s, now):
         """{"recap": ...} while the session waits for the user (or is idle) and there is work to recap, else {}."""
@@ -1123,12 +1167,12 @@ class LiveState:
                 out.setdefault(tid, []).append(a)
         return out
 
-    def segment_input(self, s):
-        """(turns, events) for steps.segment from the main thread (see steps.py for the format)."""
+    def segment_input(self, s, aid=None):
+        """(turns, events) for steps.segment from the main thread, or the subagent `aid` (see steps.py)."""
         by_tool = {a["tool_use_id"]: a for a in s.agents.values() if a["tool_use_id"]}
-        by_wf = self.workflow_agents(s) if s.wf_calls else {}
+        by_wf = self.workflow_agents(s) if s.wf_calls and aid is None else {}
         turns = []
-        for t in s.main.turn_steps:
+        for t in self._branch(s, aid).turn_steps:
             seg = t.get("_seg")
             if seg is None:
                 seg = t["_seg"] = {"ts": t["ts"], "tools": t.get("_raw") or [], "thinking": t.get("_thinking", 0),
@@ -1140,8 +1184,33 @@ class LiveState:
                        sub_cw=sum(a["cw"] for a in subs + wfs), sub_usd=sum(a["usd"] for a in subs + wfs),
                        wf_agents=len(wfs))
             turns.append(seg)
+        if aid is not None:
+            return turns, []
         events = [{"kind": "prompt", "at": k} for k in s.prompt_at]
         return turns, events + [dict(e, kind="skill") for e in s.slash_skills]
+
+    @staticmethod
+    def _branch(s, aid):
+        return s.main if aid is None else s.branches[aid]
+
+    def agent_steps(self, s, aid, now=None):
+        """Labelled steps + groups of one subagent's transcript (signal / rule labels: no model calls). Its last
+        step stays open while the subagent runs."""
+        a = s.agents[aid]
+        lab = s.agent_labellers.get(aid)
+        if lab is None:
+            lab = s.agent_labellers[aid] = stepsmod.Labeller()
+            lab.no_model = True
+        open_last = a["status"] in ("running", "starting")
+        key = (s.seq, open_last, len(lab.locked))
+        hit = s.agent_steps_cache.get(aid)
+        if hit and hit[0] == key:
+            return hit[1]
+        turns, events = self.segment_input(s, aid)
+        steps = stepsmod.segment(turns, events, open_last=open_last)
+        gs = lab.assign(steps)
+        s.agent_steps_cache[aid] = (key, (steps, gs))
+        return steps, gs
 
     def steps(self, s, now=None, final=False):
         """Labelled steps + groups of the main thread. The last step stays open while the session works."""
@@ -1184,15 +1253,16 @@ class LiveState:
         return self.redactor.string(text) if self.redact and text else text
 
     @staticmethod
-    def _ops(s, step, now, working, last_n=12):
+    def _ops(s, step, now, working, last_n=12, branch=None):
         """The live step's calls, newest last (at most `last_n`): tool label, target (both redaction-aware, as in
         "now"), CW (the turn's, split over its calls), err (None while running), the test outcome of a run, and
         dur_s: tool_use to tool_result, or for a running call (while the session works) the time since it started.
         declare_intent calls are the label source, not work: never an op, their CW share goes to the turn's other
         calls."""
         out = []
+        branch = branch or s.main
         for k in range(step["turn_first"], step["turn_last"] + 1):
-            t = s.main.turn_steps[k]
+            t = branch.turn_steps[k]
             tools = [x for x in t["tools"] if not stepsmod.is_declare(x["name"])]
             part = stepsmod.call_parts([x["name"] for x in t["tools"]])   # a turn split at its ToolSearch calls
             lo = step.get("part_first") if k == step["turn_first"] else None
@@ -1211,14 +1281,22 @@ class LiveState:
                 if x.get("test"):
                     op["test"] = x["test"]
                 out.append(op)
-        return out[-last_n:]
+        return out[-last_n:] if last_n else out
 
-    def intents(self, s, now=None, last_n=40, all_ops=False):
+    def intents(self, s, now=None, last_n=40, all_ops=False, aid=None, flow=False):
         """The compact payload's "intents" key; `all_ops`: every step carries its calls (the web page shows them on
-        an older step it expands), not only the live one."""
+        an older step it expands), not only the live one. `aid`: a subagent's steps instead of the main thread's;
+        `flow` (the web canvas): every step and call, plus each step's first / last event time (ts0 / ts1)."""
         now = self.clock() if now is None else now
-        steps, gs = self.steps(s, now)
-        working = self.status(s, now) == "working"
+        if aid is None:
+            steps, gs = self.steps(s, now)
+            working = self.status(s, now) == "working"
+        else:
+            steps, gs = self.agent_steps(s, aid, now)
+            working = s.agents[aid]["status"] in ("running", "starting") and self.status(s, now) == "working"
+        branch = self._branch(s, aid)
+        if flow:
+            last_n = len(steps) or 1
         # the live step, with its calls: the open one, or the last while the session works (a test run closes a
         # step before the next turn opens one)
         live = steps[-1] if steps and (not steps[-1]["closed"] or working) else None
@@ -1235,13 +1313,15 @@ class LiveState:
         for n, g in enumerate(gs):
             for i in range(g["first"], g["last"] + 1):
                 gi[i] = n
-        decl = [x for t in s.main.turn_steps for x in t.get("_raw") or () if stepsmod.is_declare(x["name"])]
+        decl = [x for t in branch.turn_steps for x in t.get("_raw") or () if stepsmod.is_declare(x["name"])]
         return {"steps": [{"i": x["i"], "cat": x["cat"], "label": self._lab(x["label"]), "source": x["source"],
                            "locked": x["locked"], "open": not x["closed"], "cw": x["cw"], "usd": x["usd"],
                            "turns": x["turns"], "summary": self._summary(x), "tested": x["tested"],
                            "group": gi.get(x["i"]), "skills": x["skills"],
                            "dur_s": dur(x["ts0"], x.get("drive_ts1") or x["ts1"], working and drives(x)),
-                           **({"ops": self._ops(s, x, now, working and x is live)} if x is live or all_ops else {})}
+                           **({"ops": self._ops(s, x, now, working and x is live, last_n=0 if flow else 12,
+                                                branch=branch)} if x is live or all_ops else {}),
+                           **({"ts0": x["ts0"], "ts1": x.get("drive_ts1") or x["ts1"]} if flow else {})}
                           for x in steps[-last_n:]],
                 "groups": [{"label": self._lab(g["label"]), "source": g["source"], "first": g["first"],
                             "last": g["last"], "cat": g["cat"], "cw": g["cw"], "usd": g["usd"], "steps": g["steps"],
@@ -1253,19 +1333,21 @@ class LiveState:
                                            "wf_agents": sum(x.get("wf_agents") or 0
                                                             for x in steps[g["first"]:g["last"] + 1])})} for g in gs],
                 "declared": {"calls": len(decl), "steps": sum(1 for x in steps if x["declared"])},
-                "labeller": dict(s.labeller.stats, pending=len(s.labeller.pending(steps)))}
+                "labeller": dict(s.labeller.stats, pending=len(s.labeller.pending(steps))) if aid is None else {}}
 
     def label_requests(self, now=None, min_pending=3):
         """[(session id, steps batch, goal)] for the model labeller: >= min_pending closed unlabelled steps, or
-        any when the session is waiting for the user. Marks the batch in flight."""
+        any when the session is waiting for the user or idle. Marks the batch in flight."""
         now = self.clock() if now is None else now
         out = []
         for s in self.sessions.values():
-            if not s.main.turn_steps or (s.last_ts and now - s.last_ts > WAITING_S):
+            if not s.main.turn_steps:
                 continue
             steps, _ = self.steps(s, now)
             pend = s.labeller.pending(steps)
-            if pend and (len(pend) >= min_pending or self.status(s, now) == "waiting"):
+            # a session that waits or went idle gets its last few steps labelled too (a server started on a finished
+            # session would otherwise lock rule labels the live pane's server replaced with model labels)
+            if pend and (len(pend) >= min_pending or self.status(s, now) in ("waiting", "idle")):
                 batch = pend[:LABEL_BATCH]
                 s.labeller.inflight.update(x["i"] for x in batch)
                 out.append((s.id, batch, s.goal["name"] if s.goal else None))

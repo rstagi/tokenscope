@@ -62,10 +62,47 @@ class TestLiveStatic(unittest.TestCase):
             board = f.read()
         with open(os.path.join(STATIC, "demo.html"), encoding="utf-8") as f:
             demo = f.read()
-        have = set(re.findall(r'id="([\w-]+)"', session + board))
+        # the card-list session view in live.js now runs only on the demo page; /s/<id> is the canvas (canvas.js)
+        have = set(re.findall(r'id="([\w-]+)"', demo + board))
         self.assertEqual(sorted(ids - have), [])
-        self.assertEqual(sorted(ids - set(re.findall(r'id="([\w-]+)"', demo))), [])
         self.assertNotIn("fmap", session)   # the phase flow map is gone: the intents replace it
+
+    def test_session_page_is_the_vendored_canvas(self):
+        with open(os.path.join(STATIC, "session.html"), encoding="utf-8") as f:
+            page = f.read()
+        self.assertIn('src="/static/canvas.js"', page)
+        self.assertIn('href="/static/canvas.css"', page)
+        self.assertIn('id="canvas"', page)
+        for name in ("canvas.js", "canvas.css", "canvas.js.LEGAL.txt"):
+            self.assertTrue(os.path.getsize(os.path.join(STATIC, name)) > 0, name)
+        for name in os.listdir(STATIC):   # no CDN at runtime: nothing loads from another origin
+            with open(os.path.join(STATIC, name), encoding="utf-8") as f:
+                text = f.read()
+            self.assertIsNone(re.search(r"""(src|href)=["']?(https?:)?//""", text), name)
+        with open(os.path.join(ROOT, "THIRD_PARTY_NOTICES.md"), encoding="utf-8") as f:
+            notices = f.read()
+        for lib in ("@xyflow/react", "@xyflow/system", "react-dom", "zustand", "d3-zoom"):
+            self.assertIn(lib, notices)
+
+    def test_canvas_reads_fields_the_flow_payload_has(self):
+        with open(os.path.join(ROOT, "web", "canvas", "src", "main.jsx"), encoding="utf-8") as f:
+            code = f.read()
+        src = ""
+        for p in PRODUCERS + [os.path.join(ROOT, "tokenscope", "live", "replay.py")]:
+            with open(p, encoding="utf-8") as f:
+                src += f.read()
+        used = set()
+        for v in ("C", "H", "T", "a", "x", "g", "s", "o", "rc", "h", "t", "w", "c", "sl", "m", "f", "L"):
+            used |= set(re.findall(r"(?<![\w.$])%s\.([a-z_][a-z0-9_]*)\b" % re.escape(v), code))
+        own = {"slots", "steps", "stepSlot", "group", "groupIndex", "first", "lane", "key", "ts0", "agent", "id",
+               "current", "type", "position", "data", "length", "map", "filter", "slice", "join", "indexOf", "push",
+               "find", "some", "forEach", "sort", "replace", "split", "concat", "toFixed", "kind", "t", "n", "a", "sl",
+               "x", "y", "zoom"}   # viewport fields (onMoveEnd)
+        missing = sorted(f for f in used - own - NOT_FIELDS
+                         if not re.search(r"""["']%s["']|\b%s=""" % (f, f), src))
+        self.assertEqual(missing, [], "canvas reads fields no server payload has")
+        for f in ("flow", "launch", "launch_ts", "header", "intents", "recap", "ops", "replay", "now_ts", "last_ts"):
+            self.assertIn(f, used)
 
     def test_no_machine_paths_in_static_files(self):
         for name in os.listdir(STATIC):

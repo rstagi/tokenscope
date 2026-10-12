@@ -25,12 +25,15 @@ truncation handled) and shows:
   `--no-redact`), goal, status (working / waiting for you / idle), current intent, last step, elapsed time, cost-weighted
   tokens and API-equivalent $ so far, intent mix bar, subagents running, live warnings, the current intent label and
   the skills used. Click a card to open it.
-- **Session view** (`/s/<id>`): what the Claude Code pane shows, in the browser: ASKED / NOW / TESTS / FILES / SKILLS
-  rows, the idle recap (costliest and slowest intent, up to 3 hints, cross-session ones marked) while the session
-  waits for you, and the intents: one card per intent group or step ([CATEGORY] label, CW, $, wall time, a one-line
-  summary), the live one expanded down to its tool calls (target, CW, time, ✓ / ✗, test counts); click any card or step
-  to expand it. Plus an intent ribbon (one segment per turn), running CW / $ counters, a context gauge and the
-  subagents. `?replay=1` replays a finished session's turns (handy for demos).
+- **Session view** (`/s/<id>`): the session as an infinite canvas (pan, zoom, minimap, fit view). One node per
+  intent group or step ([CATEGORY] label, CW, $, wall time, a one-line summary, ✦ skills, ✎ declared), top-down in
+  time order; each subagent branches off the step that launched it as its own flow of intents (parallel fan-outs side
+  by side, nested ones further right) and rejoins the main flow when it returns. Click a node for its steps and tool
+  calls (target, CW, time, ✓ / ✗, test counts) in a side panel. The view follows the live node; pan or zoom and it
+  stops, "follow live" resumes. Overlays (collapsible): ASKED / NOW / TESTS / FILES / SKILLS rows with totals and a
+  context gauge, and the idle recap (costliest and slowest intent, up to 3 hints, cross-session ones marked) while the
+  session waits for you. `?replay=1` replays a recorded session server-side as if it were live (about 90 s;
+  `&duration=<s>`). The canvas is a vendored React Flow build (`web/canvas/`, licences in THIRD_PARTY_NOTICES.md).
 - **Live warnings** (rare by design; a normal fail -> edit -> fail -> edit -> green session shows none; each comes
   with a short hint): `stuck_error` (the same normalised error 3+ times with no edit in between, per thread),
   `reread_loop` (the same file read in full 4+ times with no edit to it and no compaction in between),

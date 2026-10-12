@@ -8,9 +8,13 @@ Endpoints (see docs/live-spec.md):
   GET /api/session/<id>          full session model (+ "seq"); ?since=<seq> -> only new / updated steps
   GET /api/session/<id>/compact  small payload for a Claude Code mod (and the session page: ?ops=all -> every
                                  intent step with its calls)
+  GET /api/session/<id>/flow     the session canvas payload: compact + every call + header + subagent sub-flows;
+                                 ?replay=1[&restart=1][&duration=<s>]: the same payload from a replay of the
+                                 session's transcripts in a fresh state, advancing with wall time (replay.LiveReplay)
   GET /events                    SSE: `board` (1 s, when changed), `step` per new step, heartbeat every 15 s
 """
 import argparse
+import functools
 import json
 import mimetypes
 import os
@@ -26,7 +30,7 @@ from .goalname import HaikuNamer
 from .hookevents import HookEvents
 from .state import LiveState
 from .tail import Tailer
-from ..stepnames import StepNamer
+from ..stepnames import StepNamer, label_batch
 
 STATIC = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
 POLL_S = 0.5
@@ -37,12 +41,20 @@ class Live:
     """Tailer + hook events + state behind one lock, plus SSE subscriber queues."""
 
     def __init__(self, root, redact=True, since_minutes=120, haiku=False,
-                 events_path=None, hooks=True, project="*", xhints=False, index_root=None, skills_dirs=()):
+                 events_path=None, hooks=True, project="*", xhints=False, index_root=None, skills_dirs=(),
+                 cached_labels=False):
         self.lock = threading.Lock()
         self.namer = HaikuNamer(self._named) if haiku else None
-        self.step_namer = StepNamer(self._steps_named) if haiku else None   # step labels (docs/intents-spec.md)
+        # step labels (docs/intents-spec.md): the model with --haiku; else (cached_labels) only the labels another
+        # server's model calls left in the step-label cache, so this page shows what the live pane showed
+        self.step_namer = None
+        if haiku:
+            self.step_namer = StepNamer(self._steps_named)
+        elif cached_labels:
+            self.step_namer = StepNamer(self._steps_named, labeller=functools.partial(label_batch, cache_only=True))
         self.state = LiveState(redact=redact, on_goal=self.namer.request if self.namer else None,
-                               on_prompt=self._name_prompt if self.namer else None, model_labels=haiku)
+                               on_prompt=self._name_prompt if self.namer else None,
+                               model_labels=self.step_namer is not None)
         self.suggester = None
         if xhints:   # cross-session recap hints (tokenscope/xindex.py): the index builds in the background
             from ..xindex import Suggester
@@ -52,6 +64,8 @@ class Live:
         self.hooks = HookEvents(events_path) if hooks else None
         self.subscribers = []
         self.stop = threading.Event()
+        self.replays = {}   # session id -> LiveReplay (the session page's ?replay=1)
+        self.replay_lock = threading.Lock()
 
     def _name_prompt(self, sid, n, text):
         self.namer.request((sid, n), text)   # cached per (session, prompt n); keyword name until it arrives
@@ -102,6 +116,18 @@ class Live:
             except Exception as e:  # noqa: BLE001 - keep tailing whatever one bad file does
                 print("tokenscope live: poll error: %r" % (e,), file=sys.stderr)
             self.stop.wait(POLL_S)
+
+    def replay_flow(self, path, sid, restart=False, duration=90.0):
+        """The /flow payload of a replay of the session transcript at `path` (one replay per session, made on the
+        first request or with restart); cross-session hints from this server's index, cached step labels only."""
+        from .replay import LiveReplay
+        with self.replay_lock:
+            rp = self.replays.get(sid)
+            if rp is None or restart:
+                rp = self.replays[sid] = LiveReplay(
+                    path, redact=self.state.redact, duration=duration, xhints=self.suggester,
+                    labeller=functools.partial(label_batch, cache_only=True))
+            return rp.flow()
 
     def subscribe(self):
         q = queue.Queue()
@@ -155,11 +181,16 @@ class Handler(BaseHTTPRequestHandler):
         if parts == ["api", "board"]:
             with live.lock:
                 return self._json(st.board())
+        if parts[:2] == ["api", "session"] and len(parts) == 4 and parts[3] == "flow" and \
+                parse_qs(u.query).get("replay") in (["1"], ["true"]):
+            return self._replay(parts[2], parse_qs(u.query))
         if parts[:2] == ["api", "session"] and len(parts) in (3, 4):
             with live.lock:
                 s = st.find(parts[2])
                 if s is None:
                     return self._json({"error": "unknown session"}, 404)
+                if len(parts) == 4 and parts[3] == "flow":
+                    return self._json(st.session_flow(s))
                 if len(parts) == 4:
                     if parts[3] != "compact":
                         return self._json({"error": "not found"}, 404)
@@ -176,6 +207,18 @@ class Handler(BaseHTTPRequestHandler):
         if parts == ["events"]:
             return self._events()
         return self._json({"error": "not found"}, 404)
+
+    def _replay(self, sid, q):
+        with self.live.lock:
+            s = self.live.state.find(sid)
+            path, sid = (s.path, s.id) if s is not None else (None, None)
+        if not path:
+            return self._json({"error": "unknown session"}, 404)
+        try:
+            dur = min(1800.0, max(5.0, float((q.get("duration") or ["90"])[0])))
+        except ValueError:
+            dur = 90.0
+        return self._json(self.live.replay_flow(path, sid, restart=q.get("restart") == ["1"], duration=dur))
 
     def _events(self):
         self.send_response(200)
@@ -266,7 +309,8 @@ def main(args=None):
     ensure_static()
     live = Live(resolve_root(getattr(args, "root", None)), redact=not args.no_redact,
                 since_minutes=args.since_minutes, project=args.project, haiku=args.haiku,
-                xhints=not args.no_xhints, index_root=args.index_root, skills_dirs=args.skills_dir)
+                xhints=not args.no_xhints, index_root=args.index_root, skills_dirs=args.skills_dir,
+                cached_labels=True)
     srv = make_server(live, args.host, args.port)
     threading.Thread(target=live.run, daemon=True).start()
     print("tokenscope live: http://%s:%d/  (redaction %s; Ctrl-C to stop)" % (

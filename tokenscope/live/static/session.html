@@ -1,34 +1,11 @@
 <!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>tokenscope · session</title><link rel="stylesheet" href="/static/live.css"></head>
-<body data-page="session">
-<header>
-  <a id="back" class="back" href="/">← board</a> <span id="conn" class="conn"></span>
-  <div class="shead">
-    <div>
-      <div class="goal" id="h-goal">loading…</div>
-      <div class="sub"><span id="h-proj"></span> &nbsp; <span id="h-pill"></span> &nbsp; ⏱ <b id="h-el">–</b> &nbsp; <span id="h-turns"></span></div>
-      <div class="flaglist" id="h-flags"></div>
-    </div>
-    <div class="kpis">
-      <div class="kpi"><div class="l">CW so far</div><div class="v" id="h-cw">–</div></div>
-      <div class="kpi"><div class="l">API-equiv $</div><div class="v" id="h-usd">–</div></div>
-      <div class="kpi gauge"><div class="l">context <span id="h-ctx" class="mut"></span></div><div class="bar"><i id="h-gauge" style="width:0"></i></div></div>
-    </div>
-  </div>
-  <div id="ribbon" class="ribbon" title="one segment per turn, width ∝ CW"></div>
-  <div id="legend" class="legend"></div>
-</header>
-<main>
-  <div id="notfound" class="empty" style="display:none"></div>
-  <div id="body">
-    <section id="recap" class="recap" style="display:none"></section>
-    <section class="card hrows" id="h-rows"></section>
-    <div class="tools"><span><b class="sect">Intents</b> <span id="i-meta" class="sub"></span></span>
-      <span class="sub">click a card to expand · <button class="more" id="i-expand">expand all</button> · <button class="more" id="i-collapse">collapse all</button></span></div>
-    <div id="intents" class="intents"></div>
-    <section id="agents" class="card agents" style="display:none"><b class="sect">Subagents</b><div id="agents-list"></div></section>
-  </div>
-</main>
-<script src="/static/live.js"></script>
+<title>tokenscope · session</title>
+<link rel="stylesheet" href="/static/live.css"><link rel="stylesheet" href="/static/canvas.css"></head>
+<body data-page="canvas">
+<!-- The session as an infinite canvas: built from web/canvas (React Flow, see THIRD_PARTY_NOTICES.md) into
+     canvas.js / canvas.css; data from /api/session/<id>/flow (?replay=1 on this page: a server-side replay). -->
+<div id="canvas"><div class="empty">loading…</div></div>
+<noscript><div class="empty">The session canvas needs JavaScript. JSON: /api/session/&lt;id&gt;/flow</div></noscript>
+<script src="/static/canvas.js"></script>
 </body></html>

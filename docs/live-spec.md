@@ -136,6 +136,17 @@ ThreadingHTTPServer bound to 127.0.0.1 by default. Background thread runs the ta
   step, labelled as in the pane),"skills":[names]}]} sorted by last_ts desc; sessions idle for more than 6 h dropped.
 - `GET /api/session/<id>` -> full session model (as above, steps of main + agents), plus "seq" (max).
 - `GET /api/session/<id>?since=<seq>` -> only steps with seq > since (+ totals, status, flags, agents summary).
+- `GET /api/session/<id>/flow` -> the session canvas payload (static/session.html, built from web/canvas): the
+  compact payload with `?ops=all`, where every intent step also carries all its calls and `ts0` / `ts1`, plus
+  "header" (as in the full model: totals, flags, model, started, ...), "now_ts", and "flow": {"agents": [{"id","type",
+  "description","status","turns","cw","usd","parent","first_ts","last_ts","launch_ts","launch":{"agent" (launching
+  subagent id, null = main thread),"step" (that thread's intent step index)},"intents" (the subagent's own steps /
+  groups: signal or rule labels, never a model call)}]} (a launched subagent without a transcript yet:
+  id "pending:...", status "starting", intents null). `?replay=1[&restart=1][&duration=<s>]`: the same payload from a
+  replay of the session's transcripts (main + subagents) fed in time order into a fresh state on a compressed
+  timeline (about `duration` s, default 90, at most 3 s between two records; the state's clock is the transcript time
+  at the replay position, so statuses, the live step and the idle recap behave as they did live) plus "replay":
+  {"fed","records","done","elapsed_s","duration_s","speed"}; one replay per session, advancing with wall time.
 - `GET /api/session/<id>/compact` -> small payload for the Claude Code mod: {"goal","status","cw","usd","elapsed_s","turns","tool_calls","errors","cw_series" (CW per main turn, last 120),
   "context_tokens","current_intent","warnings":[{"rule","text","hint","count","ts"}],"flags":[alias],
   "asked":{"goal","source","prompt_n","latest" (keyword/Haiku name of the latest prompt when prompt_n > 1),"latest_ts"},

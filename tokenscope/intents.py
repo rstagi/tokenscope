@@ -184,8 +184,25 @@ def turn_intent(ts):
     return (min(its, key=RANK.get) if its else "shell_other"), its
 
 
+# Claude Code's own output-capture files: a large tool result persisted under <session>/tool-results/, a background
+# task's output under .../tasks/, or a random-named .txt / .output in a temp or ~/.claude dir. Reading one back is
+# part of the call that produced it, never a file of the project: no target, no step file, no recap fact.
+CAPTURE = re.compile(r"(?:^|/)(?:tool-results|tasks)/[^/]+\.(?:txt|output|log|json)$")
+CAPTURE_DIR = re.compile(r"(?:^|/)(?:tmp|\.claude)/")
+CAPTURE_NAME = re.compile(r"(?=[a-z0-9]*\d)[a-z0-9]{8,12}\.(?:txt|output)")
+
+
+def is_capture_file(path):
+    """True for a Claude Code output-capture file (see CAPTURE)."""
+    p = str(path or "").replace("\\", "/")
+    if not p:
+        return False
+    return bool(CAPTURE.search(p) or (CAPTURE_DIR.search(p) and CAPTURE_NAME.fullmatch(os.path.basename(p))))
+
+
 def record(name, inp):
-    """Tool record (the shape the rules read) from a raw tool_use name + input."""
+    """Tool record (the shape the rules read) from a raw tool_use name + input; an output-capture file
+    (is_capture_file) is dropped from "file" / "target" and flagged "capture"."""
     inp = inp if isinstance(inp, dict) else {}
     t = {"name": name or "?"}
     if name == "Bash":
@@ -207,4 +224,8 @@ def record(name, inp):
         t["target"] = str(inp.get("url", ""))[:200]
     elif name in ("WebSearch",):
         t["target"] = str(inp.get("query", ""))[:200]
+    if t.get("file") and is_capture_file(t["file"]):
+        t["capture"] = True
+        t["file"] = ""
+        t.pop("target", None)
     return t

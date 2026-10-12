@@ -2,7 +2,9 @@
 <= 12 steps, which also proposes intent groups. The input is masked (goalname.mask), the call runs in the neutral
 temp dir used for goal naming, answers are cached by a hash of the batch input. Never raises.
 
-Cache: $TOKENSCOPE_CACHE_DIR/step-labels.json (default ~/.cache/tokenscope/step-labels.json).
+Cache: $TOKENSCOPE_CACHE_DIR/step-labels.json (default ~/.cache/tokenscope/step-labels.json): one entry per batch and
+one per step ("s:" + a hash of the step's masked row), so a server that batches the same steps differently (a fresh
+server on a finished session, or `cache_only` without --haiku) finds the labels the live pane's server got.
 """
 import hashlib
 import json
@@ -97,9 +99,16 @@ def _clean(ans, ids):
     return labels, groups
 
 
-def label_batch(steps, goal=None, runner=subprocess.run, cache=None, timeout=90, batch=BATCH):
+def step_key(row):
+    """Per-step cache key of one batch_input row (its index left out: the same step may get another index)."""
+    blob = json.dumps({k: v for k, v in row.items() if k != "i"}, sort_keys=True)
+    return "s:" + hashlib.sha256(blob.encode("utf-8")).hexdigest()[:32]
+
+
+def label_batch(steps, goal=None, runner=subprocess.run, cache=None, timeout=90, batch=BATCH, cache_only=False):
     """{"labels": {i: label}, "groups": [{"label", "first", "last"}], "usage": {"calls", "tokens", "usd",
-    "cached"}} for up to `batch` (default 12) closed steps; empty labels / groups on any failure."""
+    "cached"}} for up to `batch` (default 12) closed steps; empty labels / groups on any failure. `cache_only`:
+    never call the model, answer from the batch / per-step cache (labels of the steps found there)."""
     empty = {"labels": {}, "groups": [], "usage": {"calls": 0, "tokens": 0, "usd": 0.0, "cached": False}}
     try:
         inp = batch_input(steps, goal, batch)
@@ -109,12 +118,18 @@ def label_batch(steps, goal=None, runner=subprocess.run, cache=None, timeout=90,
         blob = json.dumps(inp, sort_keys=True)
         key = hashlib.sha256(blob.encode("utf-8")).hexdigest()[:32]
         path = cache or cache_path()
-        hit = _load(path).get(key)
+        cached = _load(path)
+        hit = cached.get(key)
         if isinstance(hit, dict):
             labels, groups = _clean(hit, ids)
             with _LOCK:
                 STATS["cache_hits"] += 1
             return {"labels": labels, "groups": groups, "usage": dict(empty["usage"], cached=True)}
+        per = {r["i"]: cached.get(step_key(r)) for r in inp["steps"]}
+        per = {i: v for i, v in per.items() if isinstance(v, str) and v.strip()}
+        if cache_only or len(per) == len(ids):
+            labels, _ = _clean({"labels": {str(i): v for i, v in per.items()}}, ids)
+            return {"labels": labels, "groups": [], "usage": dict(empty["usage"], cached=bool(labels))}
         goal_line = "Session goal (masked): %s\n" % inp["goal"] if inp["goal"] else ""
         rows = "\n".join(json.dumps(r) for r in inp["steps"])
         p = runner(["claude", "-p", "--model", "haiku", "--tools", "", "--output-format", "json",
@@ -138,6 +153,9 @@ def label_batch(steps, goal=None, runner=subprocess.run, cache=None, timeout=90,
         labels, groups = _clean(ans, ids)
         if labels:
             _save(path, key, {"labels": {str(k): v for k, v in labels.items()}, "groups": groups})
+            for r in inp["steps"]:
+                if r["i"] in labels:
+                    _save(path, step_key(r), labels[r["i"]])
         return {"labels": labels, "groups": groups, "usage": usage}
     except Exception:  # noqa: BLE001 - labelling must never break the caller
         with _LOCK:
