@@ -408,9 +408,10 @@ class TestServer(LiveFixture):
         self.assertIn("totals", part)
         self.assertEqual(part["agents"][0]["type"], "Explore")
         c = self.get("/api/session/%s/compact" % SID)
-        self.assertEqual(set(c), {"goal", "status", "cw", "usd", "context_tokens", "current_intent", "flags",
-                                  "recent", "agents", "elapsed_s", "turns", "tool_calls", "errors", "cw_series",
-                                  "warnings", "asked", "now", "tests", "files_edited_n"})
+        self.assertEqual("recap" in c, c["status"] in ("waiting", "idle"))   # the idle recap, see recap.py
+        self.assertEqual(set(c) - {"recap"}, {"goal", "status", "cw", "usd", "context_tokens", "current_intent", "flags",
+                                  "recent", "agents", "elapsed_s", "turns", "tool_calls", "errors", "cw_series", "main_tool_calls",
+                                  "warnings", "asked", "now", "tests", "files_edited_n", "intents"})
         self.assertEqual(set(c["warnings"][0]), {"rule", "text", "hint", "count", "ts"})
         self.assertEqual(c["tests"]["runs"], 3)
         self.assertFalse(c["tests"]["ok"])
@@ -424,7 +425,8 @@ class TestServer(LiveFixture):
         self.assertEqual({k: r3[k] for k in ("intent", "group", "tools", "err", "tool_err")},
                          {"intent": "test", "group": "verify", "tools": ["Bash pytest"], "err": True, "tool_err": [True]})
         self.assertEqual(len(c["cw_series"]), len(c["recent"]))   # one value per main-thread tool turn
-        self.assertEqual(c["agents"], [{"type": "Explore", "status": "done", "turns": 1}])
+        self.assertEqual([{k: a[k] for k in ("type", "status", "turns", "parent")} for a in c["agents"]],
+                         [{"type": "Explore", "status": "done", "turns": 1, "parent": None}])
         with self.assertRaises(urllib.error.HTTPError):
             self.get("/api/session/nope")
 
@@ -449,6 +451,51 @@ if __name__ == "__main__":
 
 
 class TestAsyncAgents(LiveFixture):
+    def test_queued_followup_and_now_from_latest_tool(self):
+        """A follow-up typed while the agent works is absorbed mid-turn as a queued_command attachment: it is a
+        prompt (the pane's "↳ now" line). NOW follows the turn's latest call, not the turn's top intent."""
+        q = {"type": "attachment", "isSidechain": False, "timestamp": "2026-01-01T00:00:04Z",
+             "attachment": {"type": "queued_command", "prompt": "also add a csv format"}}
+        self.write(self.main, lines(user_prompt(0, "add warehouses to the store"),
+                                    assistant(1, "m1", [tool_use("e1", "Edit", {"file_path": "/srv/store.py"}),
+                                                        tool_use("b1", "Bash", {"command": "python3 -m unittest -q"})]))
+                   + json.dumps(q) + "\n")
+        s = self.step()
+        c = self.state.session_compact(s)
+        self.assertEqual(c["asked"]["prompt_n"], 2)
+        self.assertTrue(c["asked"]["latest"])
+        self.assertEqual(c["now"]["intent"], "test")
+        self.assertEqual(c["recent"][-1]["intent"], "edit")
+
+    def test_nested_background_agent(self):
+        """A subagent launches its own background Explore: parent from the meta file, finished by the
+        task-notification that arrives inside the subagent transcript (a queued_command attachment)."""
+        self.state = st.LiveState(redact=False)   # descriptions are only kept unredacted
+        self.write(self.main, lines(user_prompt(0, "audit the cli"),
+                                    assistant(1, "m1", [tool_use("tA", "Agent", {"subagent_type": "general-purpose",
+                                                                                "description": "Audit cli.py"})])))
+        os.makedirs(self.subdir)
+        self.write(os.path.join(self.subdir, "agent-p1.meta.json"),
+                   json.dumps({"toolUseId": "tA", "agentType": "general-purpose", "description": "Audit cli.py"}))
+        self.write(os.path.join(self.subdir, "agent-c1.meta.json"),
+                   json.dumps({"toolUseId": "tB", "agentType": "Explore", "description": "Map calls", "parentAgentId": "p1"}))
+        note = {"type": "attachment", "isSidechain": True, "agentId": "p1", "timestamp": "2026-01-01T00:00:09Z",
+                "attachment": {"type": "queued_command", "prompt": "<task-notification>\n<task-id>c1</task-id>\n"
+                               "<tool-use-id>tB</tool-use-id>\n<status>completed</status>\n</task-notification>"}}
+        self.write(os.path.join(self.subdir, "agent-p1.jsonl"),
+                   lines(assistant(2, "p1a", [tool_use("tB", "Agent", {"subagent_type": "Explore", "description": "Map calls"})]))
+                   + json.dumps(note) + "\n")
+        self.write(os.path.join(self.subdir, "agent-c1.jsonl"),
+                   lines(assistant(3, "c1a", [tool_use("s1", "Read", {"file_path": "/srv/cli.py"})])))
+        s = self.step()
+        c = self.state.session_compact(s)
+        by = {a["id"]: a for a in c["agents"]}
+        self.assertEqual(by["c1"]["parent"], "p1")
+        self.assertEqual(by["c1"]["status"], "done")
+        top = c["recent"][0]["agents"]
+        self.assertEqual([a["description"] for a in top], ["Audit cli.py"])
+        self.assertEqual([x["description"] for x in top[0]["children"]], ["Map calls"])
+
     def test_task_notification_is_not_a_prompt(self):
         launched = result(3, "tA")
         launched["message"]["content"][0]["content"] = [{"type": "text", "text": "Async agent launched successfully."}]

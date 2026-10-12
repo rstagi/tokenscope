@@ -257,7 +257,8 @@ describe('tokenscope-live', () => {
 
   test('older phases collapse to one line, then the oldest drop; the pane stays within 38 rows', async ($: any, on: any) => {
     const clock = base(on)
-    const groups = ['investigate', 'change', 'verify', 'plan', 'research', 'ship', 'delegate', 'wait', 'other', 'change', 'verify', 'investigate', 'change']
+    const cycle = ['investigate', 'change', 'verify', 'plan', 'research', 'ship', 'delegate', 'wait', 'other']
+    const groups = [...cycle, ...cycle, ...cycle, ...cycle, 'change', 'verify', 'investigate', 'change']   // more than fit
     const tools = ['Read', 'Grep', 'Glob', 'WebFetch', 'Bash some-long-command.sh', 'Edit']
     const payload = { goal: 'g', status: 'working', recent: groups.map(group => ({ group, label: group + 'ing', tools, targets: ['a', 'b', 'c', 'd', 'e', 'f'] })) }
     on('http.fetch', () => ({ value: { status: 200, ok: true, headers: {}, text: JSON.stringify(payload) } }))
@@ -307,6 +308,97 @@ describe('tokenscope-live', () => {
     expect(await ui.find({ type: 'Text', text: /^▶ editing files$/ })).toBeDefined()
     expect(await ui.find({ type: 'Text', text: /stats\.py/ })).toBeDefined()
     expect(await ui.find({ type: 'Text', text: /Write/ })).toBeDefined()   // provisional tree line for the pending call
+  })
+
+  test('parallel subagents: named rows, a nested child, NOW counts them, their calls stay out of the main tree', async ($: any, on: any) => {
+    const clock = base(on)
+    const agents = [
+      { id: 'a1', type: 'general-purpose', description: 'Audit store.py', status: 'done', turns: 5, children: [] },
+      { id: 'a2', type: 'general-purpose', description: 'Audit cli.py', status: 'running', turns: 3,
+        children: [{ id: 'c1', type: 'Explore', description: 'Map cli calls', status: 'running', turns: 2, parent: 'a2' }] },
+    ]
+    const payload = {
+      ...COMPACT, main_tool_calls: 2, tests: null,
+      recent: [{ intent: 'delegate', group: 'delegate', label: 'delegating to a subagent', cw: 9000,
+                 tools: ['Agent(general-purpose)', 'Agent(general-purpose)'], targets: ['Audit store.py', 'Audit cli.py'],
+                 tool_err: [false, false], err: false, agents }],
+      agents: [...agents.map((a) => ({ ...a, children: undefined })), { id: 'c1', type: 'Explore', description: 'Map cli calls', status: 'running', turns: 2, parent: 'a2' }],
+      now: { intent: 'delegate', label: 'delegating to a subagent', group: 'delegate', tool: 'Agent(general-purpose)', target: 'Audit cli.py', since_s: 9, status: 'working' },
+    }
+    on('http.fetch', () => ({ value: { status: 200, ok: true, headers: {}, text: JSON.stringify(payload) } }))
+    on('tool.call', () => ({ result: 'ok' }))
+    await $.session.start(SESSION)
+    await $.tool.call({ tool: 'Agent', tool_use_id: 'm1', input: { subagent_type: 'general-purpose' } })
+    await $.tool.call({ tool: 'Agent', tool_use_id: 'm2', input: { subagent_type: 'general-purpose' } })
+    await $.tool.call({ tool: 'Read', tool_use_id: 's1', agentId: 'a2', input: { file_path: '/r/cli.py' } })
+    await clock.advance(1000)
+    const ui = await $.ui.mount({ plugin: 'tokenscope-live', surface: 'terminal', component: 'Pane', requestId: 'tokenscope-live', props: { ...PANE_PROPS, bodyColumns: 70 } })
+    expect(await ui.find({ type: 'Text', text: /^▶ 2 subagents working$/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /reading code cli\.py/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /^Audit store\.py/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /^Map cli calls/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /└─↳ $/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /^ \(Explore\)$/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /^Read/ })).toBeUndefined()   // the subagent's Read is not a main tree line
+    expect(await ui.find({ type: 'Text', text: /↳ Map cli calls/ })).toBeUndefined()   // not repeated at the bottom
+  })
+
+  test('a stale live call does not override the waiting state', async ($: any, on: any) => {
+    const clock = base(on)
+    on('http.fetch', () => ({ value: { status: 200, ok: true, headers: {}, text: JSON.stringify({ ...COMPACT, status: 'waiting', main_tool_calls: 0 }) } }))
+    on('tool.call', () => ({ result: 'ok' }))
+    await $.session.start(SESSION)
+    await $.tool.call({ tool: 'Bash', tool_use_id: 'b', input: { command: 'python3 -m unittest' } })
+    await clock.advance(25_000)
+    const ui = await $.ui.mount({ plugin: 'tokenscope-live', surface: 'terminal', component: 'Pane', requestId: 'tokenscope-live', props: PANE_PROPS })
+    expect(await ui.find({ type: 'Text', text: /^◼ done, waiting for you$/ })).toBeDefined()
+  })
+
+  test('an edit-and-test loop reads as iterations; passed counts in TESTS; no ▶ once waiting', async ($: any, on: any) => {
+    const clock = base(on)
+    const turn = (tools: string[], targets: any[], errs: boolean[]) => ({ intent: 'edit', group: 'change', label: 'editing files', cw: 5000, tools, targets, tool_err: errs, err: errs.some(Boolean), agents: [] })
+    const payload = {
+      ...COMPACT, status: 'waiting',
+      tests: { passed: 46, failed: 0, ok: true, runs: 3, last_ts: 1, trend: [0, 2, 0], passed_trend: [12, 18, 46] },
+      recent: [
+        turn(['Edit', 'Edit'], ['models.py', 'store.py'], [false, false]),
+        turn(['Edit', 'Bash unittest'], ['store.py', 'unittest'], [false, false]),
+        turn(['Write', 'Bash unittest'], ['test_history.py', 'unittest'], [false, true]),
+        turn(['Edit', 'Bash unittest'], ['history.py', 'unittest'], [false, false]),
+      ],
+    }
+    on('http.fetch', () => ({ value: { status: 200, ok: true, headers: {}, text: JSON.stringify(payload) } }))
+    await $.session.start(SESSION)
+    await clock.advance(1000)
+    const ui = await $.ui.mount({ plugin: 'tokenscope-live', surface: 'terminal', component: 'Pane', requestId: 'tokenscope-live', props: { ...PANE_PROPS, bodyColumns: 70 } })
+    const heads = await ui.findAll({ type: 'Text', text: /^CHANGE$/ })
+    expect(heads.length).toBe(3)                       // three iterations, each closed by a test run
+    expect((await ui.findAll({ type: 'Text', text: /^✓$/ })).length).toBe(2)
+    expect((await ui.findAll({ type: 'Text', text: /^✗$/ })).length).toBe(1)
+    expect(await ui.find({ type: 'Text', text: /^✓12$/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /^✗2$/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /▶ editing files/ })).toBeUndefined()   // waiting: nothing is live
+  })
+
+  test('only the live phase and the two before it are expanded', async ($: any, on: any) => {
+    const clock = base(on)
+    const groups = ['investigate', 'change', 'verify', 'investigate', 'change', 'verify']
+    const recent = groups.map((g, i) => ({ intent: g, group: g, label: g, cw: 1000, tools: ['Read'], targets: ['f' + i + '.py'], tool_err: [false], err: false, agents: [] }))
+    on('http.fetch', () => ({ value: { status: 200, ok: true, headers: {}, text: JSON.stringify({ ...COMPACT, recent }) } }))
+    await $.session.start(SESSION)
+    await clock.advance(1000)
+    const ui = await $.ui.mount({ plugin: 'tokenscope-live', surface: 'terminal', component: 'Pane', requestId: 'tokenscope-live', props: { ...PANE_PROPS, bodyColumns: 70, scroll: { offset: 0, bodyRows: 60 } } })
+    expect((await ui.findAll({ type: 'Text', text: /^[│ ] [├└] $/ })).length).toBe(3)
+  })
+
+  test('test runs by subagents only are labelled as theirs', async ($: any, on: any) => {
+    const clock = base(on)
+    const payload = { ...COMPACT, tests: { passed: 4, failed: 7, ok: false, runs: 2, last_ts: 1, trend: [5, 7], scope: 'subagents' } }
+    on('http.fetch', () => ({ value: { status: 200, ok: true, headers: {}, text: JSON.stringify(payload) } }))
+    await $.session.start(SESSION)
+    await clock.advance(1000)
+    const ui = await $.ui.mount({ plugin: 'tokenscope-live', surface: 'terminal', component: 'Pane', requestId: 'tokenscope-live', props: PANE_PROPS })
+    expect(await ui.find({ type: 'Text', text: /^subagents: $/ })).toBeDefined()
   })
 
   test('a burst of tool calls is coalesced into few redraws', async ($: any, on: any) => {
@@ -375,5 +467,427 @@ describe('tokenscope-live', () => {
     })
     expect(await band.find({ text: 'engine band' })).toBeDefined()
     expect(await band.find({ text: /tokenscope/ })).toBeUndefined()
+  })
+
+  // payload.intents (docs/intents-spec.md): two groups, then ungrouped steps, the last one open
+  const step = (i: number, cat: string, label: string, extra: any = {}) => ({
+    i, cat, label, source: 'rule', locked: true, open: false, cw: 10_000, usd: 0.03, turns: 1, summary: 'Read ×2', tested: null, group: null, ...extra,
+  })
+  const INTENTS = {
+    steps: [
+      step(0, 'investigate', 'Read store and model code', { group: 0, source: 'todo', summary: 'Read ×4 · 1 thinking' }),
+      step(1, 'change', 'Add per-warehouse quantities', { group: 0, source: 'todo', summary: 'Edit ×3' }),
+      step(2, 'verify', 'Run store tests', { summary: 'Bash unittest ✓', tested: 'pass', cw: 9_000 }),
+      step(3, 'investigate', 'Inspect CLI entry point', { group: 1, source: 'declared' }),
+      step(4, 'change', 'editing files · cli.py', { group: 1, source: 'rule', locked: false, open: true, summary: 'Edit ×2' }),
+    ],
+    groups: [
+      { label: 'Implement multi-warehouse stock', source: 'todo', first: 0, last: 1, cat: 'change', cw: 120_000, usd: 0.41, steps: 2, summary: '' },
+      { label: 'Wire warehouses into CLI', source: 'declared', first: 3, last: 4, cat: 'change', cw: 20_000, usd: 0.06, steps: 2, summary: '' },
+    ],
+    declared: { calls: 2, steps: 2 },
+    labeller: { calls: 0 },
+  }
+  const mountPane = ($: any, bodyColumns = 90) => $.ui.mount({ plugin: 'tokenscope-live', surface: 'terminal', component: 'Pane', requestId: 'tokenscope-live', props: { ...PANE_PROPS, bodyColumns } })
+
+  test('intents: groups collapsed, the live group expanded, provisional label dimmed, declared footer', async ($: any, on: any) => {
+    const clock = base(on)
+    on('http.fetch', () => ({ value: { status: 200, ok: true, headers: {}, text: JSON.stringify({ ...COMPACT, intents: INTENTS }) } }))
+    await $.session.start(SESSION)
+    await clock.advance(1000)
+    const ui = await mountPane($)
+    expect(await ui.find({ type: 'Text', text: /^── intents ──$/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /^── flow ──$/ })).toBeUndefined()
+    // group 1: collapsed, one line with its step count and costs; its steps hidden
+    expect(await ui.find({ type: 'Text', text: /^▸1 $/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /^ Implement multi-warehouse stock$/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /^ · 2 steps · 120k · \$0\.41$/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /^ Read store and model code$/ })).toBeUndefined()
+    // …and one dim detail line listing them
+    const det = await ui.find({ type: 'Text', text: /^ {3}↳ Read store and model code · Add per-warehouse quantities$/ })
+    expect(det).toBeDefined()
+    expect(det.props.dimColor).toBe(true)
+    // an ungrouped step at top level, its tools summary on its detail line
+    expect(await ui.find({ type: 'Text', text: /^\[VERIFY\]$/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /^ Run store tests$/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /^ {3}↳ Bash unittest ✓$/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /^ · Bash unittest ✓$/ })).toBeUndefined()
+    expect(await ui.find({ type: 'Text', text: /^ · 9k · \$0\.03$/ })).toBeDefined()
+    // group 2 holds the open step: expanded, its steps under it, the open one ▶ with a dim provisional label…
+    expect(await ui.find({ type: 'Text', text: /^▾2 $/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /^ {2}├ $/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /^ Inspect CLI entry point$/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /^ {2}└ $/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /^▶ $/ })).toBeDefined()
+    const prov = await ui.find({ type: 'Text', text: /^ editing files · cli\.py…$/ })
+    expect(prov).toBeDefined()
+    expect(prov.props.dimColor).toBe(true)
+    // ✎ for declared labels only, and the footer
+    expect((await ui.findAll({ type: 'Text', text: /^ ✎$/ })).length).toBe(2)   // the declared group and step
+    expect(await ui.find({ type: 'Text', text: /^✎ declared ×2$/ })).toBeDefined()
+  })
+
+  test('intents: a locked open label is not dimmed; no footer without declare_intent', async ($: any, on: any) => {
+    const clock = base(on)
+    const steps = INTENTS.steps.map((s) => (s.open ? { ...s, locked: true, label: 'Wire the CLI' } : s))
+    on('http.fetch', () => ({ value: { status: 200, ok: true, headers: {}, text: JSON.stringify({ ...COMPACT, intents: { ...INTENTS, steps, declared: { calls: 0, steps: 0 } } }) } }))
+    await $.session.start(SESSION)
+    await clock.advance(1000)
+    const ui = await mountPane($)
+    expect(await ui.find({ type: 'Text', text: /^ Wire the CLI$/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /…$/ })).toBeUndefined()
+    expect(await ui.find({ type: 'Text', text: /declared ×/ })).toBeUndefined()
+  })
+
+  test('intents: older items fold into "… N earlier" within the row budget, never the live item', async ($: any, on: any) => {
+    const clock = base(on)
+    const cats = ['investigate', 'change', 'verify']
+    const steps = Array.from({ length: 40 }, (_, i) => step(i, cats[i % 3], 'Step number ' + i, { open: i === 39, locked: i !== 39, group: i >= 36 ? 0 : null }))
+    const groups = [{ label: 'Final group', source: 'haiku', first: 36, last: 39, cat: 'change', cw: 40_000, usd: 0.12, steps: 4 }]
+    on('http.fetch', () => ({ value: { status: 200, ok: true, headers: {}, text: JSON.stringify({ ...COMPACT, intents: { steps, groups, declared: { calls: 0 } } }) } }))
+    await $.session.start(SESSION)
+    await clock.advance(1000)
+    const ui = await mountPane($)
+    const boxes = await ui.findAll({ type: 'Box' })
+    expect(boxes.length - 1).toBeLessThanOrEqual(38)
+    const fold = await ui.find({ type: 'Text', text: /^… \d+ earlier$/ })
+    expect(fold).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /^ Step number 0$/ })).toBeUndefined()
+    expect(await ui.find({ type: 'Text', text: /^ Step number 35$/ })).toBeDefined()   // newest ungrouped kept
+    expect(await ui.find({ type: 'Text', text: /^▾1 $/ })).toBeDefined()              // the live group, expanded
+    expect(await ui.find({ type: 'Text', text: /^ Step number 39…$/ })).toBeDefined()
+    const n = Number(String(fold.text).match(/\d+/)![0])
+    expect(await ui.find({ type: 'Text', text: new RegExp('^ Step number ' + (n - 1) + '$') })).toBeUndefined()
+    expect(await ui.find({ type: 'Text', text: new RegExp('^ Step number ' + n + '$') })).toBeDefined()
+  })
+
+  test('intents: /tokenscope expand|collapse <n|all> and view phases|intents; state survives redraws', async ($: any, on: any) => {
+    const clock = base(on)
+    on('http.fetch', () => ({ value: { status: 200, ok: true, headers: {}, text: JSON.stringify({ ...COMPACT, intents: INTENTS }) } }))
+    await $.session.start(SESSION)
+    await clock.advance(1000)
+    let res = await $.command.run({ command: 'tokenscope', args: 'expand 1' })
+    expect(res.text).toBe('tokenscope: expanded group 1 · Implement multi-warehouse stock')
+    res = await $.command.run({ command: 'tokenscope', args: 'collapse 2' })
+    expect(res.text).toMatch(/collapsed group 2/)
+    await clock.advance(3000)   // polls and redraws keep the person's choice
+    let ui = await mountPane($)
+    expect(await ui.find({ type: 'Text', text: /^▾1 $/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /^ Read store and model code$/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /^▸2 $/ })).toBeDefined()   // collapsed although live
+    expect(await ui.find({ type: 'Text', text: /cli\.py…/ })).toBeUndefined()
+    await ui.unmount()
+
+    expect((await $.command.run({ command: 'tokenscope', args: 'expand 7' })).text).toMatch(/no group 7/)
+    await $.command.run({ command: 'tokenscope', args: 'collapse all' })
+    ui = await mountPane($)
+    expect((await ui.findAll({ type: 'Text', text: /^▸\d $/ })).length).toBe(2)
+    await ui.unmount()
+    await $.command.run({ command: 'tokenscope', args: 'expand all' })
+    ui = await mountPane($)
+    expect((await ui.findAll({ type: 'Text', text: /^▾\d $/ })).length).toBe(2)
+    await ui.unmount()
+
+    expect((await $.command.run({ command: 'tokenscope', args: 'view phases' })).text).toBe('tokenscope: phases view')
+    ui = await mountPane($)
+    expect(await ui.find({ type: 'Text', text: /^── flow ──$/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /^INVESTIGATE$/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /▸|▾/ })).toBeUndefined()
+    await ui.unmount()
+    await $.command.run({ command: 'tokenscope', args: 'view intents' })
+    ui = await mountPane($)
+    expect(await ui.find({ type: 'Text', text: /^── intents ──$/ })).toBeDefined()
+    expect((await $.command.run({ command: 'tokenscope', args: 'bogus' })).text).toMatch(/^usage:/)
+  })
+
+  test('intents: pressing a group line toggles it', async ($: any, on: any) => {
+    const clock = base(on)
+    on('http.fetch', () => ({ value: { status: 200, ok: true, headers: {}, text: JSON.stringify({ ...COMPACT, intents: INTENTS }) } }))
+    await $.session.start(SESSION)
+    await clock.advance(1000)
+    let ui = await mountPane($)
+    await ui.press({ key: 'group-0' })
+    await ui.press({ key: 'group-3' })
+    await ui.unmount()
+    ui = await mountPane($)
+    expect(await ui.find({ type: 'Text', text: /^▾1 $/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /^ Read store and model code$/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /^▸2 $/ })).toBeDefined()
+    await ui.press({ key: 'group-0' })
+    await ui.unmount()
+    ui = await mountPane($)
+    expect(await ui.find({ type: 'Text', text: /^▸1 $/ })).toBeDefined()
+  })
+
+  test('intent rows fit a narrow pane', async ($: any, on: any) => {
+    const clock = base(on)
+    on('http.fetch', () => ({ value: { status: 200, ok: true, headers: {}, text: JSON.stringify({ ...COMPACT, intents: INTENTS }) } }))
+    await $.session.start(SESSION)
+    await clock.advance(1000)
+    const ui = await mountPane($, 30)
+    const boxes = await ui.findAll({ type: 'Box' })
+    for (const b of boxes.slice(1)) expect(String(b.text ?? '').length).toBeLessThanOrEqual(30)
+    expect(await ui.find({ type: 'Text', text: /^▾2 $/ })).toBeDefined()
+  })
+
+  test('intents: a detail line folds equal labels ×N, marks tested steps, and overflows as +N', async ($: any, on: any) => {
+    const clock = base(on)
+    const lab = ['Read store.py', 'Edit models.py', 'Edit models.py', 'Run tests', 'Read cli.py', 'Edit cli.py', 'Edit docs/README.md']
+    const steps = [
+      ...lab.map((l, i) => step(i, 'change', l, { group: 0, tested: i === 3 ? 'pass' : i === 6 ? 'fail' : null })),
+      step(7, 'investigate', 'Look around', { open: true, locked: false }),
+    ]
+    const groups = [{ label: 'Build it', source: 'haiku', first: 0, last: 6, cat: 'change', cw: 70_000, usd: 0.2, steps: 7 }]
+    on('http.fetch', () => ({ value: { status: 200, ok: true, headers: {}, text: JSON.stringify({ ...COMPACT, intents: { steps, groups, declared: { calls: 0 } } }) } }))
+    await $.session.start(SESSION)
+    await clock.advance(1000)
+    let ui = await mountPane($, 200)
+    expect(await ui.find({ type: 'Text', text: '   ↳ Read store.py · Edit models.py ×2 · Run tests ✓ · Read cli.py · Edit cli.py · Edit docs/README.md ✗' })).toBeDefined()
+    await ui.unmount()
+    ui = await mountPane($, 60)
+    const det = await ui.find({ type: 'Text', text: /^ {3}↳ Read store\.py · Edit models\.py ×2 · Run tests ✓ \+3$/ })
+    expect(det).toBeDefined()
+    expect(String(det.text).length).toBeLessThanOrEqual(60)
+  })
+
+  // the live step's calls (payload ops) and one the transcript has not caught up with
+  const OPS = [
+    { tool: 'Read', target: 'store.py', cw: 2_000, err: false },
+    { tool: 'Bash unittest', target: 'unittest', cw: 3_000, err: false, test: { ok: true, passed: 22, failed: 0 } },
+    { tool: 'Bash unittest', target: 'unittest', cw: 3_000, err: true, test: { ok: false, passed: 21, failed: 1 } },
+    { tool: 'Edit', target: 'store.py', cw: 4_000, err: null },
+  ]
+
+  test('intents: the live intent shows one row per operation, then pending in-process calls', async ($: any, on: any) => {
+    const clock = base(on)
+    const steps = [step(0, 'investigate', 'Read the code', { summary: 'Read ×2' }),
+                   step(1, 'change', 'Fix the store', { open: true, locked: false, summary: 'Edit ×1', ops: OPS })]
+    on('http.fetch', () => ({ value: { status: 200, ok: true, headers: {}, text: JSON.stringify({ ...COMPACT, main_tool_calls: 6, intents: { steps, groups: [], declared: { calls: 0 } } }) } }))
+    on('tool.call', () => ({ result: 'ok' }))
+    await $.session.start(SESSION)
+    await clock.advance(1000)
+    let ui = await mountPane($)
+    expect(await ui.find({ type: 'Text', text: '✓ ' })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: 'Read store.py · 2k' })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: 'unittest 22 passed · 3k' })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: 'unittest 1 failed · 3k' })).toBeDefined()
+    const running = await ui.find({ type: 'Text', text: 'Edit store.py · 4k' })
+    expect(running.props.bold).toBe(true)
+    expect((await ui.findAll({ type: 'Text', text: /^▶ $/ })).length).toBe(2)   // the open step's head and its running call
+    expect((await ui.findAll({ type: 'Text', text: /^✗ $/ })).length).toBe(1)
+    // the live step has no summary detail line; the older one does
+    expect(await ui.find({ type: 'Text', text: /^ {3}↳ Edit ×1$/ })).toBeUndefined()
+    expect(await ui.find({ type: 'Text', text: /^ {3}↳ Read ×2$/ })).toBeDefined()
+    await ui.unmount()
+    // calls seen in-process before the transcript has them: appended as running ops
+    for (const id of ['a', 'b', 'c', 'd', 'e', 'f']) await $.tool.call({ tool: 'Read', tool_use_id: id, input: { file_path: '/r/x.py' } })
+    await $.tool.call({ tool: 'Bash', tool_use_id: 'g', input: { command: 'git status' } })
+    await clock.advance(1000)
+    ui = await mountPane($)
+    expect(await ui.find({ type: 'Text', text: 'git status' })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: 'Read x.py' })).toBeUndefined()   // the server already has those
+  })
+
+  test('intents: declare_intent calls are never operation rows, from the server or in-process', async ($: any, on: any) => {
+    const clock = base(on)
+    const ops = [{ tool: 'mcp:tokenscope-intents.declare_intent', target: null, cw: 6_000, err: false }, ...OPS.slice(0, 1)]
+    const steps = [step(0, 'change', 'Fix the store', { open: true, locked: false, summary: 'Read ×1', ops })]
+    on('http.fetch', () => ({ value: { status: 200, ok: true, headers: {}, text: JSON.stringify({ ...COMPACT, main_tool_calls: 2, intents: { steps, groups: [], declared: { calls: 1 } } }) } }))
+    on('tool.call', () => ({ result: 'ok' }))
+    await $.session.start(SESSION)
+    for (const id of ['a', 'b']) await $.tool.call({ tool: 'Read', tool_use_id: id, input: { file_path: '/r/x.py' } })
+    await $.tool.call({ tool: 'mcp__tokenscope-intents__declare_intent', tool_use_id: 'c', input: { label: 'Next thing' } })
+    await $.tool.call({ tool: 'Edit', tool_use_id: 'd', input: { file_path: '/r/y.py' } })
+    await clock.advance(1000)
+    const ui = await mountPane($)
+    expect(await ui.find({ type: 'Text', text: 'Read store.py · 2k' })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: 'Edit y.py' })).toBeDefined()   // pending, after the declare call
+    expect(await ui.find({ type: 'Text', text: /declare_intent/ })).toBeUndefined()
+  })
+
+  test('intents: when a new intent starts the previous live one collapses to its head and detail line', async ($: any, on: any) => {
+    const clock = base(on)
+    const before = [step(0, 'investigate', 'Read the code', { group: 0 }),
+                    step(1, 'change', 'Fix the store', { group: 0, open: true, locked: false, ops: OPS })]
+    const after = [step(0, 'investigate', 'Read the code', { group: 0 }), step(1, 'change', 'Fix the store', { group: 0 }),
+                   step(2, 'verify', 'Run the suite', { open: true, locked: false, ops: [OPS[3]] })]
+    const groups = [{ label: 'Fix stock bug', source: 'haiku', first: 0, last: 1, cat: 'change', cw: 20_000, usd: 0.06, steps: 2 }]
+    let steps = before
+    on('http.fetch', () => ({ value: { status: 200, ok: true, headers: {}, text: JSON.stringify({ ...COMPACT, intents: { steps, groups, declared: { calls: 0 } } }) } }))
+    await $.session.start(SESSION)
+    await clock.advance(1000)
+    let ui = await mountPane($)
+    expect(await ui.find({ type: 'Text', text: /^▾1 $/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: 'unittest 22 passed · 3k' })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /^ {3}↳ / })).toBeUndefined()
+    await ui.unmount()
+    steps = after
+    await clock.advance(1000)
+    ui = await mountPane($)
+    expect(await ui.find({ type: 'Text', text: /^▸1 $/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: '   ↳ Read the code · Fix the store' })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: 'unittest 22 passed · 3k' })).toBeUndefined()
+    expect(await ui.find({ type: 'Text', text: 'Edit store.py · 4k' })).toBeDefined()
+  })
+
+  test('intents: short of rows, the oldest detail lines go first, then whole intents; never the live one', async ($: any, on: any) => {
+    const clock = base(on)
+    let n = 14
+    const steps = () => [...Array.from({ length: n }, (_, i) => step(i, 'investigate', 'Step number ' + i, { summary: 'Sum ' + i })),
+                         step(n, 'change', 'Live one', { open: true, locked: false, ops: OPS })]
+    on('http.fetch', () => ({ value: { status: 200, ok: true, headers: {}, text: JSON.stringify({ ...COMPACT, intents: { steps: steps(), groups: [], declared: { calls: 0 } } }) } }))
+    await $.session.start(SESSION)
+    await clock.advance(1000)
+    let ui = await mountPane($)
+    expect((await ui.findAll({ type: 'Box' })).length - 1).toBeLessThanOrEqual(38)
+    // every intent still shown; only the oldest lost their detail lines
+    expect(await ui.find({ type: 'Text', text: /^… \d+ earlier$/ })).toBeUndefined()
+    expect(await ui.find({ type: 'Text', text: /^ Step number 0$/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: '   ↳ Sum 0' })).toBeUndefined()
+    expect(await ui.find({ type: 'Text', text: '   ↳ Sum 13' })).toBeDefined()
+    const kept = (await ui.findAll({ type: 'Text', text: /^ {3}↳ Sum \d+$/ })).map((t: any) => Number(String(t.text).match(/\d+/)![0]))
+    expect(kept).toEqual(Array.from({ length: kept.length }, (_, i) => 14 - kept.length + i))   // the newest ones
+    expect(await ui.find({ type: 'Text', text: 'Edit store.py · 4k' })).toBeDefined()
+    await ui.unmount()
+    // far more intents: the oldest fold into "… N earlier"; the live one and its operations stay
+    n = 40
+    await clock.advance(1000)
+    ui = await mountPane($)
+    expect((await ui.findAll({ type: 'Box' })).length - 1).toBeLessThanOrEqual(38)
+    expect(await ui.find({ type: 'Text', text: /^… \d+ earlier$/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /^ Step number 0$/ })).toBeUndefined()
+    expect(await ui.find({ type: 'Text', text: /^ Step number 39$/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /^ Live one…$/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: 'Edit store.py · 4k' })).toBeDefined()
+  })
+
+  test('intents: a ToolSearch step is drawn as OVERHEAD', async ($: any, on: any) => {
+    const clock = base(on)
+    const steps = [step(0, 'overhead', 'Load declare_intent tool', { summary: 'ToolSearch' }), step(1, 'change', 'Edit it', { open: true })]
+    on('http.fetch', () => ({ value: { status: 200, ok: true, headers: {}, text: JSON.stringify({ ...COMPACT, intents: { steps, groups: [], declared: { calls: 0 } } }) } }))
+    await $.session.start(SESSION)
+    await clock.advance(1000)
+    const ui = await mountPane($)
+    const tag = await ui.find({ type: 'Text', text: '[OVERHEAD]' })
+    expect(tag.props.color).toBe('gray')
+    expect(await ui.find({ type: 'Text', text: ' Load declare_intent tool' })).toBeDefined()
+  })
+
+  // payload.recap: sent by the server only while the session waits for you / is idle
+  const RECAP = {
+    cw: 120_000, usd: 0.4, intents: 3,
+    costliest: { label: 'Find the pricing code', cat: 'investigate', cw: 70_000, usd: 0.21, pct: 58 },
+    slowest: { label: 'Run the full suite', cat: 'verify', s: 252 },
+    hints: [
+      { rule: 'reread', text: 'Note what store.py holds in CLAUDE.md', evidence: 'store.py read in full 5× across 3 intents', cw_at_stake: 40_000, estimate: 'x' },
+      { rule: 'polling', text: 'Wait in one call', evidence: '6 wake-ups in a row only waited', cw_at_stake: 30_000, estimate: 'x' },
+    ],
+    session: {},
+  }
+
+  test('recap: shown while waiting (costliest, slowest, hints), gone once the agent works again', async ($: any, on: any) => {
+    const clock = base(on)
+    const steps = [step(0, 'investigate', 'Find the pricing code'), step(1, 'verify', 'Run the full suite')]
+    let payload: any = { ...COMPACT, status: 'waiting', main_tool_calls: 0, recap: RECAP, intents: { steps, groups: [], declared: { calls: 0 } } }
+    on('http.fetch', () => ({ value: { status: 200, ok: true, headers: {}, text: JSON.stringify(payload) } }))
+    await $.session.start(SESSION)
+    await clock.advance(1000)
+    let ui = await mountPane($, 120)
+    expect(await ui.find({ type: 'Text', text: '── recap ──' })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: 'costliest ' })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: '58%' })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: ' Find the pricing code' })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: ' · 70k · $0.21' })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: '4m12s' })).toBeDefined()
+    const hint = await ui.find({ type: 'Text', text: '💡 Note what store.py holds in CLAUDE.md' })
+    expect(hint.props.color).toBe('cyan')
+    expect(await ui.find({ type: 'Text', text: ' · store.py read in full 5× across 3 intents' })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: '💡 Wait in one call' })).toBeDefined()
+    await ui.unmount()
+    // the agent resumes: the server says working (and stops sending the recap); a stale recap is not drawn either
+    payload = { ...payload, status: 'working' }
+    await clock.advance(1000)
+    ui = await mountPane($, 120)
+    expect(await ui.find({ type: 'Text', text: '── recap ──' })).toBeUndefined()
+    expect(await ui.find({ type: 'Text', text: /^💡/ })).toBeUndefined()
+    await ui.unmount()
+    // idle with no hints: costliest and slowest only
+    payload = { ...payload, status: 'idle', recap: { ...RECAP, hints: [] } }
+    await clock.advance(1000)
+    ui = await mountPane($, 120)
+    expect(await ui.find({ type: 'Text', text: '── recap ──' })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: 'slowest   ' })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /^💡/ })).toBeUndefined()
+  })
+
+  test('recap: the share leads so a narrow pane cuts the label, not the 38%; the cost stays too', async ($: any, on: any) => {
+    const clock = base(on)
+    const recap = { ...RECAP, costliest: { label: 'Add multi-warehouse stock and transfer between every warehouse', cat: 'change', cw: 63_000, usd: 0.22, pct: 38 } }
+    on('http.fetch', () => ({ value: { status: 200, ok: true, headers: {}, text: JSON.stringify({ ...COMPACT, status: 'waiting', main_tool_calls: 0, recap }) } }))
+    await $.session.start(SESSION)
+    await clock.advance(1000)
+    const ui = await mountPane($, 60)
+    expect(await ui.find({ type: 'Text', text: 'costliest ' })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: '38%' })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /^ Add multi-warehouse.*…$/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: ' · 63k · $0.22' })).toBeDefined()
+  })
+
+  test('recap: costliest and slowest on one line when they are the same intent', async ($: any, on: any) => {
+    const clock = base(on)
+    const recap = { ...RECAP, hints: [], slowest: { label: 'Find the pricing code', cat: 'investigate', s: 32 } }
+    on('http.fetch', () => ({ value: { status: 200, ok: true, headers: {}, text: JSON.stringify({ ...COMPACT, status: 'waiting', main_tool_calls: 0, recap }) } }))
+    await $.session.start(SESSION)
+    await clock.advance(1000)
+    const ui = await mountPane($, 120)
+    expect(await ui.find({ type: 'Text', text: 'costliest & slowest ' })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: '58%' })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: '32s' })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: ' · 70k · $0.21' })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /^costliest $/ })).toBeUndefined()
+    expect(await ui.find({ type: 'Text', text: /^slowest/ })).toBeUndefined()
+  })
+
+  test('recap: a call seen in-process (agent working again before the transcript says so) hides it', async ($: any, on: any) => {
+    const clock = base(on)
+    on('http.fetch', () => ({ value: { status: 200, ok: true, headers: {}, text: JSON.stringify({ ...COMPACT, status: 'waiting', main_tool_calls: 0, recap: RECAP }) } }))
+    on('tool.call', () => ({ result: 'ok' }))
+    await $.session.start(SESSION)
+    await clock.advance(1000)
+    let ui = await mountPane($)
+    expect(await ui.find({ type: 'Text', text: '── recap ──' })).toBeDefined()
+    await ui.unmount()
+    await $.tool.call({ tool: 'Read', tool_use_id: 'a', input: { file_path: '/r/x.py' } })
+    await clock.advance(1000)
+    ui = await mountPane($)
+    expect(await ui.find({ type: 'Text', text: '── recap ──' })).toBeUndefined()
+  })
+
+  test('recap: within the row budget, the intent list yields its oldest rows first', async ($: any, on: any) => {
+    const clock = base(on)
+    const steps = Array.from({ length: 40 }, (_, i) => step(i, 'investigate', 'Step number ' + i, { summary: 'Sum ' + i }))
+    const hints = Array.from({ length: 5 }, (_, i) => ({ rule: 'r' + i, text: 'Hint ' + i, evidence: 'ev ' + i, cw_at_stake: 1 }))
+    on('http.fetch', () => ({ value: { status: 200, ok: true, headers: {}, text: JSON.stringify({ ...COMPACT, status: 'waiting', main_tool_calls: 0, recap: { ...RECAP, hints }, intents: { steps, groups: [], declared: { calls: 0 } } }) } }))
+    await $.session.start(SESSION)
+    await clock.advance(1000)
+    const ui = await mountPane($)
+    expect((await ui.findAll({ type: 'Box' })).length - 1).toBeLessThanOrEqual(38)
+    expect(await ui.find({ type: 'Text', text: '── recap ──' })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: '💡 Hint 2' })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: '💡 Hint 3' })).toBeUndefined()   // at most 3 hints
+    expect(await ui.find({ type: 'Text', text: /^… \d+ earlier$/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /^ Step number 39$/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /^ Step number 0$/ })).toBeUndefined()
+  })
+
+  test('without an intents key the phase tree still draws', async ($: any, on: any) => {
+    const clock = base(on)
+    on('http.fetch', () => ({ value: { status: 200, ok: true, headers: {}, text: JSON.stringify(COMPACT) } }))
+    await $.session.start(SESSION)
+    await clock.advance(1000)
+    const ui = await mountPane($)
+    expect(await ui.find({ type: 'Text', text: /^── flow ──$/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /^ · ▶ running tests$/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /^── intents ──$/ })).toBeUndefined()
   })
 })

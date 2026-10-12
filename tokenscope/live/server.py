@@ -25,6 +25,7 @@ from .goalname import HaikuNamer
 from .hookevents import HookEvents
 from .state import LiveState
 from .tail import Tailer
+from ..stepnames import StepNamer
 
 STATIC = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
 POLL_S = 0.5
@@ -38,8 +39,9 @@ class Live:
                  events_path=None, hooks=True, project="*"):
         self.lock = threading.Lock()
         self.namer = HaikuNamer(self._named) if haiku else None
+        self.step_namer = StepNamer(self._steps_named) if haiku else None   # step labels (docs/intents-spec.md)
         self.state = LiveState(redact=redact, on_goal=self.namer.request if self.namer else None,
-                               on_prompt=self._name_prompt if self.namer else None)
+                               on_prompt=self._name_prompt if self.namer else None, model_labels=haiku)
         self.tailer = Tailer(root, since_minutes=since_minutes, project=project)
         self.hooks = HookEvents(events_path) if hooks else None
         self.subscribers = []
@@ -55,6 +57,19 @@ class Live:
             else:
                 self.state.set_goal(key, name, "haiku")
 
+    def _steps_named(self, sid, idx, res):
+        with self.lock:
+            self.state.add_step_labels(sid, idx, res)
+
+    def _label_steps(self):
+        """Hand closed unlabelled steps to the background model labeller (only with --haiku); without it closed
+        steps keep their rule label (locked)."""
+        if self.step_namer is None:
+            return
+        for sid, batch, goal in self.state.label_requests():
+            if not self.step_namer.request(sid, batch, goal):
+                self.state.sessions[sid].labeller.release([x["i"] for x in batch])
+
     def poll_once(self):
         """One tail step: ingest new transcript lines and hook events, fan new steps out to subscribers."""
         got = self.tailer.poll()
@@ -64,6 +79,7 @@ class Live:
                 self.state.ingest(tf, recs, reset)
             for ev in evs:
                 self.state.apply_hook(ev)
+            self._label_steps()
             new = self.state.drain()
             msgs = [("step", {"session": sid, "step": self.state.public_step(st)}) for sid, st in new]
         if msgs:

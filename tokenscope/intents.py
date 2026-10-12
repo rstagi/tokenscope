@@ -36,7 +36,7 @@ def label(intent):
 DOC_EXT = {".md", ".mdx", ".txt", ".rst", ".pdf", ".png", ".jpg", ".jpeg", ".csv", ".log", ".html"}
 HARNESS = set(os.environ.get("TOKENSCOPE_HARNESS_CLIS", "").split(",")) - {""}  # CLIs of an agent harness -> "coordinate"
 FILTERS = {"head", "tail", "cut", "sort", "uniq", "wc", "tr", "column", "grep", "egrep", "awk", "sed", "jq", "xargs", "cat", "nl", "less", "rg", "date", "sleep", "echo", "printf", "true"}
-SKIP = {"cd", "export", "source", "set", "true", "pwd", "which", "type", "command", "env", "date", "printf"}
+SKIP = {"cd", "export", "source", "set", "true", "pwd", "which", "type", "command", "env", "date", "printf", "disown", "wait"}
 BROWSER = re.compile(r"browser|chrome|playwright|puppeteer")
 WRITE_VERB = re.compile(r"(create|update|post|send|write|add|delete|move|insert|upload|comment|edit|set_|patch|reply|invoke)")
 DATA_SRV = re.compile(r"posthog|grafana|sentry|datadog|supabase|postgres|sql|bigquery|stripe|linear")
@@ -147,6 +147,8 @@ def tool_intent(t):
     if n.startswith("mcp__"):
         parts = n.split("__")
         srv, op = parts[1].lower(), parts[-1].lower()
+        if op == "declare_intent":
+            return "plan"   # tokenscope's own intent marker (intent_mcp.py): bookkeeping, not an external write
         if BROWSER.search(srv + "__") or BROWSER.search(op):
             return "browse_ui"
         if RESEARCH.search(srv) or RESEARCH.search(op):

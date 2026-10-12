@@ -117,7 +117,7 @@ class TestWarningScenarios(Scenario):
         self.assertIn("different approach", w["hint"])
         self.assertEqual(self.state.session_compact(s)["tests"], {"passed": None, "failed": None, "ok": False,
                                                                  "runs": 3, "last_ts": s.tests[-1]["ts"],
-                                                                 "trend": [None, None, None]})
+                                                                 "trend": [None, None, None], "scope": "main"})
 
     def test_reread_loop(self):
         s = self.run_turns([READ] * 4)
@@ -183,3 +183,21 @@ class TestUnittestRunner(unittest.TestCase):
         self.assertEqual(parse_test_output("..\n----\nRan 9 tests in 0.003s\n\nOK\n"),
                          {"passed": 9, "failed": 0, "framework": "unittest"})
         self.assertEqual(parse_test_output("Ran 3 tests in 0.01s\n\nFAILED (failures=1, errors=1)")["failed"], 2)
+
+
+class TestHaikuCwd(unittest.TestCase):
+    def test_haiku_runs_outside_any_project(self):
+        """claude -p reads the cwd's project context (and its name): naming must not run in the server's repo."""
+        import json as _json
+        from tokenscope.live import goalname
+        seen = {}
+
+        class P:
+            returncode, stdout = 0, _json.dumps({"result": "Audit repo with subagents"})
+
+        def runner(cmd, **kw):
+            seen.update(kw)
+            return P()
+        self.assertEqual(goalname.haiku_name("audit this repo", runner=runner), "Audit repo with subagents")
+        self.assertNotIn("tokenscope", seen["cwd"])
+        self.assertNotEqual(os.path.realpath(seen["cwd"]), os.path.realpath(os.getcwd()))

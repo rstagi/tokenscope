@@ -6,6 +6,8 @@ proper-noun-looking words are masked first. Optional Haiku naming (`--haiku`) ru
 thread with only the masked first 240 chars; failures keep the heuristic name.
 """
 import json
+import os
+import tempfile
 import re
 import subprocess
 import threading
@@ -15,7 +17,7 @@ from ..redact import _FILE_RE
 MAX_LEN = 48
 VERBS = [  # (class, trigger words) checked in order of the first matching word in the prompt
     ("Fix", {"fix", "fixes", "fixing", "debug", "repair", "broken", "bug", "crash", "failing", "error"}),
-    ("Build", {"add", "build", "implement", "create", "make", "new", "support", "introduce", "generate"}),
+    ("Build", {"add", "build", "implement", "create", "make", "new", "support", "introduce", "generate", "grow", "extend", "expand"}),
     ("Refactor", {"refactor", "clean", "cleanup", "simplify", "restructure", "rename", "tidy"}),
     ("Test", {"test", "tests", "testing", "coverage"}),
     ("Review", {"review", "check", "audit", "inspect", "verify"}),
@@ -120,15 +122,23 @@ def _clip(name, n):
     return name if len(name) <= n else name[:n - 1].rsplit(" ", 1)[0].rstrip(" ,;:-") + "…"
 
 
-HAIKU_PROMPT = ("Name the goal of this coding-assistant request in 3-7 words. Reply with the name only.\n\n"
+HAIKU_PROMPT = ("Name the goal of this coding-assistant request in 3-7 words, using only what the request says "
+                "(no guessed project names). Reply with the name only.\n\n"
                 "Request: %s")
+
+
+def _neutral_dir():
+    d = os.path.join(tempfile.gettempdir(), "goal-naming")   # the dir name is visible to the model: keep it neutral
+    os.makedirs(d, exist_ok=True)
+    return d
 
 
 def haiku_name(text, timeout=30, runner=subprocess.run):
     """Ask Haiku for a 3-7 word goal name from the masked first 240 chars; None on any failure."""
     try:
         p = runner(["claude", "-p", "--model", "haiku", "--tools", "", "--output-format", "json",
-                    HAIKU_PROMPT % mask(text)[:240]], capture_output=True, text=True, timeout=timeout)
+                    HAIKU_PROMPT % mask(text)[:240]], capture_output=True, text=True, timeout=timeout,
+                   cwd=_neutral_dir())   # not the server's cwd: claude -p would read that project's CLAUDE.md
         if p.returncode != 0:
             return None
         out = json.loads(p.stdout)

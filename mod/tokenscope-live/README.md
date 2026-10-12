@@ -12,19 +12,14 @@ NOW    ▶ running tests · run_tests.sh · 4s
 TESTS  ✗4 → ✗2 → ✓ 12 passed
 FILES  edited 3: invoice.py, money.py, tax.py
 COST   ⣀⣤⣶⣿ 182k CW · $0.41 · ctx ▕███░░░░░░░▏ 34%
-── flow ──
-◆ Fix: failing tests in invoice
-├ INVESTIGATE · reading code · 3 turns
-│ ├ Read money.py, tax.py ×4
-│ └ Grep round, Decimal ×2
-├ DELEGATE · delegating
-│ ├ Agent(Explore)
-│ └─↳ Explore · 6 turns · done
-├ CHANGE · editing files
-│ └ Edit money.py
-└ VERIFY · ▶ running tests
-  └ Bash run_tests.sh ✗1
+── intents ──
+▸1 [CHANGE] Implement multi-warehouse stock · 3 steps · 120k · $0.41
+  [VERIFY] Run store tests · Bash unittest ✓ · 9k · $0.03
+▾2 [CHANGE] Wire warehouses into CLI ✎ · 2 steps · 20k · $0.06
+  ├ [INVESTIGATE] Inspect CLI entry point ✎ · Read ×2 · 10k · $0.03
+  └ ▶ [CHANGE] editing files · cli.py… · Edit ×2 · 10k · $0.03
 ⚠ same error ×3, no edits since — try a different approach
+✎ declared ×2
 ```
 
 - **header**: `tokenscope`, a status pill (`● working` green, `● waiting for you` yellow,
@@ -37,7 +32,20 @@ COST   ⣀⣤⣶⣿ 182k CW · $0.41 · ctx ▕███░░░░░░░▏
 - **FILES**: the files edited so far (or `edited N files` when the server redacts names)
 - **COST**: a cyan braille sparkline of cumulative CW per turn, CW, cost, and a context gauge
   against 200k tokens (yellow above 50%, red above 75%)
-- **flow**: the goal as root, then phases: runs of consecutive turns with the same intent
+- **intents** (when the server sends `intents`, see `docs/intents-spec.md`): steps and intent
+  groups, newest at the bottom. A group is one line, `▸N [CAT] <label> · N steps · CW · $`;
+  the group holding the open step is expanded (`▾N`) with its steps under it (`├` / `└`).
+  Steps outside a group are one line each: `[CAT] <label> · <summary> · CW · $`, the summary
+  cut to fit. The open step is marked `▶`; while its label is still provisional (not locked)
+  it is dim with a trailing `…`. The tag takes the category colour (below); a dim `✎` marks a
+  label from `declare_intent`, and `✎ declared ×N` closes the list when it was used. When
+  rows run short, older expanded groups collapse, then the oldest items fold into
+  `… N earlier`; the live item never folds.
+  Expand / collapse: `/tokenscope expand <n|all>`, `/tokenscope collapse <n|all>` (`n` is the
+  number after `▸` / `▾`), or press a group line (Enter on it once the pane holds the focus,
+  or a click). The choice holds across redraws, and a group you collapsed stays collapsed
+  while live. `/tokenscope view phases` switches to the phase tree below, `view intents` back
+- **flow** (an older server without `intents`, or `view phases`): the goal as root, then phases: runs of consecutive turns with the same intent
   group, named `GROUP · <dominant intent>` (most turns, ties to the latest). Under a phase,
   consecutive calls of one tool fold into one line with up to 3 targets (`+N` more) and `×N`;
   failed calls show as a dim red `✗N`. The last phase is the live one (`▶`, brighter, always
@@ -48,6 +56,11 @@ COST   ⣀⣤⣶⣿ 182k CW · $0.41 · ctx ▕███░░░░░░░▏
   yellow, research cyan, wait gray, plan bright magenta, other gray
 - **subagents** launched by a phase are sub-branches under it (`├─↳ Explore · 6 turns · done`).
   Agents in `agents` that no turn claims are listed at the bottom
+- **recap** (only while the session waits for you or is idle, from the server's `recap`):
+  `── recap ──`, then `costliest [CAT] <label> · CW · $ · N%` and `slowest [CAT] <label> · 4m12s`
+  for the work since your last prompt, and up to 3 cyan hints `💡 <what to do> · <evidence>`
+  (only when the server found evidence; often none). It sits under the intent list, which
+  folds its older rows first to make room, and disappears as soon as the agent works again
 - **warnings** are rare and come only from the server's `warnings`: one yellow line each,
   `⚠ <text> — <hint>`. A warning rule that appears after the first payload also raises one
   toast. A session without warnings shows no `⚠` anywhere
@@ -74,6 +87,7 @@ claude --plugin-dir mod/tokenscope-live
 ```
 
 Then type `/tokenscope` to toggle the pane (it works while Claude is busy, too).
+`/tokenscope expand|collapse <n|all>` and `/tokenscope view intents|phases` change the intent list.
 
 ## Environment variables
 

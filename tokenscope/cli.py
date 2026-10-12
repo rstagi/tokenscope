@@ -594,12 +594,89 @@ def cmd_patterns(args):
 
 
 def cmd_live(args):
+    if args.action == "intents-mcp":
+        from .live import intent_mcp
+        return intent_mcp.serve()
+    if args.action == "intents-install":
+        from .live import intent_mcp
+        print(intent_mcp.install_text())
+        if args.write_claude_md:
+            intent_mcp.write_claude_md(args.write_claude_md)
+            print("appended the snippet to %s" % args.write_claude_md)
+        return 0
     if args.action == "hooks":
         from .live.hook import settings_snippet
         print(json.dumps(settings_snippet(), indent=2))
         return 0
     from .live import server
     return server.main(args)
+
+
+def intents_view(path, haiku=False, label_batch=None):
+    """(steps, groups, labeller stats) of one transcript replayed offline; all steps closed."""
+    from .live.replay import replay
+    state, s = replay(path, redact=False, model_labels=haiku)
+    if s is None:
+        return [], [], {}
+    lab = s.labeller
+    steps, gs = state.steps(s, final=True)
+    if haiku:
+        from .stepnames import BATCH, label_batch as default_batch
+        run = label_batch or default_batch
+        goal = s.goal["name"] if s.goal else None
+        while True:
+            pend = lab.pending(steps)
+            if not pend:
+                break
+            batch = pend[:BATCH]
+            res = run(batch, goal)
+            lab.add_model_labels(res.get("labels"), res.get("groups"), res.get("usage"))
+            if not res.get("labels"):
+                lab.give_up([x["i"] for x in batch])
+            steps, gs = state.steps(s, final=True)
+    gs = lab.finalize(steps)   # whatever the model did not label keeps its rule label
+    return steps, gs, dict(lab.stats, declared_calls=sum(
+        1 for t in s.main.turn_steps for x in t.get("_raw") or () if x["name"].endswith("declare_intent")))
+
+
+def cmd_intents(args):
+    from .parse import resolve_root
+    from .live.replay import find_transcript
+    from .steps import summary
+    try:
+        path = find_transcript(args.session, resolve_root(getattr(args, "root", None)))
+    except LookupError as e:
+        print(str(e), file=sys.stderr)
+        return 1
+    steps, gs, stats = intents_view(path, haiku=args.haiku)
+    if args.json:
+        out = [{k: (dict(v) if k in ("tools", "intents") else v) for k, v in x.items() if not k.startswith("_")}
+               for x in steps]
+        print(json.dumps({"steps": out, "groups": gs, "stats": stats}, indent=2))
+        return 0
+    gi = {i: g for g in gs for i in range(g["first"], g["last"] + 1)}
+
+    def line(x, indent):
+        tags = "".join(t for t, on in ((" \u21b5prompt", x["prompt_before"]),) if on)
+        return "%s%-12s %-46s %-9s %7s %8s  %s%s" % (
+            indent, "[%s]" % x["cat"].upper(), x["label"][:46], x["source"], fmt_tok(x["cw"]), fmt_usd(x["usd"]),
+            summary(x), tags)
+    shown = set()
+    for x in steps:
+        g = gi.get(x["i"])
+        if g is None:
+            print(line(x, ""))
+        elif id(g) not in shown:
+            shown.add(id(g))
+            print("\u25be %-12s %-44s %-9s %7s %8s  %d steps \u00b7 %s" % (
+                "[%s]" % g["cat"].upper(), g["label"][:44], g["source"], fmt_tok(g["cw"]), fmt_usd(g["usd"]),
+                g["steps"], g["summary"]))
+            for y in steps[g["first"]:g["last"] + 1]:
+                print(line(y, "    "))
+    print("\n%d steps, %d groups; declare_intent calls: %d; haiku calls: %d (%d tokens, %s)" % (
+        len(steps), len(gs), stats.get("declared_calls", 0), stats.get("haiku_calls", 0),
+        stats.get("haiku_tokens", 0), fmt_usd(stats.get("haiku_usd", 0))))
+    return 0
 
 
 def main(argv=None):
@@ -722,11 +799,24 @@ def main(argv=None):
 
     lp = sub.add_parser("live", help="watch sessions as they happen (local web board); "
                                      "`tokenscope live hooks` prints the optional hooks settings snippet")
-    lp.add_argument("action", nargs="?", choices=["serve", "hooks"], default="serve",
-                    help="serve (default) or hooks: print a settings.json snippet for precise status")
+    lp.add_argument("action", nargs="?", choices=["serve", "hooks", "intents-mcp", "intents-install"],
+                    default="serve",
+                    help="serve (default); hooks: print a settings.json snippet for precise status; intents-mcp: "
+                         "run the declare_intent MCP server (stdio); intents-install: print how to register it")
+    lp.add_argument("--write-claude-md", metavar="PATH",
+                    help="with intents-install: append the declare_intent snippet to this CLAUDE.md")
     from .live.server import add_arguments as live_arguments
     live_arguments(lp)
     lp.set_defaults(func=cmd_live)
+
+    ip = sub.add_parser("intents", help="steps and intent groups of one session (replays its transcript)")
+    ip.add_argument("session", help="transcript path (.jsonl) or session id / unique prefix")
+    ip.add_argument("--root", default=argparse.SUPPRESS,
+                    help="transcripts root (default ~/.claude/projects or $TOKENSCOPE_ROOT)")
+    ip.add_argument("--haiku", action="store_true",
+                    help="label steps without own signals with `claude -p --model haiku` (masked text, cached)")
+    ip.add_argument("--json", action="store_true")
+    ip.set_defaults(func=cmd_intents)
 
     args = p.parse_args(argv)
     set_cache(not getattr(args, "no_cache", False))

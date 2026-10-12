@@ -61,8 +61,14 @@ tool_name, notification_type, message (Notification only, 200 chars)}` to `~/.ca
 ![mod pane](docs/img/mod-pane.png)
 
 - **Mod** (`mod/tokenscope-live/`, Claude Code mods, tested on Claude Code 2.1.296): adds a `/tokenscope` command that
-  toggles a side pane in the terminal with the session's goal, status, CW / $ / context, a coloured intent strip, the
-  last turns with their tools, flags and subagents, polled once a second from the local server. Without the server it
+  toggles a side pane in the terminal: ASKED (the goal from the first prompt, plus a `↳ now:` line for the latest
+  follow-up, including ones typed while the agent works), NOW (the current call, or `N subagents working` with what
+  the latest one is doing), TESTS (main-thread runs; `subagents:` when only subagents ran tests), edited files, a cost
+  sparkline with CW / $ / context, and an intent list: labelled steps and intent groups (collapsed to one line, the
+  live group expanded; `/tokenscope expand|collapse <n|all>` or a press on a group line), with the open step's
+  provisional label dimmed. An older server without intents gets the phase tree instead (`/tokenscope view phases`
+  shows it too): phases of same-group intents, tools under the newest phases, subagents by task description with
+  nested subagents under the one that launched them. Rare warnings at the bottom. Polled once a second from the local server. Without the server it
   falls back to counters it computes from mod events (`tool.call`, `turn.step` usage, `turn.complete`).
   `claude --plugin-dir mod/tokenscope-live` (set `TOKENSCOPE_LIVE_PANE=1` to open the pane at start,
   `TOKENSCOPE_LIVE_BAND=1` for a one-line band above the prompt). See `mod/tokenscope-live/README.md`.

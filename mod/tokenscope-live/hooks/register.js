@@ -11,13 +11,17 @@ const PANE = 'tokenscope-live'
 const DEFAULT_BASE = 'http://127.0.0.1:8765'
 const POLL_MS = 1000
 const FLUSH_MS = 250
-const MAX_PHASES = 10
+const MAX_PHASES = 30   // beyond the row budget, older phases are folded into "… N earlier phases" anyway
+const EXPANDED_OLDER = 2   // older phases shown with their tools; the rest are one line each
 const MAX_ROWS = 38 // the pane is ~40 rows tall
 const MAX_TOOL_ROWS = 4
 const MAX_TARGETS = 3
 const SPARK_CHARS = 16
 const CTX_LIMIT = 200_000
 const LABEL_W = 7 // "ASKED  "
+const MAX_OPS = 12   // operation rows under the live intent
+const DETAIL_LABEL = 28   // a step label in an intent's one-line detail
+const MAX_HINTS = 3   // recap hints shown
 
 // What the server last answered (null: local mode) and its text, to spot changes
 let remote = null
@@ -28,6 +32,12 @@ let dirty = false
 let timers = []
 // Warning rules already seen (null until the first payload, which only seeds it)
 let seenRules = null
+
+// The intent list's view state, kept across redraws: 'intents' or 'phases'; group.first -> expanded, as the
+// person set it with /tokenscope expand|collapse or a press; and 'expanded' / 'collapsed' after "all"
+let view = 'intents'
+const groupOpen = new Map()
+let allMode = null
 
 // Local fallback counters
 const local = { tools: {}, recent: [], calls: 0, turns: 0, cw: 0, ctx: 0, turnCw: 0, series: [], working: false, startMs: null, nowMs: 0, live: null }
@@ -41,6 +51,7 @@ const GROUP_COLORS = {
   research: 'cyan',
   wait: 'gray',
   plan: 'magentaBright',
+  overhead: 'gray',
   other: 'gray',
 }
 
@@ -130,13 +141,77 @@ function normalize(d) {
     cost_usd: typeof d.usd === 'number' ? d.usd : d.cost_usd,
     ctx_tokens: d.context_tokens != null ? d.context_tokens : d.ctx_tokens,
     elapsed_s: d.elapsed_s,
-    toolCalls: typeof d.tool_calls === 'number' ? d.tool_calls : null,
+    // main-thread calls only: the mod matches them against the main loop's own tool.call events
+    toolCalls: typeof d.main_tool_calls === 'number' ? d.main_tool_calls : typeof d.tool_calls === 'number' ? d.tool_calls : null,
     turns,
     series,
     warnings: (Array.isArray(d.warnings) ? d.warnings : [])
       .filter((w) => w && typeof w === 'object')
       .map((w) => ({ rule: String(w.rule || w.text || ''), text: String(w.text || w.rule || ''), hint: w.hint ? String(w.hint) : '' })),
     subagents: Array.isArray(d.agents) ? d.agents : Array.isArray(d.subagents) ? d.subagents : [],
+    intents: normalizeIntents(d.intents),
+    recap: normalizeRecap(d.recap),
+  }
+}
+
+// payload.recap (sent only while the session waits for you / is idle) -> { costliest, slowest, hints }, or null
+function normalizeRecap(rc) {
+  if (!rc || typeof rc !== 'object') return null
+  const intent = (x) => (x && typeof x === 'object' ? {
+    label: String(x.label || 'intent'), cat: groupOf(x.cat, x.cat), cw: Number(x.cw) || 0,
+    usd: typeof x.usd === 'number' ? x.usd : null, pct: typeof x.pct === 'number' ? x.pct : null,
+    s: typeof x.s === 'number' ? x.s : null,
+  } : null)
+  const hints = (Array.isArray(rc.hints) ? rc.hints : []).filter((h) => h && typeof h === 'object' && h.text)
+    .slice(0, MAX_HINTS).map((h) => ({ text: String(h.text), evidence: h.evidence ? String(h.evidence) : '' }))
+  return { costliest: intent(rc.costliest), slowest: intent(rc.slowest), hints }
+}
+
+// payload.intents (docs/intents-spec.md) -> { steps, groups, declared }, or null for an older server
+function normalizeIntents(it) {
+  if (!it || typeof it !== 'object' || !Array.isArray(it.steps)) return null
+  const steps = it.steps.filter((x) => x && typeof x === 'object').map((x) => ({
+    i: Number(x.i) || 0,
+    cat: groupOf(x.cat, x.cat),
+    label: String(x.label || intentLabel(x.cat) || 'step'),
+    source: x.source ? String(x.source) : '',
+    locked: !!x.locked,
+    open: !!x.open,
+    cw: Number(x.cw) || 0,
+    usd: typeof x.usd === 'number' ? x.usd : null,
+    summary: x.summary ? String(x.summary) : '',
+    tested: x.tested === 'pass' || x.tested === 'fail' ? x.tested : null,
+    group: typeof x.group === 'number' ? x.group : null,
+    // the live step's calls (the server sends them for the open step, or the last one while working)
+    ops: Array.isArray(x.ops) ? x.ops.filter((o) => o && typeof o === 'object' && !isDeclare(o.tool)).map(normalizeOp) : null,
+  }))
+  const groups = (Array.isArray(it.groups) ? it.groups : []).map((g, idx) => ({
+    idx,
+    first: Number(g && g.first) || 0,
+    label: String((g && g.label) || 'intent'),
+    source: g && g.source ? String(g.source) : '',
+    cat: groupOf(g && g.cat, g && g.cat),
+    cw: Number(g && g.cw) || 0,
+    usd: g && typeof g.usd === 'number' ? g.usd : null,
+    steps: Number(g && g.steps) || 0,
+  }))
+  // the number shown on a group line (▸2): its place in step order
+  ;[...groups].sort((a, b) => a.first - b.first).forEach((g, n) => (g.n = n + 1))
+  const declared = it.declared && typeof it.declared === 'object' ? Number(it.declared.calls) || 0 : 0
+  return { steps, groups, declared }
+}
+
+// declare_intent (any server's) is the label source, not work: never an operation row
+const isDeclare = (tool) => /declare_intent$/.test(String(tool || ''))
+
+function normalizeOp(o) {
+  const t = o.test && typeof o.test === 'object' ? o.test : null
+  return {
+    tool: String(o.tool || '?'),
+    target: o.target != null && o.target !== '' ? String(o.target) : null,
+    cw: Number(o.cw) || 0,
+    err: o.err == null ? null : !!o.err,   // null: running (no result yet)
+    test: t ? { ok: !!t.ok, passed: typeof t.passed === 'number' ? t.passed : null, failed: typeof t.failed === 'number' ? t.failed : null } : null,
   }
 }
 
@@ -148,8 +223,8 @@ function fit(text, width) {
   return s.length > width ? s.slice(0, Math.max(0, width - 1)) + '…' : s
 }
 
-// One row of styled segments, cut to `width` across segments.
-function line(Box, Text, key, segs, width) {
+// Styled segments as Texts, cut to `width` across segments.
+function texts(Text, segs, width) {
   const children = []
   let room = width
   for (const seg of segs) {
@@ -159,7 +234,12 @@ function line(Box, Text, key, segs, width) {
     room -= shown.length
     children.push(Text({ ...style, wrap: 'truncate-end', children: [shown] }))
   }
-  return Box({ key, flexDirection: 'row', children })
+  return children
+}
+
+// One row of styled segments, cut to `width` across segments.
+function line(Box, Text, key, segs, width) {
+  return Box({ key, flexDirection: 'row', children: texts(Text, segs, width) })
 }
 
 // A labelled row: "ASKED  <segs>"
@@ -198,11 +278,15 @@ export function sparkline(values, maxChars) {
 
 // Consecutive turns with the same group, folded into phases. Each phase keeps its
 // intents (to name it), runs of consecutive same-name tools and its subagents.
+const TEST_TOOL = /^Bash .*test/i
+
+// A long edit-and-test loop is one CHANGE group turn after turn; a test run inside a CHANGE phase closes it, so
+// the tree reads as iterations ("CHANGE · editing files · 3 turns · tests ✓") instead of one 40-turn phase.
 export function phasesOf(turns) {
   const phases = []
   for (const t of turns) {
     let p = phases[phases.length - 1]
-    if (!p || p.group !== t.group) {
+    if (!p || p.group !== t.group || p.closed) {
       phases.push((p = { group: t.group, turns: 0, cw: 0, errors: 0, intents: new Map(), runs: [], agents: [] }))
     }
     p.turns += 1
@@ -222,6 +306,11 @@ export function phasesOf(turns) {
       if (t.toolErr[i]) (run.err += 1), (toolErrs += 1)
     })
     p.errors += toolErrs || (t.error ? 1 : 0)
+    const ti = t.tools.map((n, i) => (TEST_TOOL.test(n) ? i : -1)).filter((i) => i >= 0).pop()
+    if (ti != null) {
+      p.tested = t.toolErr[ti] ? 'fail' : 'pass'
+      if (p.group === 'change') p.closed = true
+    }
   }
   for (const p of phases) {
     let best = null
@@ -296,7 +385,7 @@ function liveTarget(ev) {
 // Tool calls seen in-process that the server does not report yet, as provisional turns for the tree.
 function pendingTurns(r) {
   if (r.toolCalls == null) return []
-  return (local.liveCalls || []).filter((c) => c.calls > r.toolCalls).map((c) => {
+  return (local.liveCalls || []).filter((c) => c.calls > r.toolCalls && (r.status === 'working' || fresh(c))).map((c) => {
     const [label, group] = liveLabel(c)
     return { intent: null, label, group, cw: 0, tools: [c.tool === 'Bash' && c.target ? 'Bash ' + c.target : c.tool],
              targets: [c.tool === 'Bash' ? null : c.target], toolErr: [false], error: false, agents: [] }
@@ -310,14 +399,38 @@ function liveLabel(l) {
   return [label, group]
 }
 
+const LIVE_FRESH_MS = 20_000
+
+function fresh(x) {
+  return x && x.atMs != null && local.nowMs - x.atMs < LIVE_FRESH_MS
+}
+
+function runningAgents(r) {
+  return r.subagents.filter((a) => a && (a.status === 'running' || a.status === 'starting'))
+}
+
 function liveNow(r) {
   const l = local.live
-  if (!l || r.toolCalls == null || l.calls <= r.toolCalls) return null
-  const [label, group] = liveLabel(l)
-  return [
-    { text: '▶ ' + label, color: GROUP_COLORS[group], bold: true },
-    l.target && { text: ' · ' + l.target },
-  ]
+  const ahead = l && r.toolCalls != null && l.calls > r.toolCalls
+  // a call the server has not seen: trust it while it is fresh, or while the server still says working
+  if (ahead && (r.status === 'working' || fresh(l))) {
+    const [label, group] = liveLabel(l)
+    return [
+      { text: '▶ ' + label, color: GROUP_COLORS[group], bold: true },
+      l.target && { text: ' · ' + l.target },
+    ]
+  }
+  const running = runningAgents(r)
+  if (running.length && r.status !== 'waiting' && r.status !== 'idle') {
+    const sub = fresh(local.sub) ? local.sub : null
+    const [label] = sub ? liveLabel(sub) : [null]
+    return [
+      { text: '▶ ' + running.length + (running.length === 1 ? ' subagent working' : ' subagents working'),
+        color: GROUP_COLORS.delegate, bold: true },
+      sub && { text: ' · ' + label + (sub.target ? ' ' + sub.target : ''), dimColor: true },
+    ]
+  }
+  return null
 }
 
 function nowSegs(r) {
@@ -339,10 +452,15 @@ function nowSegs(r) {
 
 // "✗4 → ✗2 → ✓ 12 passed"
 function testSegs(t) {
-  const trend = Array.isArray(t.trend) ? t.trend.slice(0, -1).slice(-4) : []
-  const segs = []
-  for (const f of trend) {
-    segs.push(f == null ? { text: '?', dimColor: true } : f > 0 ? { text: '✗' + f, color: 'red' } : { text: '✓', color: 'green' })
+  const all = Array.isArray(t.trend) ? t.trend : []
+  const passed = Array.isArray(t.passed_trend) ? t.passed_trend : []
+  const from = Math.max(0, all.length - 1 - 4)
+  // only subagents ran tests so far: often their own new, deliberately red audit tests, so say whose they are
+  const segs = t.scope === 'subagents' ? [{ text: 'subagents: ', dimColor: true }] : []
+  for (let i = from; i < all.length - 1; i++) {
+    const f = all[i]
+    const ok = passed[i] != null ? { text: '✓' + passed[i], color: 'green' } : { text: '✓', color: 'green' }
+    segs.push(f == null ? { text: '?', dimColor: true } : f > 0 ? { text: '✗' + f, color: 'red' } : ok)
     segs.push({ text: ' → ', dimColor: true })
   }
   if (t.ok && !(t.failed > 0)) segs.push({ text: '✓ ' + (t.passed != null ? t.passed + ' passed' : 'passed'), color: 'green', bold: true })
@@ -391,6 +509,8 @@ function phaseHead(p, live, last) {
     { text: p.group.toUpperCase(), color: GROUP_COLORS[p.group], bold: true, dimColor: !live },
     p.label && { text: ' · ' + (live ? '▶ ' : '') + p.label, bold: live, dimColor: !live },
     { text: turns, dimColor: true },
+    p.tested && p.group === 'change' && { text: ' · tests ', dimColor: true },
+    p.tested && p.group === 'change' && (p.tested === 'pass' ? { text: '✓', color: 'green' } : { text: '✗', color: 'red' }),
   ]
 }
 
@@ -404,6 +524,23 @@ function phaseCollapsed(Box, Text, width, p, id, last) {
   ], width)]
 }
 
+// "Audit store.py edge cases" (the task it was given) when known, else its type
+function agentName(a) {
+  return String(a.description || a.type || a.name || 'agent')
+}
+
+function agentSegs(a, pad) {
+  const st = AGENT_STATUS[a.status] || { text: a.status || '', dimColor: true }
+  const typed = a.description && a.type && a.type !== 'general-purpose'
+  return [
+    { text: agentName(a).padEnd(pad) },
+    typed && { text: ' (' + a.type + ')', dimColor: true },
+    a.turns != null && { text: ' · ' + a.turns + (a.turns === 1 ? ' turn' : ' turns'), dimColor: true },
+    st.text && { text: ' · ', dimColor: true },
+    st.text && { text: st.text, color: st.color, dimColor: st.dimColor },
+  ]
+}
+
 // A phase with its tool runs (the newest MAX_TOOL_ROWS) and subagents under it.
 function phaseExpanded(Box, Text, width, p, id, live, last) {
   const stem = last ? '  ' : '│ '
@@ -413,19 +550,17 @@ function phaseExpanded(Box, Text, width, p, id, live, last) {
   const items = []
   if (hidden > 0) items.push({ key: 'more', segs: [{ text: '… ' + hidden + ' earlier', dimColor: true }] })
   runs.forEach((run, i) => items.push({ key: 'tool-' + i, segs: runSegs(run) }))
-  const pad = Math.min(16, Math.max(0, ...p.agents.map((a) => String(a.type || a.name || 'agent').length)))
+  const pad = Math.min(22, Math.max(0, ...p.agents.map((a) => agentName(a).length)))
   p.agents.forEach((a, i) => {
-    const st = AGENT_STATUS[a.status] || { text: a.status || '', dimColor: true }
-    items.push({ key: 'agent-' + i, agent: true, segs: [
-      { text: String(a.type || a.name || 'agent').padEnd(pad) },
-      a.turns != null && { text: ' · ' + a.turns + (a.turns === 1 ? ' turn' : ' turns'), dimColor: true },
-      st.text && { text: ' · ', dimColor: true },
-      st.text && { text: st.text, color: st.color, dimColor: st.dimColor },
-    ] })
+    items.push({ key: 'agent-' + i, agent: true, segs: agentSegs(a, pad) })
+    const kids = Array.isArray(a.children) ? a.children : []
+    kids.forEach((c, j) => items.push({ key: 'agent-' + i + '-' + j, child: true, lastChild: j === kids.length - 1, segs: agentSegs(c, 0) }))
   })
   items.forEach((it, i) => {
-    const end = i === items.length - 1
-    const glyph = it.agent ? (end ? '└─↳ ' : '├─↳ ') : end ? '└ ' : '├ '
+    const end = !items.slice(i + 1).some((x) => !x.child)   // no sibling below at this level
+    let glyph
+    if (it.child) glyph = (end ? '    ' : '│   ') + (it.lastChild ? '└─↳ ' : '├─↳ ')
+    else glyph = it.agent ? (end ? '└─↳ ' : '├─↳ ') : end ? '└ ' : '├ '
     rows.push(line(Box, Text, 'phase-' + id + '-' + it.key, [{ text: stem + glyph, dimColor: true }, ...it.segs], width))
   })
   return rows
@@ -439,7 +574,7 @@ function flowTree(Box, Text, width, r, budget) {
   const root = line(Box, Text, 'root', [{ text: '◆ ' + (r.goal || 'session'), bold: true }], width)
   const lastI = phases.length - 1
   let from = Math.max(0, phases.length - MAX_PHASES)
-  const expanded = phases.map((p, i) => phaseExpanded(Box, Text, width, p, i, i === lastI, i === lastI))
+  const expanded = phases.map((p, i) => phaseExpanded(Box, Text, width, p, i, i === lastI && r.status !== 'waiting' && r.status !== 'idle', i === lastI))
   const collapsed = phases.map((p, i) => phaseCollapsed(Box, Text, width, p, i, i === lastI))
   const live = expanded[lastI].slice(0, Math.max(1, budget - 1))
   const pick = (fromI, foldBelow) => {
@@ -449,7 +584,7 @@ function flowTree(Box, Text, width, r, budget) {
     return blocks
   }
   const size = (blocks, fromI) => 1 + (fromI > 0 ? 1 : 0) + blocks.reduce((n, b) => n + b.length, 0)
-  let fold = from
+  let fold = Math.max(from, lastI - EXPANDED_OLDER)
   let blocks = pick(from, fold)
   while (size(blocks, from) > budget && fold < lastI) blocks = pick(from, ++fold)
   while (size(blocks, from) > budget && from < lastI) blocks = pick(++from, lastI)
@@ -467,6 +602,7 @@ function unplacedAgents(r) {
     placed[k] = (placed[k] || 0) + 1
   }
   return r.subagents.filter((s) => {
+    if (s.parent) return false   // drawn under the subagent that launched it
     const k = s.id || s.type || s.name
     if (!placed[k]) return true
     placed[k] -= 1
@@ -474,7 +610,225 @@ function unplacedAgents(r) {
   })
 }
 
-function drawRemote(Box, Text, width) {
+// --- intent list (payload.intents) -----------------------------------------
+
+// A group is expanded when it holds the open step, unless the person said otherwise (per group, or "all").
+function groupExpanded(g, live) {
+  if (groupOpen.has(g.first)) return groupOpen.get(g.first)
+  if (allMode) return allMode === 'expanded'
+  return live
+}
+
+const groupIsLive = (it, g) => it.steps.some((s) => s.open && s.group === g.idx)
+
+function costText(cw, usd) {
+  return ' · ' + fmtTokens(cw) + (usd != null ? ' · $' + usd.toFixed(2) : '')
+}
+
+// "[VERIFY] Run store tests · Bash unittest ✓ · 9k · $0.03"; the summary (when `withSummary`: a top-level step
+// has it on its detail line instead) gets what room the rest leaves
+function stepSegs(s, prefix, width, withSummary) {
+  const provisional = s.open && !s.locked
+  const head = [
+    { text: prefix, dimColor: true },
+    s.open && { text: '▶ ', color: GROUP_COLORS[s.cat], bold: true },
+    { text: '[' + s.cat.toUpperCase() + ']', color: GROUP_COLORS[s.cat], bold: true },
+    { text: ' ' + s.label + (provisional ? '…' : ''), dimColor: provisional, bold: s.open && !provisional },
+    s.source === 'declared' && { text: ' ✎', dimColor: true },
+  ]
+  const cost = { text: costText(s.cw, s.usd), dimColor: true }
+  const room = width - segsLen(head) - cost.text.length - 3
+  const summary = withSummary && s.summary && room >= 4 && { text: ' · ' + fit(s.summary, room), dimColor: true }
+  return [...head, summary, cost]
+}
+
+function groupSegs(g, expanded, live) {
+  return [
+    { text: (expanded ? '▾' : '▸') + g.n + ' ', bold: live, dimColor: !live },
+    { text: '[' + g.cat.toUpperCase() + ']', color: GROUP_COLORS[g.cat], bold: true },
+    { text: ' ' + g.label, bold: live },
+    g.source === 'declared' && { text: ' ✎', dimColor: true },
+    { text: ' · ' + g.steps + (g.steps === 1 ? ' step' : ' steps') + costText(g.cw, g.usd), dimColor: true },
+  ]
+}
+
+// The step that is happening now: the open one, or the one the server sent calls for (a test run closes a step
+// before the next turn opens one)
+const isLive = (s) => s.open || s.ops != null
+
+// "Read store.py": a step label cut to fit an intent's detail line
+function shortLabel(label) {
+  return fit(String(label).replace(/…$/, ''), DETAIL_LABEL)
+}
+
+// "↳ Read store.py · Edit models.py ×2 · Run tests ✓": equal neighbours fold into ×N, what does not fit is "+N"
+export function stepsDetail(steps, width) {
+  const parts = []
+  for (const s of steps) {
+    const mark = s.tested === 'pass' ? ' ✓' : s.tested === 'fail' ? ' ✗' : ''
+    const label = shortLabel(s.label)
+    const last = parts[parts.length - 1]
+    if (last && last.label === label && last.mark === mark) last.n += 1
+    else parts.push({ label, mark, n: 1 })
+  }
+  const text = (p) => p.label + (p.n > 1 ? ' ×' + p.n : '') + p.mark
+  let out = ''
+  for (let k = 0; k < parts.length; k++) {
+    const next = (out ? out + ' · ' : '') + text(parts[k])
+    const rest = parts.length - k - 1
+    // keep room for " +N" while parts remain
+    if (next.length + (rest > 0 ? (' +' + rest).length : 0) > width) {
+      const more = parts.length - k
+      return out ? out + ' +' + more : fit(text(parts[k]), width - (' +' + (more - 1)).length) + (more > 1 ? ' +' + (more - 1) : '')
+    }
+    out = next
+  }
+  return out
+}
+
+const DETAIL_PREFIX = '   ↳ '
+
+function detailRow(Box, Text, key, text, width) {
+  return line(Box, Text, key, [{ text: DETAIL_PREFIX + text, dimColor: true }], width)
+}
+
+// "▶ Edit store.py · 4k", "✓ unittest 22 passed · 3k", "✗ unittest 1 failed · 3k"
+export function opText(o) {
+  const tool = /^Bash ./.test(o.tool) ? o.tool.slice(5) : o.tool
+  const target = o.target && o.target !== tool && !tool.endsWith(' ' + o.target) ? ' ' + o.target : ''
+  const t = o.test
+  const test = !t ? '' : t.failed > 0 ? ' ' + t.failed + ' failed' : t.passed != null ? ' ' + t.passed + ' passed' : ''
+  return tool + target + test + (o.cw > 0 ? ' · ' + fmtTokens(o.cw) : '')
+}
+
+function opSegs(o, prefix) {
+  const failed = o.err || (o.test && (!o.test.ok || o.test.failed > 0))
+  const icon = o.err == null ? { text: '▶ ', color: 'green', bold: true } : failed ? { text: '✗ ', color: 'red' } : { text: '✓ ', color: 'green' }
+  return [{ text: prefix, dimColor: true }, icon, { text: opText(o), dimColor: o.err != null, bold: o.err == null }]
+}
+
+// In-process calls the transcript has not caught up with, as running ops of the live step
+function pendingOps(r) {
+  if (r.toolCalls == null) return []
+  return (local.liveCalls || []).filter((c) => c.calls > r.toolCalls && (r.status === 'working' || fresh(c)) && !isDeclare(c.tool))
+    .map((c) => ({ tool: c.tool === 'Bash' && c.target ? 'Bash ' + c.target : c.tool, target: c.tool === 'Bash' ? null : c.target, cw: 0, err: null, test: null }))
+}
+
+function opRows(Box, Text, width, s, prefix, extra) {
+  const ops = [...(s.ops || []), ...extra].slice(-MAX_OPS)
+  return ops.map((o, j) => line(Box, Text, 'op-' + s.i + '-' + j, opSegs(o, prefix), width))
+}
+
+// Groups (collapsed to one line unless expanded) and ungrouped steps, oldest first, as blocks of rows. A block
+// that is not live has a dim detail line under its head (dropped first when rows are short); the live block shows
+// its step's calls instead, one row each.
+function intentBlocks(Box, Text, Button, width, it, $, r) {
+  const byIdx = new Map(it.groups.map((g) => [g.idx, g]))
+  const done = new Set()
+  const blocks = []
+  const liveStep = [...it.steps].reverse().find(isLive)
+  const extra = liveStep ? pendingOps(r) : []
+  for (const s of it.steps) {
+    const g = s.group != null ? byIdx.get(s.group) : null
+    if (!g) {
+      const live = s === liveStep
+      const head = line(Box, Text, 'step-' + s.i, stepSegs(s, live ? '' : '  ', width, false), width)
+      const ops = live ? opRows(Box, Text, width, s, '   ', extra) : []
+      const detail = !ops.length && s.summary ? detailRow(Box, Text, 'detail-' + s.i, s.summary, width) : null
+      blocks.push({ live, head, detail, rows: [head, ...ops] })
+      continue
+    }
+    if (done.has(g.idx)) continue
+    done.add(g.idx)
+    const kids = it.steps.filter((x) => x.group === g.idx)
+    const live = kids.includes(liveStep) || groupIsLive(it, g)
+    const expanded = groupExpanded(g, live)
+    const head = Box({ key: 'group-' + g.first, flexDirection: 'row', children: [Button({
+      key: 'group-' + g.first, plain: true, onPress: () => toggleGroup($, g.first),
+      children: texts(Text, groupSegs(g, expanded, live), width),
+    })] })
+    const rows = []
+    if (expanded) {
+      kids.forEach((x, j) => {
+        const end = j === kids.length - 1
+        rows.push(line(Box, Text, 'step-' + x.i, stepSegs(x, end ? '  └ ' : '  ├ ', width, true), width))
+        if (x === liveStep) rows.push(...opRows(Box, Text, width, x, end ? '      ' : '  │   ', extra))
+      })
+    }
+    const summary = detailRow(Box, Text, 'detail-g' + g.first, stepsDetail(kids, Math.max(1, width - DETAIL_PREFIX.length)), width)
+    blocks.push({ live, group: true, head, summary, detail: expanded ? null : summary, rows: [head, ...rows] })
+  }
+  return blocks
+}
+
+// Newest at the bottom, each block its head, rows and detail line. Over `budget`: older expanded groups collapse
+// first, then the oldest blocks lose their detail lines, then fold into "… N earlier"; the live block always stays
+// (cut to its newest rows if it alone is too tall).
+function intentList(Box, Text, Button, width, it, budget, $, r) {
+  const blocks = intentBlocks(Box, Text, Button, width, it, $, r)
+  if (!blocks.length) return []
+  let from = 0
+  const rowsOf = (b) => (b.detail ? [b.rows[0], b.detail, ...b.rows.slice(1)] : b.rows)
+  const size = () => (from > 0 ? 1 : 0) + blocks.slice(from).reduce((n, b) => n + rowsOf(b).length, 0)
+  for (let i = 0; i < blocks.length && size() > budget; i++) {
+    const b = blocks[i]
+    if (b.group && !b.live && b.rows.length > 1) (b.rows = [b.head]), (b.detail = b.summary)
+  }
+  for (let i = 0; i < blocks.length && size() > budget; i++) if (!blocks[i].live) blocks[i].detail = null
+  while (size() > budget && from < blocks.length - 1 && !blocks[from].live) from++
+  const live = blocks.find((b) => b.live)
+  if (live && size() > budget && live.rows.length > 2) {
+    const keep = Math.max(1, live.rows.length - (size() - budget) - 1)
+    const cut = live.rows.length - 1 - keep
+    live.rows = [live.rows[0], line(Box, Text, 'cut-live', [{ text: '  … ' + cut + ' earlier', dimColor: true }], width), ...live.rows.slice(-keep)]
+  }
+  const out = []
+  if (from > 0) out.push(line(Box, Text, 'cut', [{ text: '… ' + from + ' earlier', dimColor: true }], width))
+  for (const b of blocks.slice(from)) out.push(...rowsOf(b))
+  return out
+}
+
+function toggleGroup($, first) {
+  const it = remote && remote.intents
+  const g = it && it.groups.find((x) => x.first === first)
+  if (!g) return
+  groupOpen.set(first, !groupExpanded(g, groupIsLive(it, g)))
+  void $.ui.invalidate('ui.render')
+}
+
+const intentView = (r) => view === 'intents' && r.intents && r.intents.steps.length > 0
+
+// "── recap ──": what the work since your last prompt cost and up to 3 hints, while the session waits for you;
+// gone as soon as the agent works again (or a call the transcript has not caught up with is running)
+function recapRows(Box, Text, width, r) {
+  const rc = r.recap
+  if (!rc || (r.status !== 'waiting' && r.status !== 'idle') || liveNow(r)) return []
+  const rows = [line(Box, Text, 'recap', [{ text: '── recap ──', dimColor: true }], width)]
+  // "costliest 38% · [CHANGE] <label> · 63k · $0.22": the share (and duration) lead, the label gets what room is left
+  const intentLine = (key, name, lead, x, cost) => {
+    const head = [{ text: name, dimColor: true }, ...lead.flatMap((t) => [{ text: t, bold: true }, { text: ' · ', dimColor: true }]),
+      { text: '[' + x.cat.toUpperCase() + ']', color: GROUP_COLORS[x.cat], bold: true }]
+    const tail = cost ? { text: costText(x.cw, x.usd), dimColor: true } : null
+    const label = { text: ' ' + fit(x.label, width - segsLen(head) - (tail ? tail.text.length : 0) - 1) }
+    return line(Box, Text, key, [...head, label, tail], width)
+  }
+  const c = rc.costliest
+  const s = rc.slowest && rc.slowest.s != null ? rc.slowest : null
+  const share = c && c.pct != null ? [c.pct + '%'] : []
+  if (c && s && s.label === c.label && s.cat === c.cat) {
+    rows.push(intentLine('recap-cost', 'costliest & slowest ', [...share, fmtDur(s.s)], c, true))
+  } else {
+    if (c) rows.push(intentLine('recap-cost', 'costliest ', share, c, true))
+    if (s) rows.push(intentLine('recap-slow', 'slowest   ', [fmtDur(s.s)], s, false))
+  }
+  rc.hints.forEach((h, i) => rows.push(line(Box, Text, 'recap-hint-' + i, [
+    { text: '💡 ' + h.text, color: 'cyan' },
+    h.evidence && { text: ' · ' + h.evidence, dimColor: true },
+  ], width)))
+  return rows
+}
+
+function drawRemote(Box, Text, width, Button, $) {
   const pending = pendingTurns(remote)
   const r = pending.length ? { ...remote, turns: [...remote.turns, ...pending] } : remote
   const top = [header(Box, Text, width, 'tokenscope', r.status, r.elapsed_s != null ? fmtDur(r.elapsed_s) : '')]
@@ -488,10 +842,12 @@ function drawRemote(Box, Text, width) {
   const files = filesText(r)
   if (files) top.push(row(Box, Text, 'files', 'FILES', [{ text: files }], width))
   top.push(row(Box, Text, 'cost', 'COST', costSegs(width, r.cw, r.cost_usd, r.ctx_tokens, r.series), width))
-  if (r.turns.length) top.push(line(Box, Text, 'flow', [{ text: '── flow ──', dimColor: true }], width))
+  const intents = intentView(r)
+  if (intents) top.push(line(Box, Text, 'flow', [{ text: '── intents ──', dimColor: true }], width))
+  else if (r.turns.length) top.push(line(Box, Text, 'flow', [{ text: '── flow ──', dimColor: true }], width))
 
-  const bottom = unplacedAgents(r).map((s, i) => line(Box, Text, 'agent-' + i, [
-    { text: '↳ ' + (s.name || s.type || 'agent'), dimColor: true },
+  const bottom = (intents ? runningAgents(r) : unplacedAgents(r)).map((s, i) => line(Box, Text, 'agent-' + i, [
+    { text: '↳ ' + agentName(s), dimColor: true },
     { text: ' · ' + (s.turns || 0) + ' turns · ', dimColor: true },
     { text: s.status || '', color: s.status === 'running' ? 'green' : undefined, dimColor: s.status !== 'running' },
   ], width))
@@ -499,8 +855,14 @@ function drawRemote(Box, Text, width) {
     { text: '⚠ ' + w.text, color: 'yellow', bold: true },
     w.hint && { text: ' — ' + w.hint, color: 'yellow' },
   ], width)))
-  const tree = flowTree(Box, Text, width, r, Math.max(3, MAX_ROWS - top.length - bottom.length))
-  return [...top, ...tree, ...bottom].slice(0, MAX_ROWS)
+  if (intents && r.intents.declared > 0) {
+    bottom.push(line(Box, Text, 'declared', [{ text: '✎ declared ×' + r.intents.declared, dimColor: true }], width))
+  }
+  // the recap goes under the list, which yields its older rows first to make room
+  const recap = recapRows(Box, Text, width, r)
+  const budget = Math.max(3, MAX_ROWS - top.length - recap.length - bottom.length)
+  const tree = intents ? intentList(Box, Text, Button, width, r.intents, budget, $, r) : flowTree(Box, Text, width, r, budget)
+  return [...top, ...tree, ...recap, ...bottom].slice(0, MAX_ROWS)
 }
 
 function drawLocal(Box, Text, width) {
@@ -572,11 +934,31 @@ async function poll($) {
     if (remote) toastNewWarnings($, remote.warnings)
     dirty = true
   }
-  if (!remote) {
-    // local mode: the header's clock ticks once a second
-    local.nowMs = await $.clock.now()
-    dirty = true
+  local.nowMs = await $.clock.now()   // also ages the in-process live calls (fresh())
+  if (!remote) dirty = true   // local mode: the header's clock ticks once a second
+}
+
+const USAGE = 'usage: /tokenscope [expand <n|all> | collapse <n|all> | view intents|phases]'
+
+// `/tokenscope expand 2`, `collapse all`, `view phases`: the answer is the command's output line
+function runView(verb, arg) {
+  if (verb === 'view') {
+    if (arg !== 'intents' && arg !== 'phases') return USAGE
+    view = arg
+    return 'tokenscope: ' + arg + ' view'
   }
+  if (verb !== 'expand' && verb !== 'collapse') return USAGE
+  const open = verb === 'expand'
+  if (arg === 'all') {
+    groupOpen.clear()
+    allMode = open ? 'expanded' : 'collapsed'
+    return 'tokenscope: ' + (open ? 'expanded' : 'collapsed') + ' all groups'
+  }
+  const n = Number(arg)
+  const g = remote && remote.intents && remote.intents.groups.find((x) => x.n === n)
+  if (!g) return 'tokenscope: no group ' + (arg || '') + ' (the number after ▸ / ▾)'
+  groupOpen.set(g.first, open)
+  return 'tokenscope: ' + (open ? 'expanded' : 'collapsed') + ' group ' + n + ' · ' + g.label
 }
 
 function flush($) {
@@ -589,15 +971,20 @@ export function register(onEvent) {
   onEvent('session.start', async ($, e, next) => {
     await $.command.register({
       name: 'tokenscope',
-      description: 'Toggle the tokenscope live pane',
+      description: 'Toggle the tokenscope live pane; expand|collapse <n|all>, view intents|phases',
+      argumentHint: '[expand <n|all> | collapse <n|all> | view intents|phases]',
       immediate: true,
     })
     timers.forEach((t) => t.cancel())
+    view = 'intents'
+    groupOpen.clear()
+    allMode = null
     remote = null
     remoteText = ''
     seenRules = null
     local.calls = 0
     local.live = null
+    local.sub = null
     local.liveCalls = []   // tool calls are matched against this session's server-side count
     local.startMs = local.nowMs = await $.clock.now()
     timers = [$.clock.every(POLL_MS, () => poll($)), $.clock.every(FLUSH_MS, () => flush($))]
@@ -608,7 +995,13 @@ export function register(onEvent) {
     return next(e)
   })
 
-  onEvent('command.run', { command: 'tokenscope' }, async $ => {
+  onEvent('command.run', { command: 'tokenscope' }, async ($, e) => {
+    const [verb, arg] = String(e.args || '').trim().toLowerCase().split(/\s+/)
+    if (verb) {
+      const text = runView(verb, arg)
+      void $.ui.invalidate('ui.render')
+      return { text }
+    }
     const panes = await $.ui.panes()
     if (panes.some(p => p.id === PANE)) {
       await $.ui.close({ id: PANE })
@@ -620,12 +1013,18 @@ export function register(onEvent) {
 
   onEvent('tool.call', async ($, e, next) => {
     const name = String(e.tool)
+    const atMs = await $.clock.now()
     local.tools[name] = (local.tools[name] || 0) + 1
-    local.calls += 1
     local.working = true
     local.recent = [...local.recent, name].slice(-12)
-    local.live = { tool: name, target: liveTarget(e), calls: local.calls }
-    local.liveCalls = [...(local.liveCalls || []), local.live].slice(-12)
+    if (e.agentId) {
+      // a subagent's call: never a main-thread tree line, only "what the subagents are doing" in NOW
+      local.sub = { tool: name, target: liveTarget(e), agentId: e.agentId, atMs }
+    } else {
+      local.calls += 1
+      local.live = { tool: name, target: liveTarget(e), calls: local.calls, atMs }
+      local.liveCalls = [...(local.liveCalls || []), local.live].slice(-12)
+    }
     dirty = true
     return next(e)
   }).catch(async ($, e, next) => next(e)) // counting must never block a tool call
@@ -657,9 +1056,9 @@ export function register(onEvent) {
   })
 
   onEvent('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
-    const { Box, Text } = $.ui.resolve(e)
+    const { Box, Text, Button } = $.ui.resolve(e)
     const width = Math.max(1, e.props.bodyColumns || 40)
-    const rows = remote ? drawRemote(Box, Text, width) : drawLocal(Box, Text, width)
+    const rows = remote ? drawRemote(Box, Text, width, Button, $) : drawLocal(Box, Text, width)
     return Box({ flexDirection: 'column', children: rows })
   })
 
