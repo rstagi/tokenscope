@@ -27,7 +27,7 @@ from datetime import datetime
 from urllib.parse import urlparse
 
 from .. import intents, pricing, steps as stepsmod
-from ..xindex import prompt_words
+from ..xindex import named_files, prompt_words
 from ..analyze import est_tokens
 from ..parse import prompt_source, real_prompt_text
 from ..understand import parse_test_output, test_runner
@@ -70,6 +70,7 @@ HINTS = {
     "context_near_full": "/compact or start a fresh session with a summary",
 }
 KEEP_CHARS = 400   # a tool result is kept as its first + last KEEP_CHARS chars only
+NAMES_CHARS = 50_000   # of a search output scanned for the file names it shows (xindex: which files it led to)
 ANSI_RE = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]")
 NORMS = [
     (re.compile(r"\d{4}-\d\d-\d\d[t ]\d\d:\d\d(:\d\d)?(\.\d+)?z?|\b\d\d:\d\d:\d\d(\.\d+)?\b"), "<ts>"),
@@ -632,6 +633,9 @@ class LiveState:
         k = next((i for i, x in enumerate(step["tools"]) if x is tool), None)
         if k is not None and k < len(facts) and facts[k].get("full"):
             facts[k]["chars"] = _result_chars(b)   # what the read put into the context (recap: shared_reads)
+        if k is not None and k < len(facts) and br is s.main and not err \
+                and (facts[k].get("search") or tool["name"] == "Bash"):
+            facts[k]["names"] = named_files(_result_text(b, NAMES_CHARS))   # xindex: which files a search led to
         if err:
             br.err_events.append(("err", error_signature(text)))
         rec = s.recs.pop(tool["id"], None) or {}

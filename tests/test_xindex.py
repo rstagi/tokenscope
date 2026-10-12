@@ -14,7 +14,8 @@ from tokenscope import xindex as xi  # noqa: E402
 from tokenscope.live import recap as rc  # noqa: E402
 from tokenscope.live.state import LiveState  # noqa: E402
 from tokenscope.live.tail import TrackedFile  # noqa: E402
-from tests.test_recap import PASS, SID, Sess, bash, edit, read  # noqa: E402
+from tests.test_live import LiveFixture  # noqa: E402
+from tests.test_recap import PASS, SID, Sess, bash, edit, grep, read  # noqa: E402
 
 
 def resolve(shown, cache):
@@ -23,21 +24,47 @@ def resolve(shown, cache):
 
 
 def step(i, cat, label, files=(), cmds=(), cw=20_000, source="rule", tools=None, skills=(), runners=(),
-         prompt=False):
+         prompt=False, disc=None, edits=None, turns=1):
+    """A step; `disc`: [(kind, path, cw)] or [(kind, path, cw, names its output showed)] discovery calls in it
+    (default: an investigate step's files read in full, its CW split over them), `edits`: paths it edits (default: a
+    change step's files)."""
+    if disc is None:
+        disc = [("read", f, cw / len(files)) for f in files] if cat == "investigate" and files else []
+    if edits is None:
+        edits = list(files) if cat == "change" else []
     return {"i": i, "cat": cat, "label": label, "source": source, "files": list(files), "cmds": list(cmds),
             "cw": cw, "usd": cw / 1e6, "tools": tools or {"Read": 1}, "skills": list(skills), "ts0": 1000.0 + i,
-            "ts1": 1001.0 + i, "prompt_before": prompt, "runners": list(runners), "tested": "pass" if runners else None}
+            "ts1": 1001.0 + i, "prompt_before": prompt, "runners": list(runners), "tested": "pass" if runners else None,
+            "turns": turns, "disc": [{"kind": d[0], "path": d[1], "shown": d[1], "cw": d[2], "k": i,
+                                      "names": list(d[3]) if len(d) > 3 else []} for d in disc],
+            "edits": [{"path": p, "k": i} for p in edits]}
 
 
-def workflow(sid, cw_read=40_000, skills=(), files=("cli.py", "README.md"), extra=(), cw_rest=20_000):
-    """A request: read cli.py + README.md, edit them, run the unit tests (one record)."""
-    steps = [step(0, "investigate", "reading code · cli.py", files[:1] + tuple(extra), cw=cw_read, prompt=True,
-                  skills=skills),
-             step(1, "investigate", "reading docs · README.md", files[1:], cw=cw_read / 2),
-             step(2, "change", "editing files · cli.py, README.md", files, tools={"Edit": 3}, cw=cw_rest),
+def workflow(sid, cw_read=40_000, skills=(), files=("cli.py", "README.md"), extra=(), cw_rest=20_000, turns=1,
+             project="proj", found=("models.py",)):
+    """A request: search, read cli.py + the `found` files (models.py) + README.md, edit cli.py and README.md, run the
+    unit tests (one record). Discovery: the search (its output names the found files) and the reads of the found
+    files (cw_read); the other reads are of files it edits."""
+    steps = [step(0, "investigate", "reading code · cli.py", files[:1] + tuple(found) + tuple(extra), cw=cw_read,
+                  prompt=True, skills=skills,
+                  disc=[("search", "", cw_read / 2, found)] + [("read", f, cw_read / 4 / len(found)) for f in found]
+                  + [("read", files[0], cw_read / 4)], turns=turns),
+             step(1, "investigate", "reading docs · README.md", files[1:], cw=cw_read / 2, turns=turns),
+             step(2, "change", "editing files · cli.py, README.md", files, tools={"Edit": 3}, cw=cw_rest, turns=turns),
              step(3, "verify", "running tests · unittest", (), ("unittest",), tools={"Bash unittest": 1}, cw=cw_rest,
-                  runners=("Bash unittest",))]
-    return xi.requests_of(steps, [], sid, "proj")[0]
+                  runners=("Bash unittest",), turns=turns)]
+    return xi.requests_of(steps, [], sid, project)[0]
+
+
+def busy_project(project="proj", n=10, turns=60):
+    """Other requests of the project (too small to match anything): the turns a CLAUDE.md line is paid on."""
+    return [xi.requests_of([step(0, "change", "editing files · x.py", ("x.py",), cw=5_000, prompt=True,
+                                 turns=turns)], [], "busy%d" % k, project)[0] for k in range(n)]
+
+
+def net(disc, chars, turns=4):
+    """Expected net of a skill whose draft body has `chars` characters, for runs of `turns` turns."""
+    return disc - xi.context_cost(-(-chars // xi.CHARS_PER_TOKEN), turns)
 
 
 class Normalise(unittest.TestCase):
@@ -54,7 +81,7 @@ class Normalise(unittest.TestCase):
         self.assertEqual(xi.label_tokens({"label": "Write release notes", "source": "todo"}), ["write", "release", "note"])
 
     def test_signature(self):
-        r = workflow("s1")
+        r = workflow("s1", found=())
         self.assertEqual(r["cats"], ["investigate", "change", "verify"])
         self.assertEqual(r["tools"], {"Read": 2, "Edit": 3, "Bash unittest": 1})
         self.assertEqual(r["exts"], [".md", ".py"])
@@ -63,11 +90,11 @@ class Normalise(unittest.TestCase):
         self.assertEqual(r["cw_cat"], {"investigate": 60_000, "change": 20_000, "verify": 20_000})
 
     def test_device_files_and_task_output_are_not_project_files(self):
-        r = workflow("s1", extra=("null", "b4x.output"))
+        r = workflow("s1", extra=("null", "b4x.output"), found=())
         self.assertEqual(r["files"], ["cli.py", "README.md"])
 
     def test_directories_are_not_files(self):
-        r = workflow("s1", extra=("hist-1", "src", "Makefile", ".gitignore", "LICENSE"))
+        r = workflow("s1", extra=("hist-1", "src", "Makefile", ".gitignore", "LICENSE"), found=())
         self.assertEqual(r["files"], ["cli.py", "Makefile", ".gitignore", "LICENSE", "README.md"])
         self.assertEqual(r["steps"][0]["files"], ["cli.py", "Makefile", ".gitignore", "LICENSE"])
 
@@ -92,7 +119,8 @@ TASKS = {"count": "print the number of catalog items and total units on hand",
 def prompted(sid, prompt, tdd=False, files=("cli.py", "test_cli.py", "README.md", "CHANGELOG.md")):
     """A request started by `prompt`: read, edit, test once; or (tdd) a /tdd run: skill step, then test / edit
     cycles: a different step shape for the same task."""
-    rd = lambda i, fs, cw=30_000: step(i, "investigate", "reading code · " + ", ".join(fs), fs, cw=cw)
+    rd = lambda i, fs, cw=30_000: step(i, "investigate", "reading code · " + ", ".join(fs), fs, cw=cw,
+                                       disc=[("search", "", cw, fs)])   # finding the files: all discovery
     ed = lambda i, fs: step(i, "change", "editing files · " + ", ".join(fs), fs, tools={"Edit": 2}, cw=10_000)
     rn = lambda i: step(i, "verify", "running tests · unittest", (), ("unittest",), tools={"Bash unittest": 1},
                         cw=8_000, runners=("Bash unittest",))
@@ -138,10 +166,11 @@ class Prompts(unittest.TestCase):
         hist = [prompted("p%d" % k, SUBCMD % (n, TASKS[n])) for k, n in enumerate(("count", "export-csv", "search"))]
         for r in hist:
             self.assertTrue(xi.is_match(cur, r)[0])
-        h = xi.suggest([cur], hist, write=False)
+        h = xi.suggest([cur], hist + busy_project("-workspace-stockroom"), write=False)
         self.assertEqual(h["rule"], "repeat")
         self.assertEqual(h["action"], 'Make "Add CLI subcommand with tests, README and CHANGELOG" a skill')
-        self.assertEqual(h["est_saving_cw"], 60_000)
+        self.assertEqual(h["discovery_cw"], 60_000)   # the searches, not the whole run
+        self.assertLess(h["est_saving_cw"], 60_000)
         self.assertNotIn("tdd", h["seq"])
 
     def test_unrelated_prompts_on_the_same_files_do_not_match(self):
@@ -169,7 +198,7 @@ class Prompts(unittest.TestCase):
             skills = xi.load_skills([tmp])
             cur = prompted("now", SUBCMD % ("top", TASKS["top"]), tdd=True)
             hist = [prompted("p%d" % k, SUBCMD % (n, TASKS[n])) for k, n in enumerate(("count", "export-csv", "search"))]
-            h = xi.suggest([cur], hist, skills, write=False)
+            h = xi.suggest([cur], hist + busy_project("-workspace-stockroom"), skills, write=False)
             self.assertEqual((h["rule"], h["skill"]), ("repeat", None))
             hist_tdd = [dict(r, skills=["tdd"]) for r in hist]
             h = xi.suggest([dict(cur, skills=[])], hist_tdd, skills, used_skills=("tdd",), write=False)
@@ -189,8 +218,8 @@ class Similarity(unittest.TestCase):
         self.assertFalse(xi.is_match(a, other)[0])
 
     def test_one_shared_file_is_no_anchor(self):
-        a = workflow("s1")
-        b = workflow("s2", files=("cli.py", "setup.cfg"))
+        a = workflow("s1", found=())
+        b = workflow("s2", files=("cli.py", "setup.cfg"), found=())
         self.assertFalse(xi.is_match(a, b)[0])
 
     def test_idf_weighs_rare_files(self):
@@ -214,7 +243,7 @@ class Gates(unittest.TestCase):
         shutil.rmtree(self.tmp)
 
     def sug(self, cur, hist, **kw):
-        return xi.suggest([cur], hist, cache=self.tmp, **kw)
+        return xi.suggest([cur], hist + busy_project(), cache=self.tmp, **kw)
 
     def test_two_prior_no_hint_three_prior_hint(self):
         cur = workflow("now")
@@ -224,10 +253,14 @@ class Gates(unittest.TestCase):
         self.assertEqual(h["kind"], "cross_session")
         self.assertEqual(h["rule"], "repeat")
         self.assertEqual(h["action"], 'Make "change cli.py + README.md and test" a skill')
-        self.assertTrue(h["evidence"].startswith("≈60k/run saving · done 3× in 2 sessions · ≈100k CW each · "))
-        self.assertIn("read cli.py, README.md → edit cli.py, README.md → run unittest", h["evidence"])
-        self.assertEqual(h["est_saving_cw"], 60_000)   # the investigate steps on the shared files, not the whole run
-        self.assertTrue(h["estimate"].startswith("estimate: median CW"))
+        want = net(30_000, len(xi.skill_body(xi.stub_text(xi.find_repeat(cur, [workflow("p1"), workflow("p2"),
+                                                                                workflow("p2")]), h["action"][6:-9]))))
+        self.assertEqual(h["est_saving_cw"], round(want))   # discovery (search + models.py), not the whole run
+        self.assertEqual(h["discovery_cw"], 30_000)
+        self.assertTrue(h["evidence"].startswith("≈30k discovery/run − ≈%d skill body → ≈%dk/run net · done 3× in 2 "
+                                                 "sessions · ≈100k CW each · " % (h["cost_cw"], round(want / 1000))))
+        self.assertIn("read cli.py, models.py, README.md → edit cli.py, README.md → run unittest", h["evidence"])
+        self.assertTrue(h["estimate"].startswith("estimate: discovery = median CW"))
         self.assertEqual(len(h["matches"]), 3)
 
     def test_one_session_is_not_enough(self):
@@ -244,15 +277,22 @@ class Gates(unittest.TestCase):
         self.assertIsNone(self.sug(workflow("now"), [small("p1"), small("p2"), small("p3")]))
         self.assertIsNone(self.sug(small("now"), [workflow("p1"), workflow("p2"), workflow("p3")]))
 
-    def test_no_rediscovery_no_hint(self):
-        """Runs that do not spend on locating the shared files: nothing a skill would save."""
+    def test_no_discovery_says_skill_for_consistency(self):
+        """Runs that do not spend on finding their way: nothing a skill would save, but the same steps every
+        time: a skill for consistency, said so."""
         def quick(sid):
             steps = [step(0, "change", "editing files · cli.py, README.md", ("cli.py", "README.md"), cw=60_000,
                           tools={"Edit": 3}, prompt=True),
                      step(1, "verify", "running tests", (), ("unittest",), tools={"Bash unittest": 1},
                           runners=("Bash unittest",))]
             return xi.requests_of(steps, [], sid, "p")[0]
-        self.assertIsNone(self.sug(quick("now"), [quick("p1"), quick("p2"), quick("p3")]))
+        h = self.sug(quick("now"), [quick("p1"), quick("p2"), quick("p3")])
+        self.assertEqual(h["rule"], "consistency")
+        self.assertEqual(h["action"], 'Make "change cli.py + README.md and test" a skill for consistency')
+        self.assertTrue(h["evidence"].startswith("same 3 steps in 3 runs; no token saving expected (≈0 discovery/run "
+                                                 "− ≈%d skill body)" % h["cost_cw"]))
+        self.assertEqual(h["cw_at_stake"], 0)
+        self.assertTrue(os.path.isfile(resolve(h["stub_path"], self.tmp)))
 
     def test_stub_written_under_the_cache_dir_only(self):
         h = self.sug(workflow("now"), [workflow("p1"), workflow("p2"), workflow("p3")])
@@ -263,7 +303,7 @@ class Gates(unittest.TestCase):
             text = f.read()
         self.assertTrue(text.startswith("---\nname: change-cli-py-readme-md-and-test\ndescription: "))
         self.assertIn("- cli.py (in 3 of 3 runs)", text)
-        self.assertIn("## Steps\n\n1. read cli.py, README.md\n2. edit cli.py\n3. update README.md\n4. run unittest\n",
+        self.assertIn("## Steps\n\n1. read cli.py, models.py, README.md\n2. edit cli.py\n3. update README.md\n4. run unittest\n",
                       text)
         self.assertIn("unittest", text)
         self.assertNotIn(os.path.expanduser("~") + os.sep, text.replace(self.tmp, ""))
@@ -316,20 +356,25 @@ class Gates(unittest.TestCase):
 
     def test_evidence_leads_with_the_numbers(self):
         h = self.sug(workflow("now"), [workflow("p1"), workflow("p2"), workflow("p3")])
-        self.assertRegex(h["evidence"], r"^≈\d+k/run saving · done \d+× in \d+ sessions · ≈\d+k CW each · ")
+        self.assertRegex(h["evidence"], r"^≈\d+k discovery/run − ≈\d+k? skill body → ≈\d+k/run net · done \d+× in "
+                                        r"\d+ sessions · ≈\d+k CW each · ")
 
     def test_no_stub_when_asked_not_to_write(self):
-        h = xi.suggest([workflow("now")], [workflow("p1"), workflow("p2"), workflow("p3")], write=False,
-                       cache=self.tmp)
+        h = xi.suggest([workflow("now")], [workflow("p1"), workflow("p2"), workflow("p3")] + busy_project(),
+                       write=False, cache=self.tmp)
         self.assertIsNone(h["stub_path"])
         self.assertFalse(os.path.exists(os.path.join(self.tmp, "skill-drafts")))
 
     def test_skill_used_every_time_gets_a_file_map_hint(self):
-        hist = [workflow(s, skills=("cli-change",)) for s in ("p1", "p2", "p3")]
-        h = self.sug(workflow("now", skills=("cli-change",)), hist)
+        found = ("models.py", "store.py", "util.py")
+        hist = [workflow(s, skills=("cli-change",), found=found) for s in ("p1", "p2", "p3")]
+        h = self.sug(workflow("now", skills=("cli-change",), found=found), hist)
         self.assertEqual(h["rule"], "skill_filemap")
         self.assertEqual(h["skill"], "cli-change")
-        self.assertEqual(h["action"], "Add a file map to skill /cli-change (cli.py, README.md)")
+        # found, not edited
+        self.assertEqual(h["action"], "Add a file map to skill /cli-change (models.py, store.py, util.py)")
+        self.assertTrue(h["evidence"].startswith("≈30k discovery/run − ≈%d file map in the skill → ≈%dk/run net · "
+                                                 "/cli-change in 3 of 3 runs" % (h["cost_cw"], round(h["net_cw"] / 1e3))))
         self.assertIsNone(h["stub_path"])
 
 
@@ -340,7 +385,8 @@ class Skills(unittest.TestCase):
                            ("release-notes", "Write release notes from the git log")):
             os.makedirs(os.path.join(self.tmp, "skills", name))
             with open(os.path.join(self.tmp, "skills", name, "SKILL.md"), "w", encoding="utf-8") as f:
-                f.write("---\nname: %s\ndescription: %s\n---\n\n# %s\n\nSteps.\n" % (name, desc, name))
+                f.write("---\nname: %s\ndescription: %s\n---\n\n# %s\n\nSteps. Read `src/models.py` first.\n"
+                        % (name, desc, name))
         self.skills = xi.load_skills([os.path.join(self.tmp, "skills")])
 
     def tearDown(self):
@@ -372,7 +418,11 @@ class Skills(unittest.TestCase):
         h = xi.suggest([run("now")], [run("p1"), run("p2"), run("p3")], self.skills, write=False, cache=self.tmp)
         self.assertEqual(h["rule"], "existing_skill")
         self.assertEqual(h["action"], "Use skill /cli-docs for this")
-        self.assertTrue(h["evidence"].startswith("≈60k/run saving · done 3× without it in 3 sessions · ≈100k CW each · "))
+        body = self.skills[0]["body_tokens"]
+        self.assertGreater(body, 0)
+        self.assertEqual(h["cost_cw"], round(xi.context_cost(body, 4)))   # its body, every later turn of the run
+        self.assertTrue(h["evidence"].startswith("≈30k discovery/run − ≈%d skill body → ≈30k/run net · done 3× "
+                                                 "without it in 3 sessions · ≈100k CW each · " % h["cost_cw"]))
         self.assertIn('you have skill cli-docs ("Change a CLI subcommand', h["evidence"])
         self.assertEqual(h["skill"], "cli-docs")
 
@@ -386,7 +436,9 @@ def write_session(root, sid, sess):
 
 
 def cli_work(prompt="update the cli"):
-    return (Sess().prompt(prompt).turn(read("cli.py"), cw=30_000).turn(read("README.md"), cw=25_000)
+    return (Sess().prompt(prompt).turn(grep("def main"), cw=20_000, out="src/cli.py:9:def main\nsrc/models.py:3:x")
+            .turn(read("cli.py"), cw=30_000).turn(read("models.py"), cw=15_000).turn(read("store.py"), cw=6_000)
+            .turn(read("util.py"), cw=4_000).turn(read("README.md"), cw=25_000)
             .turn(edit("cli.py"), edit("README.md"), cw=10_000).turn(bash("python3 -m pytest -q"), out=PASS)
             .answer())
 
@@ -406,8 +458,15 @@ class IndexAndLive(unittest.TestCase):
         st = x.build(jobs=1)
         self.assertEqual((st["sessions"], st["replayed"]), (3, 3))
         rec = x.sessions["00000000-0000-0000-0000-000000000000"]["records"][0]
-        self.assertEqual(rec["files"], ["cli.py", "README.md"])
+        self.assertEqual(rec["files"], ["cli.py", "models.py", "store.py", "util.py", "README.md"])
         self.assertEqual(rec["cats"], ["investigate", "change", "verify"])
+        # discovery: the Grep (20k) and the full reads of models.py, store.py, util.py (25k); cli.py and README.md
+        # are edited later
+        self.assertEqual((rec["disc"], rec["disc_by"]), (45_000, {"search": 20_000, "read": 25_000}))
+        self.assertEqual(rec["disc_files"], ["src/models.py", "src/store.py", "src/util.py"])   # relative to the project
+        # the Grep's output named cli.py and models.py (what removable() checks)
+        self.assertEqual(rec["disc_items"][0], ["search", 20_000, 0, ["cli.py", "models.py"]])
+        self.assertEqual(rec["turns"], 8)
         self.assertEqual(xi.XIndex(self.root, cache=self.tmp).build(jobs=1)["replayed"], 0)
         write_session(self.root, "00000009-0000-0000-0000-000000000000", cli_work())
         self.assertEqual(xi.XIndex(self.root, cache=self.tmp).build(jobs=1)["replayed"], 1)
@@ -436,10 +495,13 @@ class IndexAndLive(unittest.TestCase):
         h = cross[0]
         for k in ("action", "evidence", "est_saving_cw", "skill", "stub_path", "matches"):
             self.assertIn(k, h)
-        self.assertEqual(h["action"], 'Make "Update CLI with tests and README" a skill')   # from the prompts
-        self.assertEqual(h["est_saving_cw"], 55_000)
-        self.assertTrue(os.path.isfile(resolve(h["stub_path"], self.tmp)))
-        self.assertTrue(resolve(h["stub_path"], self.tmp).startswith(os.path.join(self.tmp, "skill-drafts")))
+        # three short sessions are all the project has: a file map in CLAUDE.md costs least
+        self.assertEqual(h["action"], "Add a file map to CLAUDE.md")
+        self.assertEqual(h["discovery_cw"], 45_000)   # the grep that named models.py + the three reads
+        self.assertEqual(h["est_saving_cw"], 45_000 - h["cost_cw"])
+        self.assertEqual(h["stub_path"], "<cache>/claude-md-drafts/update-cli-with-tests-and-readme.md")
+        with open(resolve(h["stub_path"], self.tmp), encoding="utf-8") as f:
+            self.assertIn("- `src/models.py`: source", f.read())
         self.assertFalse(os.path.isabs(h["stub_path"]))
 
     def _model_state(self, sug):
@@ -511,6 +573,319 @@ class IndexAndLive(unittest.TestCase):
         low = dict(h, cw_at_stake=1)
         self.assertEqual(rc.with_cross(sess, low)[-1], low)   # always kept: replaces the weakest session hint
         self.assertEqual(sum(x["kind"] == "cross_session" for x in rc.with_cross(sess + [h], low)), 1)
+
+
+def indexed(sess):
+    """The request record of a synthetic session, indexed as XIndex does (discovery facts attached)."""
+    state, s, _ = sess.state()
+    steps, gs = state.steps(s, final=True)
+    xi.attach_discovery(steps, *xi.call_facts(state, s))
+    return xi.requests_of(steps, gs, s.id, "-repo", list(zip(s.prompt_at, s.prompt_words)))[0]
+
+
+class Discovery(unittest.TestCase):
+    def test_reads_of_files_edited_later_are_not_discovery(self):
+        r = indexed(Sess().prompt("fix the totals").turn(read("store.py"), cw=30_000).turn(read("models.py"), cw=12_000)
+                    .turn(edit("store.py"), cw=5_000).turn(read("store.py"), cw=7_000).answer())
+        # store.py is edited: its reads are needed anyway (before the edit) or check it (after); models.py is only
+        # read: discovery
+        self.assertEqual(r["disc_by"], {"read": 12_000})
+        self.assertEqual(r["disc_files"], ["src/models.py"])
+
+    def test_glob_grep_listing_and_toolsearch_count(self):
+        r = indexed(Sess().prompt("fix the totals")
+                    .turn(("Glob", {"pattern": "**/*.py"}), grep("total"), cw=10_000)
+                    .turn(bash("find . -name '*.py' | head"), cw=4_000).turn(bash("ls -la src"), cw=2_000)
+                    .turn(bash("git status"), cw=9_000)
+                    .turn(("ToolSearch", {"query": "select:mcp__x__y"}), cw=3_000)
+                    .turn(read("store.py", offset=10, limit=20), cw=8_000)   # a partial read is not a full read
+                    .turn(edit("store.py"), cw=5_000).answer())
+        self.assertEqual(r["disc_by"], {"search": 16_000, "tools": 3_000})
+        self.assertEqual(r["disc"], 19_000)
+
+    def test_a_turn_cw_is_split_per_call_as_steps_split_it(self):
+        r = indexed(Sess().prompt("fix the totals").turn(grep("total"), bash("python3 -m pytest -q"), cw=10_000,
+                                                          out=PASS).answer())
+        self.assertEqual(r["disc_by"], {"search": 5_000})
+
+    def test_no_turn_facts_no_discovery(self):
+        self.assertEqual(xi.requests_of([{"i": 0, "cat": "change", "label": "x", "files": ["a.py"], "cw": 60_000,
+                                          "prompt_before": True}], [], "s", "p")[0]["disc"], 0)
+
+
+class ExploreSubagent(LiveFixture):
+    def test_exploration_subagent_is_discovery(self):
+        s = self.build()
+        disc, _ = xi.call_facts(self.state, s)
+        sub = [d for d in disc if d["kind"] == "subagent"]
+        self.assertEqual(len(sub), 1)
+        agent = next(iter(s.agents.values()))
+        self.assertGreater(agent["cw"], 0)
+        self.assertGreater(sub[0]["cw"], agent["cw"])   # its CW plus the launching call's share
+        self.assertEqual(len([d for d in disc if d["kind"] == "read"]), 3)   # cart.py, never edited
+
+
+def runs_with(disc, turns, n=3, project="proj", found=("models.py",)):
+    """`n` prior runs + the current one with discovery `disc` (a search naming the `found` files, then their reads)
+    and `turns` main-thread turns each."""
+    out = []
+    for sid in ["p%d" % k for k in range(n)] + ["now"]:
+        r = workflow(sid, project=project, found=found)
+        r.update(disc=disc, turns=turns, disc_items=[["search", disc / 2, 0, list(found)]]
+                 + [["read", disc / 2 / len(found), 0, f] for f in found])
+        out.append(r)
+    return out[-1], out[:-1]
+
+
+class NetModel(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp)
+
+    def body_tokens(self):
+        cur, hist = runs_with(50_000, 10)
+        rep = xi.find_repeat(cur, hist)
+        return xi.est_tokens(xi.skill_body(xi.stub_text(rep, xi._name(hist + [cur], rep["files"]))))
+
+    def opts(self, disc, turns, busy=True, found=("models.py",)):
+        cur, hist = runs_with(disc, turns, found=found)
+        hist = hist + (busy_project() if busy else [])
+        rep = xi.find_repeat(cur, hist)
+        return {o["rule"]: o for o in xi.remedies(rep, hist)}
+
+    def test_skill_cost_scales_with_the_remaining_turns(self):
+        tok = self.body_tokens()
+        c10, c100 = self.opts(50_000, 10)["repeat"]["cost"], self.opts(50_000, 100)["repeat"]["cost"]
+        self.assertAlmostEqual(c10, tok * (1.25 + 0.1 * 9))
+        self.assertAlmostEqual(c100, tok * (1.25 + 0.1 * 99))
+        self.assertGreater(c100, 5 * c10)
+
+    def test_net_below_20k_gives_no_token_hint(self):
+        tok = self.body_tokens()
+        disc = 15_000 + xi.context_cost(tok, 10)   # net 15k, 100% of... no: > 30% of discovery, but < 20k
+        cur, hist = runs_with(disc, 10)
+        self.assertIsNone(xi.suggest([cur], hist + busy_project(), write=False))
+        cur, hist = runs_with(disc + 6_000, 10)   # net 21k
+        self.assertEqual(xi.suggest([cur], hist + busy_project(), write=False)["rule"], "repeat")
+
+    def test_net_under_30_percent_of_discovery_gives_nothing(self):
+        tok = self.body_tokens()
+        turns = int(60_000 / (0.1 * tok))
+        cost = xi.context_cost(tok, turns)
+        self.assertGreater(cost, 50_000)
+        cur, hist = runs_with(cost + 25_000, turns)   # net 25k >= 20k but < 30% of the discovery
+        for r in hist + [cur]:
+            r["disc_files"] = []   # searches only: no file map to offer instead
+        o = self.opts(cost + 25_000, turns)["repeat"]
+        self.assertFalse(o["ok"])
+        self.assertIsNone(xi.suggest([cur], hist + busy_project(), write=False))   # nor a consistency hint: net > 0
+
+    def test_file_map_preferred_when_it_nets_more(self):
+        found = ("models.py", "store.py", "util.py")
+        o = self.opts(50_000, 10, busy=False, found=found)   # the project is these runs only: a map costs next to nothing
+        self.assertTrue(o["claude_md"]["stable"])
+        self.assertGreater(o["claude_md"]["net"], o["repeat"]["net"])
+        cur, hist = runs_with(50_000, 10, found=found)
+        h = xi.suggest([cur], hist, cache=self.tmp)
+        self.assertEqual((h["rule"], h["action"]), ("claude_md", "Add a file map to CLAUDE.md"))
+        self.assertTrue(h["evidence"].startswith("≈50k discovery/run − ≈%s file map in CLAUDE.md → ≈%dk/run net"
+                                                 % (xi._fk(h["cost_cw"]), round(h["net_cw"] / 1e3))))
+        path = resolve(h["stub_path"], self.tmp)
+        self.assertTrue(path.startswith(os.path.join(self.tmp, "claude-md-drafts") + os.sep))
+        with open(path, encoding="utf-8") as f:
+            self.assertIn("- `models.py`: source; read to get oriented in 3 of 3 past runs", f.read())
+        # a busy project pays for the map on every turn of every session: the skill nets more
+        o = self.opts(50_000, 10, found=found)
+        self.assertGreater(o["repeat"]["net"], o["claude_md"]["net"])
+        self.assertEqual(xi.suggest([cur], hist + busy_project(n=40), write=False)["rule"], "repeat")
+
+    def test_file_map_needs_stable_files(self):
+        cur, hist = runs_with(50_000, 10, n=4, found=("a.py", "b.py", "c.py", "d.py", "e.py", "f.py"))
+        for k, r in enumerate(hist):   # two runs find a.py, b.py, c.py, the other two d.py, e.py, f.py
+            r["disc_files"] = ["a.py", "b.py", "c.py"] if k < 2 else ["d.py", "e.py", "f.py"]
+        self.assertEqual(xi.discovered_files(hist), (["a.py", "b.py", "c.py", "d.py", "e.py", "f.py"], False))
+        opts = {o["rule"]: o for o in xi.remedies(xi.find_repeat(cur, hist), hist)}
+        self.assertFalse(opts["claude_md"]["ok"])
+        self.assertGreater(opts["claude_md"]["net"], opts["repeat"]["net"])   # cheaper, but not the same files
+        self.assertEqual(xi.suggest([cur], hist, write=False)["rule"], "repeat")
+        for r in hist[:3]:
+            r["disc_files"] = ["a.py", "b.py", "c.py"]
+        self.assertEqual(xi.discovered_files(hist), (["a.py", "b.py", "c.py"], True))
+
+    def test_consistency_only_when_no_net_saving(self):
+        tok = self.body_tokens()
+        cur, hist = runs_with(0.5 * xi.context_cost(tok, 10), 10)   # net < 0
+        h = xi.suggest([cur], hist + busy_project(), write=False)
+        self.assertEqual(h["rule"], "consistency")
+        self.assertTrue(h["action"].endswith('" a skill for consistency'))
+        self.assertTrue(h["evidence"].startswith("same 4 steps in 3 runs; no token saving expected (≈"))
+        self.assertIn(" discovery/run − ≈", h["evidence"])
+        self.assertEqual(h["est_saving_cw"], 0)
+        # two runs repeating the steps are not enough
+        cur, hist = runs_with(0.5 * xi.context_cost(tok, 10), 10)
+        hist[0]["steps"] = hist[0]["steps"][2:]
+        self.assertIsNone(xi.consistency(xi.find_repeat(cur, hist), [{"rule": "repeat", "net": -1}]))
+
+    def test_evidence_shows_both_terms(self):
+        cur, hist = runs_with(41_000, 10)
+        h = xi.suggest([cur], hist + busy_project(), write=False)
+        self.assertRegex(h["evidence"], r"^≈41k discovery/run − ≈\d+ skill body → ≈\d+k/run net · done 3× in 3 sessions")
+
+    def test_consistency_hint_does_not_displace_a_session_hint(self):
+        sess = [{"kind": "session", "cw_at_stake": c} for c in (90, 80, 70)]
+        h = {"kind": "cross_session", "rule": "consistency", "cw_at_stake": 0}
+        self.assertNotIn(h, rc.with_cross(sess, h))
+        self.assertIn(h, rc.with_cross(sess[:2], h))
+
+
+def disc_run(sid, items, files=("cli.py", "models.py", "store.py", "util.py", "README.md"), skills=(), turns=4):
+    """A request (two shared steps, ~100k CW) whose discovery calls are `items`: [kind, cw, step, read basename |
+    search names]."""
+    r = workflow(sid, skills=skills, found=tuple(f for f in files if f not in ("cli.py", "README.md")))
+    r.update(disc_items=[list(x) for x in items], disc=sum(x[1] for x in items), turns=turns,
+             disc_files=[x[3] for x in items if x[0] == "read"])
+    return r
+
+
+class RemovableDiscovery(unittest.TestCase):
+    """Only discovery the remedy's content would have short-circuited counts as its saving."""
+    MAP = ["src/models.py", "store.py", "util.py"]
+
+    def test_reads_of_listed_files_and_the_searches_that_led_to_them(self):
+        r = disc_run("a", [["search", 8_000, 0, ["models.py", "other.py"]],   # its output names a listed file
+                           ["search", 5_000, 0, ["other.py"]],                # precedes models.py's read, same step
+                           ["read", 10_000, 0, "models.py"],
+                           ["search", 7_000, 0, ["nothing.py"]],              # after it, never led to a listed file
+                           ["search", 6_000, 1, []],                          # another step, no listed read there
+                           ["read", 9_000, 1, "other.py"],                    # not listed
+                           ["tools", 3_000, 1, []], ["subagent", 20_000, 2, []],
+                           ["read", 4_000, 2, "util.py"]])
+        self.assertEqual(xi.removable(r, self.MAP), 8_000 + 5_000 + 10_000 + 4_000)
+        self.assertEqual(xi.removable(r, []), 0)
+        self.assertEqual(r["disc"], 72_000)   # the record still knows all of its discovery
+
+    def test_a_search_in_a_step_without_a_listed_read_stays_out(self):
+        r = disc_run("a", [["search", 30_000, 0, ["a.py"]], ["read", 2_000, 1, "store.py"]])
+        self.assertEqual(xi.removable(r, self.MAP), 2_000)
+
+    def test_one_file_map_does_not_claim_the_whole_discovery(self):
+        """The pr-review case: runs spend ~40k searching the diff, and read report.md: a map of report.md would
+        spare that read only, and one file is no map."""
+        items = [["search", 20_000, 0, ["a.ts", "b.ts"]], ["read", 18_000, 0, "a.ts"], ["read", 2_000, 1, "report.md"]]
+        runs = [disc_run(sid, items, skills=("pr-review",)) for sid in ("p1", "p2", "p3")]
+        for r in runs:
+            r["disc_files"] = ["report.md"]
+        cur = disc_run("now", items, skills=("pr-review",))
+        opts = xi.remedies(xi.find_repeat(cur, runs), runs)
+        o = next(o for o in opts if o["rule"] == "skill_filemap")
+        self.assertEqual(o["files"], ["report.md"])
+        self.assertEqual(o["disc"], 2_000)
+        self.assertFalse(o["ok"])
+        self.assertIsNone(xi.suggest([cur], runs, write=False))
+
+    def test_hint_shows_the_removable_part_as_discovery(self):
+        items = [["search", 20_000, 0, ["models.py"]], ["read", 10_000, 0, "models.py"],
+                 ["read", 6_000, 0, "store.py"], ["read", 4_000, 0, "util.py"],
+                 ["search", 25_000, 1, ["unrelated.txt"]], ["tools", 5_000, 1, []]]
+        runs = [disc_run(sid, items) for sid in ("p1", "p2", "p3")]
+        h = xi.suggest([disc_run("now", items)], runs + busy_project(), write=False)
+        self.assertEqual(h["rule"], "repeat")
+        self.assertEqual(h["discovery_cw"], 40_000)   # not the 70k the runs spent finding their way
+        self.assertTrue(h["evidence"].startswith("≈40k discovery/run − "))
+        self.assertIn("full reads of the 5 files it lists", h["estimate"])
+
+
+class SubstantiveRemedy(unittest.TestCase):
+    ITEMS = [["search", 30_000, 0, ["models.py", "store.py", "util.py"]], ["read", 10_000, 0, "models.py"],
+             ["read", 10_000, 0, "store.py"], ["read", 10_000, 0, "util.py"]]
+
+    def opts(self, items, files=("cli.py", "models.py", "store.py", "util.py", "README.md"), skills=()):
+        runs = [disc_run(sid, items, files, skills) for sid in ("p1", "p2", "p3")]
+        cur = disc_run("now", items, files, skills)
+        return {o["rule"]: o for o in xi.remedies(xi.find_repeat(cur, runs), runs)}
+
+    def test_file_map_needs_three_stable_files(self):
+        o = self.opts(self.ITEMS)
+        self.assertTrue(o["claude_md"]["ok"])
+        self.assertEqual(len(o["claude_md"]["files"]), 3)
+        o = self.opts(self.ITEMS[:3])   # models.py and store.py only
+        self.assertEqual(o["claude_md"]["files"], ["models.py", "store.py"])
+        self.assertGreater(o["claude_md"]["net"], xi.MIN_NET)
+        self.assertFalse(o["claude_md"]["ok"])
+        o = self.opts(self.ITEMS[:3], skills=("cli-change",))
+        self.assertFalse(o["skill_filemap"]["ok"])
+        self.assertTrue(self.opts(self.ITEMS, skills=("cli-change",))["skill_filemap"]["ok"])
+
+    def test_drafted_skill_needs_three_files(self):
+        self.assertTrue(self.opts(self.ITEMS)["repeat"]["ok"])
+        items = [["search", 40_000, 0, ["cli.py"]], ["read", 30_000, 0, "cli.py"]]
+        o = self.opts(items, files=("cli.py", "README.md"))
+        self.assertEqual(o["repeat"]["files"], ["cli.py", "README.md"])
+        self.assertGreater(o["repeat"]["net"], xi.MIN_NET)
+        self.assertFalse(o["repeat"]["ok"])
+
+
+class BoilerplateWords(unittest.TestCase):
+    """Text an app injects into every prompt must not make unrelated requests match."""
+    BOILER = "You are working inside a Conductor workspace on a Mac, in parallel with other agents. "
+
+    def req(self, sid, task, project="p"):
+        steps = [step(0, "investigate", "reading code · a.py", ("a.py", "%s.py" % sid), prompt=True, cw=60_000),
+                 step(1, "change", "editing files · a.py", ("a.py",), tools={"Edit": 1})]
+        return xi.requests_of(steps, [], sid, project, [(0, xi.prompt_words(self.BOILER + task))])[0]
+
+    def test_word_idf(self):
+        hist = [self.req("h%d" % k, "Task %s about topic%s" % (w, w)) for k, w in enumerate(
+            "alpha bravo charlie delta echo foxtrot golf hotel india juliet kilo lima mike november oscar papa "
+            "quebec romeo sierra tango uniform victor whiskey xray yankee zulu amber birch cedar daisy".split())]
+        w = xi.word_idf(hist)
+        self.assertEqual(w["conductor"], 0.0)   # in every prompt
+        self.assertNotIn("alpha", w)            # 1 of 30: full weight (unlisted = 1)
+        self.assertEqual(xi.word_idf(hist[:10]), {})   # too few requests to tell
+
+    def test_boilerplate_does_not_anchor_a_match(self):
+        words = ("alpha bravo charlie delta echo foxtrot golf hotel india juliet kilo lima mike november oscar papa "
+                 "quebec romeo sierra tango uniform victor whiskey xray yankee zulu amber birch cedar daisy").split()
+        hist = [self.req("h%d" % k, "Rename the %s option" % w) for k, w in enumerate(words)]
+        a = self.req("a", "Translate the onboarding emails into German")
+        b = self.req("b", "Profile the slow export endpoint")
+        self.assertTrue(xi.is_match(a, b)[0])   # unweighted: the shared boilerplate words carry it
+        self.assertFalse(xi.is_match(a, b, widf=xi.word_idf(hist))[0])
+        c = self.req("c", "Translate the onboarding emails into French")
+        self.assertTrue(xi.is_match(a, c, widf=xi.word_idf(hist))[0])   # the task words still match
+
+
+class SkillFrontmatter(unittest.TestCase):
+    def test_folded_and_literal_descriptions(self):
+        meta, body = xi._frontmatter("---\nname: loop-pickup\ndescription: >-\n  Resume a multi-phase effort\n"
+                                     "  in a fresh chat.\n\n  Use at the start.\nargument-hint: \"<x>\"\n---\n# Body\n")
+        self.assertEqual(meta["description"], "Resume a multi-phase effort in a fresh chat. Use at the start.")
+        self.assertEqual(meta["argument-hint"], "<x>")
+        self.assertEqual(body, "# Body\n")
+        meta, _ = xi._frontmatter("---\ndescription: |\n  Line one\n  line two\nname: x\n---\n")
+        self.assertEqual((meta["description"], meta["name"]), ("Line one\nline two", "x"))
+        self.assertEqual(xi._frontmatter("---\ndescription: 'plain'\n---\n")[0]["description"], "plain")
+
+    def test_loaded_skill_has_the_folded_description_and_the_files_it_names(self):
+        tmp = tempfile.mkdtemp()
+        try:
+            os.makedirs(os.path.join(tmp, "loop-pickup"))
+            with open(os.path.join(tmp, "loop-pickup", "SKILL.md"), "w", encoding="utf-8") as f:
+                f.write("---\nname: loop-pickup\ndescription: >-\n  Resume the plan from `.loop/plan.md`,\n"
+                        "  then claim a lane.\n---\n\nRead `.loop/plan.md` and handoff.md (see https://x.io/a.html),"
+                        " e.g. the lane.\n")
+            sk = xi.load_skills([tmp])[0]
+            self.assertEqual(sk["description"], "Resume the plan from `.loop/plan.md`, then claim a lane.")
+            self.assertIn("resume", sk["tokens"])
+            self.assertEqual(sk["files"], ["plan.md", "handoff.md"])
+        finally:
+            shutil.rmtree(tmp)
+
+    def test_named_files(self):
+        self.assertEqual(xi.named_files("src/a.py:3:def x\n./b.ts\nREADME.md  notes  v1.2  e.g. Makefile c.py."),
+                         ["a.py", "b.ts", "README.md", "c.py"])
 
 
 if __name__ == "__main__":

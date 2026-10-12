@@ -185,7 +185,9 @@ dropped; a rule label contributes no words, its targets are compared as files / 
 the category sequence (repeats folded), the tool multiset (display names: Read, Edit, "Bash unittest", "Bash git
 status"), file types, file basenames (only names that look like files: an extension, a dotfile or a known bare name
 such as Makefile; directories, devices such as /dev/null and `*.output` task captures dropped), skills used,
-CW, $, wall time and CW per category, plus its steps (category, label, files, commands, test runner, CW). Records
+CW, $, wall time and CW per category, its main-thread turns, its discovery (below: `disc`, per kind `disc_by`, the
+files its reads found `disc_files`, relative to the project), plus its steps (category, label, files, commands, test
+runner, CW). Records
 are cached per transcript in `<cache dir>/xindex/<hash of root>.json` keyed by path + size + mtime of the transcript
 (+ count and size of its subagent transcripts); a rebuild replays only new or changed transcripts (a few hundred
 sessions load from the cache in well under a second), and label words are recomputed on load. A request's words
@@ -198,26 +200,61 @@ current one): similarity = 0.4 × label-word Jaccard + 0.3 × category-sequence 
 tool / file overlap (0.4 tool-multiset weighted Jaccard + 0.1 file-type Jaccard + 0.5 file overlap); when neither
 side has label words the score is the other two parts renormalised. Two requests with prompt words on both sides
 use the prompt words' Dice coefficient and 0.5 / 0.15 / 0.35 weights (the prompt says what the task is, the step
-shape only how it was done: a /tdd run cycles test / edit where a plain run edits once), anchor Dice >= 0.5. File overlap is idf-weighted (a file most
+shape only how it was done: a /tdd run cycles test / edit where a plain run edits once), anchor Dice >= 0.5; each
+prompt word weighs by its idf over the indexed requests with prompts (0 in >= 20% of them: boilerplate an app injects
+into every prompt; 1 at <= 4%; log-linear between; all 1 below 30 such requests). File overlap is idf-weighted (a file most
 requests touch, README.md, weighs little) and divided by the smaller set. A match needs score >= 0.55 and an anchor:
 label-word Jaccard >= 0.34, or >= 2 shared files with overlap >= 0.5. A hint needs >= 3 prior matches in >= 2
-distinct sessions, each >= 50k CW, the current request / group >= 50k CW, and an estimated saving >= 15k CW.
+distinct sessions, each >= 50k CW, and the current request / group >= 50k CW.
 
-Saving (an estimate, labelled so): the workflow's file map = files touched by >= half of the runs (>= 2); per prior
-run, the CW of its investigate steps on those files (re-discovering what a skill with the file map and the steps
-would give up front); the median over the runs. Never the whole run's cost.
+Saving (an estimate, labelled so): net per run = median(removable discovery) − median(context cost of the remedy)
+over the matched prior runs. Never the whole run's cost, and never discovery the remedy cannot spare.
+- Discovery of a run (indexed per request and group): the CW of its Glob / Grep / LS calls and Bash listings (ls,
+  find, tree, fd, grep, rg ...), its ToolSearch calls, its exploration subagents (Explore type, or one whose calls
+  only locate / read; their own CW plus the launching call's share) and its full reads (Read without offset / limit,
+  `cat <file>`) of files the run does not edit (a file the agent edits must be read anyway; a re-read after the edit
+  checks it). A call's CW is its turn's CW split evenly over the turn's calls (declare_intent not counted), as steps
+  attribute it (section 1). Background task captures (`*.output`) are polling, not discovery. Each call is kept in
+  order (`disc_items`: kind, CW, step, the read's file or the file names a search's output showed).
+- Removable discovery of a run for a remedy (shown as "discovery/run"): only what the remedy's content would have
+  short-circuited: full reads of the files it lists (a file map's files; a drafted skill's "## Files"; the files an
+  existing skill's SKILL.md names) and the searches / listings that led to them (their output names one of them, or
+  they come before the first read of one in the same step). Searches that never led to a listed file, ToolSearch and
+  subagents stay out: a 1-file map of report.md spares that read, not the run's 40k of greps.
+- Context cost of putting T tokens (characters / 4) in context for a run of n main-thread turns: T × (1.25 + 0.1 ×
+  (n − 1)): one cache write, then a cache read on each later turn (the cost-weighted scale, tokenscope/pricing.py). A
+  skill is paid on every turn after it loads (≈ the run's turns), not once.
+- Gates: a token-saving hint needs net >= 20k CW and net >= 30% of the median removable discovery, and a substantive
+  remedy: a file map (CLAUDE.md or in a skill) of >= 3 stably found files; a drafted skill with >= 2 shared steps and
+  >= 3 files.
 
-Outcomes, at most one per recap (the best candidate by saving; ranked with the session hints by `cw_at_stake` and
-always kept, replacing the weakest session hint when 3 are already there):
+Remedies, at most one hint per recap (the candidate with the best passing net; ranked with the session hints by
+`cw_at_stake` = net and always kept, replacing the weakest session hint when 3 are already there; a consistency hint
+has `cw_at_stake` 0 and only takes a free place):
 - `skill_filemap`: a skill this request used ran in >= half of the matching runs too: `➜ Add a file map to skill
-  /<name> (<files>)`, evidence "≈Y/run saving · /<name> in N of M runs, K sessions · ≈X CW each · they re-read the
-  same files ...".
-- `existing_skill`: a SKILL.md (frontmatter name / description + first lines; from ~/.claude/skills,
+  /<name> (<files>)`; cost = the map's tokens (the discovered files) for each run's turns; evidence "≈D
+  discovery/run − ≈C file map in the skill → ≈N/run net · /<name> in K of M runs, S sessions · ≈X CW each · ...".
+  Needs >= 3 stable discovered files.
+- `existing_skill`: a SKILL.md (frontmatter name / description, plain or a YAML block scalar `>-` / `|`, + first
+  lines; from ~/.claude/skills,
   <project>/.claude/skills and each `--skills-dir`) this session did not use shares >= 3 words with the workflow
   (label words, file stems, programs; shell utilities ignored), >= 30% of the smaller word set and a word of its name:
-  `➜ Use skill /<name> for this`, evidence `≈Y/run saving · done N× without it in K sessions · ≈X CW each · you have
-  skill <name> ("<description>") that covers this (estimate)`.
-- `repeat`: otherwise `➜ Make "<name>" a skill` (name = the task verb and first-clause words of the current prompt
+  `➜ Use skill /<name> for this`; cost = its body (the file after the frontmatter) for each run's turns; evidence
+  `≈D discovery/run − ≈C skill body → ≈N/run net · done N× without it in K sessions · ≈X CW each · you have skill
+  <name> ("<description>") that covers this (estimate)`.
+- otherwise two remedies are weighed:
+  - `claude_md`: `➜ Add a file map to CLAUDE.md`: the stable discovered files (found by >= half the runs, at most
+    12; stable when >= half the runs found >= 3/4 of them) with a one-line role each; cost = its tokens in context on
+    every turn of every session of the projects involved (indexed requests' turns × 0.1 + sessions × 1.25), divided
+    by the number of matched runs. The snippet goes to `<cache dir>/claude-md-drafts/<slug>.md` (`stub_path`).
+    Chosen when stable, passing and its net beats the skill's.
+  - `repeat`: the skill below; cost = the drafted SKILL.md body for each run's turns; needs >= 2 steps the runs share
+    and >= 3 files in its "## Files".
+  Evidence `≈41k discovery/run − ≈9k skill body → ≈32k/run net · done 4× in 4 sessions · ...`.
+- `consistency`: no remedy nets a saving (net <= 0) but >= 3 matched runs have the same >= 2 steps in order:
+  `➜ Make "<name>" a skill for consistency`, evidence `same 4 steps in 4 runs; no token saving expected (≈D
+  discovery/run − ≈C skill body) · ...`, with the SKILL.md draft. A net between 0 and the gates gives nothing.
+- `repeat`: `➜ Make "<name>" a skill` (name = the task verb and first-clause words of the current prompt
   that most runs' prompts share, project-name words dropped, plus the tests / README / CHANGELOG most runs edited:
   "Add CLI subcommand with tests, README and CHANGELOG"; else shared label words, else "change <top edited files> and
   test"; the only prompt-derived text the pane shows), evidence `≈Y/run saving · done N× in K sessions · ≈X CW each · <steps> (estimate)`, the
@@ -231,10 +268,14 @@ always kept, replacing the weakest session hint when 3 are already there):
   Evidence always leads with the numbers; the pane wraps it onto up to 3 dim lines and cuts only the tail.
 Hint fields: `rule`, `kind: "cross_session"`, `action` (= `text`), `evidence`, `est_saving_cw` (= `cw_at_stake`),
 `estimate`, `skill` (existing skill or null), `stub_path` (or null), `matches` ([{sid prefix, level, label, cw,
-score}]), `seq`. Live: the server builds the index in a background thread (refreshed every 10 min; `--no-xhints`
+score}]), `seq`, `discovery_cw`, `cost_cw`, `net_cw` (`est_saving_cw` = `cw_at_stake` = net; 0 for `consistency`). The pane
+never cuts the draft's path at the right edge: on the skill's line when it fits whole, else on its own line with the
+middle shortened (`~/.cache/tokenscope/…/<slug>/SKILL.md`, the file name and the slug kept), else wrapped at its
+"/" onto dim lines. Live: the server builds the index in a background thread (refreshed every 10 min; `--no-xhints`
 disables it); text fields go through the session redactor.
 
 `tools/eval_xhints.py --root DIR [--skills-dir DIR ...] [--out FILE]`: chronological leave-future-out replay: for
 each session (in start order) each finished request is an idle point evaluated against the sessions that started
 earlier only. Prints firing rates per outcome (idle points, sessions) and the index build / rebuild timing; writes up
-to 20 random firings with their evidence and the matched prior requests' step labels to --out.
+to --sample (20) random firings with their kind, median discovery, remedy cost, net, evidence and the matched prior
+requests' step labels to --out; `--explain SID` logs every remedy weighed at that session's idle points.

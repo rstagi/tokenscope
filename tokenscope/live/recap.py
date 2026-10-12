@@ -386,11 +386,12 @@ def hints(intents, turns, k0, win, total, agents=(), ctx=None, compact_at=(), na
 
 def with_cross(hints_, h, n=MAX_HINTS):
     """The session hints plus one cross-session hint (kind "cross_session", ranked with the others by its
-    estimated saving `cw_at_stake`); at most `n` hints. The cross-session hint passed strict gates and is
-    always kept: when the list is full it replaces the lowest-ranked session hint."""
+    estimated saving `cw_at_stake`); at most `n` hints. A cross-session hint with a saving passed strict gates
+    and is always kept: when the list is full it replaces the lowest-ranked session hint; one without ("a skill
+    for consistency", cw_at_stake 0) only takes a free place."""
     out = [x for x in hints_ if x.get("kind") != "cross_session"] + [h]
     out.sort(key=lambda x: -x.get("cw_at_stake", 0))
-    if h not in out[:n]:
+    if h not in out[:n] and h.get("cw_at_stake", 0) > 0:
         out = out[:n - 1] + [h]
     return out[:n]
 

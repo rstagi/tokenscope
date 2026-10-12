@@ -266,6 +266,46 @@ export function wrapText(text, width, maxLines) {
   return lines
 }
 
+// A path in `width` chars, never cut at its end: whole when it fits, else its middle shortened, keeping the file and
+// as much around it as fits ("~/.cache/tokenscope/…/<slug>/SKILL.md"); null when not even
+// "<first>/…/<file>" ("<first>/…/<slug>/SKILL.md") fits (the caller wraps it).
+export function fitPath(path, width) {
+  const s = String(path)
+  if (s.length <= width) return s
+  const parts = s.split('/')
+  const n = parts.length
+  // the longest that fits (ties: more of the head); a generic file name ("SKILL.md") keeps its directory (the slug)
+  let best = null
+  for (let k = parts[n - 1] === 'SKILL.md' ? 2 : 1; k <= n - 2; k++) {
+    for (let h = 1; h + k < n; h++) {
+      const t = [...parts.slice(0, h), '…', ...parts.slice(n - k)].join('/')
+      if (t.length <= width && (best == null || t.length > best.length)) best = t
+    }
+  }
+  return best
+}
+
+// A path wrapped onto lines of `width` chars at its "/" (a later line starts with the "/"), a part longer than a
+// line split: every character shown.
+export function wrapPath(path, width) {
+  if (width <= 0) return []
+  const lines = []
+  let cur = ''
+  for (const part of String(path).split(/(?=\/)/)) {
+    if (cur && cur.length + part.length > width) {
+      lines.push(cur)
+      cur = ''
+    }
+    cur += part
+    while (cur.length > width) {
+      lines.push(cur.slice(0, width))
+      cur = cur.slice(width)
+    }
+  }
+  if (cur) lines.push(cur)
+  return lines
+}
+
 // Styled segments as Texts, cut to `width` across segments.
 function texts(Text, segs, width) {
   const children = []
@@ -923,12 +963,25 @@ function recapRows(Box, Text, width, r) {
     const kind = h.kind && h.kind !== 'session' ? h.kind.replace(/_/g, '-') + ': ' : ''
     wrapText(kind + h.evidence, width - 3, EVIDENCE_LINES).forEach((t, k) =>
       rows.push(line(Box, Text, 'recap-ev-' + i + '-' + k, [{ text: '   ' + t, dimColor: true }], width)))
-    if (h.skill || h.stubPath) {
-      rows.push(line(Box, Text, 'recap-skill-' + i, [
-        { text: '   ' },
-        h.skill && { text: '✦ ' + h.skill, color: SKILL_COLOR },
-        h.stubPath && { text: (h.skill ? ' · ' : '') + 'stub: ' + h.stubPath, dimColor: true },
-      ], width))
+    // the skill, then the draft's path: never cut at the right edge (its file name must show): on the skill's line
+    // when it fits whole, else on its own line with the middle of the path shortened, else wrapped (dim)
+    const skill = h.skill ? '✦ ' + h.skill : ''
+    const stub = h.stubPath ? 'stub: ' + h.stubPath : ''
+    if (skill && (!stub || 3 + skill.length + 3 + stub.length <= width)) {
+      rows.push(line(Box, Text, 'recap-skill-' + i, [{ text: '   ' }, { text: skill, color: SKILL_COLOR },
+        stub && { text: ' · ' + stub, dimColor: true }], width))
+    } else if (skill) {
+      rows.push(line(Box, Text, 'recap-skill-' + i, [{ text: '   ' }, { text: skill, color: SKILL_COLOR }], width))
+    }
+    if (stub && !(skill && 3 + skill.length + 3 + stub.length <= width)) {
+      const short = fitPath(h.stubPath, width - 9)
+      if (short != null) {
+        rows.push(line(Box, Text, 'recap-stub-' + i, [{ text: '   ' }, { text: 'stub: ' + short, dimColor: true }], width))
+      } else {
+        rows.push(line(Box, Text, 'recap-stub-' + i, [{ text: '   ' }, { text: 'stub:', dimColor: true }], width))
+        wrapPath(h.stubPath, width - 5).forEach((t, k) =>
+          rows.push(line(Box, Text, 'recap-stub-' + i + '-' + k, [{ text: '     ' }, { text: t, dimColor: true }], width)))
+      }
     }
   })
   rows.push(rule('recap-end', ''))

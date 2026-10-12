@@ -863,11 +863,11 @@ describe('tokenscope-live', () => {
   test('recap: a cross_session hint from the server: action first, evidence dim after "cross-session:", stub path dim', async ($: any, on: any) => {
     const clock = base(on)
     const make = { rule: 'repeat', kind: 'cross_session', action: 'Make "change cli.py + README.md and test" a skill', text: 'x',
-      evidence: '≈60k/run saving · done 4× in 4 sessions · ≈210k CW each · read cli.py → edit cli.py, README.md → run unittest (estimate)',
+      evidence: '≈72k discovery/run − ≈12k skill body → ≈60k/run net · done 4× in 4 sessions · ≈210k CW each · read cli.py → edit cli.py, README.md → run unittest (estimate)',
       est_saving_cw: 60_000, cw_at_stake: 60_000, estimate: 'estimate: median CW ...', skill: null,
       stub_path: '~/.cache/tokenscope/skill-drafts/change-cli-py/SKILL.md', matches: [{ sid: 'aaaaaaaa', cw: 200_000, score: 0.7 }] }
     const use = { ...make, rule: 'existing_skill', action: 'Use skill /release-notes for this', skill: 'release-notes', stub_path: null,
-      evidence: '≈40k/run saving · done 3× without it in 2 sessions · ≈150k CW each · you have skill release-notes ("Write release notes") that covers this (estimate)' }
+      evidence: '≈45k discovery/run − ≈5k skill body → ≈40k/run net · done 3× without it in 2 sessions · ≈150k CW each · you have skill release-notes ("Write release notes") that covers this (estimate)' }
     let hints: any[] = [make, RECAP.hints[0]]
     on('http.fetch', () => ({ value: { status: 200, ok: true, headers: {}, text: JSON.stringify({ ...COMPACT, status: 'waiting', main_tool_calls: 0, recap: { ...RECAP, hints } }) } }))
     await $.session.start(SESSION)
@@ -876,7 +876,7 @@ describe('tokenscope-live', () => {
     let rows = await texts(ui)
     const at = rows.indexOf(' ➜ Make "change cli.py + README.md and test" a skill')
     expect(at).toBeGreaterThan(0)
-    expect(rows[at + 1]).toBe('   cross-session: ≈60k/run saving · done 4× in 4 sessions · ≈210k CW each · read cli.py → edit cli.py, README.md → run unittest (estimate)')
+    expect(rows[at + 1]).toBe('   cross-session: ≈72k discovery/run − ≈12k skill body → ≈60k/run net · done 4× in 4 sessions · ≈210k CW each · read cli.py → edit cli.py, README.md → run unittest (estimate)')
     expect((await ui.find({ type: 'Text', text: rows[at + 1] })).props.dimColor).toBe(true)
     expect(rows[at + 2]).toBe('   stub: ~/.cache/tokenscope/skill-drafts/change-cli-py/SKILL.md')
     expect((await ui.find({ type: 'Text', text: 'stub: ~/.cache/tokenscope/skill-drafts/change-cli-py/SKILL.md' })).props.dimColor).toBe(true)
@@ -886,14 +886,14 @@ describe('tokenscope-live', () => {
     rows = await texts(ui)
     const u = rows.indexOf(' ➜ Use skill /release-notes for this')
     expect(u).toBeGreaterThan(0)
-    expect(rows[u + 1]).toMatch(/^   cross-session: ≈40k\/run saving · done 3× without it in 2 sessions · ≈150k CW each · you have skill release-notes/)
-    expect(rows[u + 2]).toBe('   ✦ release-notes')
+    expect(rows[u + 1]).toMatch(/^   cross-session: ≈45k discovery\/run − ≈5k skill body → ≈40k\/run net · done 3× without it in 2 sessions · ≈150k CW each · you have skill release-notes/)
+    expect(rows.slice(u + 2, u + 4)).toContain('   ✦ release-notes')
   })
 
   test('recap: evidence wraps onto up to 3 dim lines, its leading numbers whole at 30, 50 and 80 columns', async ($: any, on: any) => {
     const clock = base(on)
     const cross = { rule: 'repeat', kind: 'cross_session', action: 'Make "Add CLI subcommand with tests" a skill', cw_at_stake: 34_000,
-      evidence: '≈34k/run saving · done 4× in 4 sessions · ≈95k CW each · read cli.py, models.py → edit cli.py + tests → update README.md, CHANGELOG.md → run unittest (estimate)' }
+      evidence: '≈41k discovery/run − ≈7k skill body → ≈34k/run net · done 4× in 4 sessions · read cli.py, models.py → edit cli.py + tests → update README.md, CHANGELOG.md → run unittest (estimate)' }
     const sess = { rule: 'reread', kind: 'session', action: 'Note what store.py holds in CLAUDE.md', cw_at_stake: 20_000,
       evidence: '≈20k at stake · store.py read in full 5× across 3 intents, 4 of them unchanged since the read before' }
     on('http.fetch', () => ({ value: { status: 200, ok: true, headers: {}, text: JSON.stringify({ ...COMPACT, status: 'waiting', main_tool_calls: 0, recap: { ...RECAP, hints: [cross, sess] } }) } }))
@@ -903,7 +903,7 @@ describe('tokenscope-live', () => {
       const ui = await mountPane($, width)
       const rows = await texts(ui)
       for (const t of rows) expect(t.length).toBeLessThanOrEqual(width)
-      for (const [h, lead] of [[cross, /^   cross-session: ≈34k\/run|^   cross-session:$/], [sess, /^   ≈20k at stake/]] as const) {
+      for (const [h, lead] of [[cross, /^   cross-session: ≈41k( discovery\/run)?$|^   cross-session: ≈41k discovery\/run|^   cross-session:$/], [sess, /^   ≈20k at stake/]] as const) {
         const at = rows.findIndex((t: string) => t.startsWith(' ➜ ') && h.action.startsWith(t.slice(3).replace(/…$/, '')))
         expect(at).toBeGreaterThan(0)
         const ev: string[] = []
@@ -914,17 +914,74 @@ describe('tokenscope-live', () => {
         const joined = ev.map((t) => t.slice(3)).join(' ')
         // the numbers come through whole on every width; the words after them may lose their tail
         if (h === cross) {
-          expect(joined).toContain('≈34k/run saving')
-          expect(joined).toContain('done 4×')
+          expect(joined).toContain('≈41k discovery/run − ≈7k skill body → ≈34k/run net')
         } else expect(joined).toContain('≈20k at stake')
         for (const t of ev) expect((await ui.find({ type: 'Text', text: t })).props.dimColor).toBe(true)
-        if (width === 80 && h === cross) expect(ev).toEqual(['   cross-session: ≈34k/run saving · done 4× in 4 sessions · ≈95k CW each · read',
-          '   cli.py, models.py → edit cli.py + tests → update README.md, CHANGELOG.md →',
-          '   run unittest (estimate)'])
+        if (width === 80 && h === cross) expect(ev).toEqual(['   cross-session: ≈41k discovery/run − ≈7k skill body → ≈34k/run net · done 4×',
+          '   in 4 sessions · read cli.py, models.py → edit cli.py + tests → update',
+          '   README.md, CHANGELOG.md → run unittest (estimate)'])
         if (width === 30) expect(ev[2]).toMatch(/…$/)   // out of lines: only the tail is cut
       }
       await ui.unmount()
     }
+  })
+
+  test('recap: the stub path is never cut at the right edge: middle shortened or wrapped, file name shown, at 50 and 80 columns', async ($: any, on: any) => {
+    const clock = base(on)
+    const skillPath = '~/.cache/tokenscope/skill-drafts/add-cli-subcommand-with-tests-readme-and/SKILL.md'
+    const mapPath = '<cache>/claude-md-drafts/add-cli-subcommand-with-tests-readme-and.md'
+    const make = { rule: 'repeat', kind: 'cross_session', action: 'Make "Add CLI subcommand with tests" a skill', cw_at_stake: 34_000,
+      evidence: '≈41k discovery/run − ≈7k skill body → ≈34k/run net · done 4× in 4 sessions', stub_path: skillPath }
+    let hints: any[] = [make]
+    on('http.fetch', () => ({ value: { status: 200, ok: true, headers: {}, text: JSON.stringify({ ...COMPACT, status: 'waiting', main_tool_calls: 0, recap: { ...RECAP, hints } }) } }))
+    await $.session.start(SESSION)
+    await clock.advance(1000)
+    const stubRows = (rows: string[]) => {
+      const at = rows.findIndex((t: string) => t.startsWith('   stub:'))
+      const out = [rows[at]]
+      for (let k = at + 1; k < rows.length && rows[k].startsWith('     '); k++) out.push(rows[k])
+      return out
+    }
+    const want: Record<string, Record<number, string[]>> = {
+      skill: {
+        80: ['   stub: ~/.cache/tokenscope/…/add-cli-subcommand-with-tests-readme-and/SKILL.md'],
+        50: ['   stub:', '     ~/.cache/tokenscope/skill-drafts', '     /add-cli-subcommand-with-tests-readme-and', '     /SKILL.md'],
+      },
+      map: {
+        80: ['   stub: <cache>/claude-md-drafts/add-cli-subcommand-with-tests-readme-and.md'],
+        50: ['   stub:', '     <cache>/claude-md-drafts', '     /add-cli-subcommand-with-tests-readme-and.md'],
+      },
+    }
+    for (const [kind, path] of [['skill', skillPath], ['map', mapPath]] as const) {
+      hints = [{ ...make, stub_path: path }]
+      await clock.advance(3000)
+      for (const width of [50, 80]) {
+        const ui = await mountPane($, width)
+        const rows = await texts(ui)
+        for (const t of rows) expect(t.length).toBeLessThanOrEqual(width)
+        const got = stubRows(rows)
+        expect(got).toEqual(want[kind][width])
+        expect(got.some((t) => t.includes('…') && t.endsWith('…'))).toBe(false)   // never cut at the end
+        expect(got[got.length - 1].endsWith(path.split('/').pop() as string)).toBe(true)   // the file name shows
+        for (const t of got) expect((await ui.find({ type: 'Text', text: t.trim() })).props.dimColor).toBe(true)
+        await ui.unmount()
+      }
+    }
+    // with a skill: on the skill's line when the whole path fits there, else on its own line
+    hints = [{ ...make, skill: 'cli-change', stub_path: mapPath }]
+    await clock.advance(3000)
+    let ui = await mountPane($, 100)
+    expect(await texts(ui)).toContain('   ✦ cli-change · stub: <cache>/claude-md-drafts/add-cli-subcommand-with-tests-readme-and.md')
+    await ui.unmount()
+    ui = await mountPane($, 50)
+    const rows = await texts(ui)
+    const at = rows.indexOf('   ✦ cli-change')
+    expect(at).toBeGreaterThan(0)
+    expect(rows.slice(at + 1, at + 4)).toEqual(['   stub:', '     <cache>/claude-md-drafts', '     /add-cli-subcommand-with-tests-readme-and.md'])
+    await ui.unmount()
+    ui = await mountPane($, 70)   // too narrow for the skill's line, wide enough with the middle shortened
+    expect(await texts(ui)).toContain('   stub: <cache>/…/add-cli-subcommand-with-tests-readme-and.md')
+    await ui.unmount()
   })
 
   test('recap: the share leads so a narrow pane cuts the label, not the 38%; the cost stays too', async ($: any, on: any) => {

@@ -74,11 +74,18 @@ tool_name, notification_type, message (Notification only, 200 chars)}` to `~/.ca
   (`━━ DONE · recap ━━`: costliest / slowest intent, then hints, the action first and its evidence under it); it is
   removed as soon as the agent works again. One recap hint may come from your other sessions (`cross-session:`):
   when the request you just finished repeats a workflow you did >= 3 times in >= 2 other sessions (same files, step
-  shape and tools; each run >= 50k CW), it says `➜ Make "change cli.py + README.md and test" a skill` (with a
-  SKILL.md draft under `~/.cache/tokenscope/skill-drafts/`, never in a skills dir), `➜ Use skill /<name>` when one
-  of your skills covers it, or `➜ Add a file map to skill /<name>` when the skill already ran every time and the runs
-  still re-read the same files. The saving shown is an estimate: the median CW the matching runs spent locating
-  those files, not the whole run. The index of past sessions (`--index-root DIR`, default `$TOKENSCOPE_INDEX_ROOT`
+  shape and tools; each run >= 50k CW) and something would pay for itself, it says `➜ Make "change cli.py +
+  README.md and test" a skill` (with a SKILL.md draft under `~/.cache/tokenscope/skill-drafts/`, never in a skills
+  dir), `➜ Add a file map to CLAUDE.md` (a snippet under `~/.cache/tokenscope/claude-md-drafts/`) when the runs find
+  the same files and the map nets more, `➜ Use skill /<name>` when one of your skills covers it, or `➜ Add a file
+  map to skill /<name>` when the skill already ran every time and the runs still find their way to the same files.
+  The saving is an estimate and shows both terms: `≈41k discovery/run − ≈9k skill body → ≈32k/run net`. Discovery
+  is only what the remedy would have spared: full reads of the files it lists (not edited; a file the agent edits
+  must be read anyway) and the searches and listings that led to them; a file map needs >= 3 stable files, a skill
+  draft >= 2 shared steps and >= 3 files. The cost is what the skill body or file map
+  adds to context on every later turn (cache reads), not once. It needs a net >= 20k and >= 30% of the discovery;
+  with no net saving but the same steps every time it says `➜ Make "<name>" a skill for consistency` and that no
+  token saving is expected. The index of past sessions (`--index-root DIR`, default `$TOKENSCOPE_INDEX_ROOT`
   or `~/.claude/projects`) is cached per transcript and built in the background; skills come from
   `~/.claude/skills`, `<project>/.claude/skills` and `--skills-dir DIR`; `--no-xhints` turns it off.
   `tools/eval_xhints.py --root DIR [--skills-dir DIR]` replays the history chronologically (each session only sees
