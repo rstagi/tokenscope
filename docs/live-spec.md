@@ -144,7 +144,9 @@ ThreadingHTTPServer bound to 127.0.0.1 by default. Background thread runs the ta
   parsed with understand.parse_test_output; an unparsable failed run -> passed/failed null, ok false),
   "files_edited":[basenames] (unredacted only), "files_edited_n",
   "recent":[last 60 main turn steps as {"intent","group","label","cw","tools":["label",...],"targets":[...],
-  "tool_err","agents","err"}], "agents":[{"type","status","turns"}]}.
+  "tool_err","agents","err"}], "agents":[{"type","status","turns"}], "skills":[{"name","count"}] (Skill tool + slash-command skills, see
+  docs/intents-spec.md section 8), "intents" (steps / groups with `dur_s` and `skills`, see docs/intents-spec.md),
+  "recap" (only while waiting / idle)}.
 - `GET /events` -> Server-Sent Events: `event: board` every 1 s when anything changed (same JSON as /api/board),
   and `event: step` {"session","step"} for every new step (so a live view can append without polling).
   Heartbeat comment every 15 s.

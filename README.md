@@ -66,7 +66,23 @@ tool_name, notification_type, message (Notification only, 200 chars)}` to `~/.ca
   the latest one is doing), TESTS (main-thread runs; `subagents:` when only subagents ran tests), edited files, a cost
   sparkline with CW / $ / context, and an intent list: labelled steps and intent groups (collapsed to one line, the
   live group expanded; `/tokenscope expand|collapse <n|all>` or a press on a group line), with the open step's
-  provisional label dimmed. An older server without intents gets the phase tree instead (`/tokenscope view phases`
+  provisional label dimmed. Every operation, step and group line ends with its wall time
+  (`✓ unittest 22 passed · 3k · 4s`, `[CHANGE] Add X · 63k · $0.22 · 1m12s`; a narrow pane cuts the label, never the
+  numbers). Skills show as `✦`: Skill-tool calls (`✦ skill:pr-review · 2k · 3s`), slash-command skills, a `✦ <name>`
+  mark on the steps and groups they drove and a SKILLS row (`tools/skills_stats.py --root DIR` counts both kinds per
+  skill across a transcripts tree). While the session waits for you a boxed recap sits right under the header
+  (`━━ DONE · recap ━━`: costliest / slowest intent, then hints, the action first and its evidence under it); it is
+  removed as soon as the agent works again. One recap hint may come from your other sessions (`cross-session:`):
+  when the request you just finished repeats a workflow you did >= 3 times in >= 2 other sessions (same files, step
+  shape and tools; each run >= 50k CW), it says `➜ Make "change cli.py + README.md and test" a skill` (with a
+  SKILL.md draft under `~/.cache/tokenscope/skill-drafts/`, never in a skills dir), `➜ Use skill /<name>` when one
+  of your skills covers it, or `➜ Add a file map to skill /<name>` when the skill already ran every time and the runs
+  still re-read the same files. The saving shown is an estimate: the median CW the matching runs spent locating
+  those files, not the whole run. The index of past sessions (`--index-root DIR`, default `$TOKENSCOPE_INDEX_ROOT`
+  or `~/.claude/projects`) is cached per transcript and built in the background; skills come from
+  `~/.claude/skills`, `<project>/.claude/skills` and `--skills-dir DIR`; `--no-xhints` turns it off.
+  `tools/eval_xhints.py --root DIR [--skills-dir DIR]` replays the history chronologically (each session only sees
+  earlier ones) and writes a sample of firings for hand-checking. An older server without intents gets the phase tree instead (`/tokenscope view phases`
   shows it too): phases of same-group intents, tools under the newest phases, subagents by task description with
   nested subagents under the one that launched them. Rare warnings at the bottom. Polled once a second from the local server. Without the server it
   falls back to counters it computes from mod events (`tool.call`, `turn.step` usage, `turn.complete`).
@@ -339,7 +355,8 @@ characters), file names, chains and terms to Claude through your own `claude` CL
 output: don't share them blindly.
 
 `tokenscope live` binds to 127.0.0.1 by default and redacts by default (prompts are not kept, projects / files / subagent
-descriptions are masked, goal names come from masked text). `--haiku` sends only the masked first 240 characters of a
+descriptions are masked, goal names come from masked text). Cross-session hints read your other local transcripts
+and SKILL.md files and write only to `~/.cache/tokenscope/` (index cache, skill drafts). `--haiku` sends only the masked first 240 characters of a
 session's first prompt through your own `claude` CLI. The mod only fetches from the local server.
 
 ## Known limitations
@@ -360,6 +377,7 @@ session's first prompt through your own `claude` CLI. The mod only fetches from 
     bin/tokenscope              run without installing
     tokenscope/                 parser, analysis, goals, fixes, HTML reports, CLI
     tokenscope/intents.py       intent rules: tool call -> intent (locate, read_code, edit, test, ...) -> group
+    tokenscope/xindex.py        cross-session index of past requests, matching, skill hints and drafts
     tokenscope/live/            live tailer, state + flags, goal namer, hook script, HTTP/SSE server, static UI
     mod/tokenscope-live/        Claude Code mod (in-terminal pane)
     docs/                       live design spec, notes on Claude Code extension points

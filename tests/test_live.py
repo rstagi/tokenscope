@@ -411,7 +411,7 @@ class TestServer(LiveFixture):
         self.assertEqual("recap" in c, c["status"] in ("waiting", "idle"))   # the idle recap, see recap.py
         self.assertEqual(set(c) - {"recap"}, {"goal", "status", "cw", "usd", "context_tokens", "current_intent", "flags",
                                   "recent", "agents", "elapsed_s", "turns", "tool_calls", "errors", "cw_series", "main_tool_calls",
-                                  "warnings", "asked", "now", "tests", "files_edited_n", "intents"})
+                                  "warnings", "asked", "now", "tests", "files_edited_n", "intents", "skills"})
         self.assertEqual(set(c["warnings"][0]), {"rule", "text", "hint", "count", "ts"})
         self.assertEqual(c["tests"]["runs"], 3)
         self.assertFalse(c["tests"]["ok"])
@@ -444,6 +444,50 @@ class TestServer(LiveFixture):
             got += line
         r.close()
         self.assertIn(b'"k":"prompt"', got)
+
+
+class TestLiveCliArgs(unittest.TestCase):
+    """`tokenscope live` and server.main hand --index-root/--skills-dir/--no-xhints to Live; nothing is served
+    and no index is built (Live.run is stubbed, so the Suggester thread never starts)."""
+
+    def run_main(self, entry, argv):
+        got = {}
+
+        class FakeSrv:
+            server_address = ("127.0.0.1", 0)
+
+            def serve_forever(self):
+                raise KeyboardInterrupt
+
+            def server_close(self):
+                pass
+
+        def fake_make_server(live, host, port):
+            got["live"] = live
+            return FakeSrv()
+
+        saved = (server.make_server, server.ensure_static, server.Live.run)
+        server.make_server, server.ensure_static, server.Live.run = fake_make_server, lambda: None, lambda self: None
+        try:
+            with redirect_stdout(io.StringIO()):
+                self.assertEqual(entry(argv), 0)
+        finally:
+            server.make_server, server.ensure_static, server.Live.run = saved
+        return got["live"]
+
+    def test_args_reach_the_server(self):
+        tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, tmp)
+        idx, sk = os.path.join(tmp, "idx"), os.path.join(tmp, "skills")
+        for entry, pre in ((cli.main, ["live"]), (server.main, [])):
+            live = self.run_main(entry, pre + ["--root", tmp, "--index-root", idx, "--skills-dir", sk])
+            self.assertIsNotNone(live.suggester)                  # cross-session hints on by default
+            self.assertIs(live.state.xhints, live.suggester)
+            self.assertEqual(live.suggester.index.root, idx)
+            self.assertEqual(live.suggester.extra, [sk])
+            live = self.run_main(entry, pre + ["--root", tmp, "--no-xhints"])
+            self.assertIsNone(live.suggester)
+            self.assertIsNone(getattr(live.state, "xhints", None))
 
 
 if __name__ == "__main__":

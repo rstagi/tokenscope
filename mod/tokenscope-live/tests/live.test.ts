@@ -88,7 +88,7 @@ describe('tokenscope-live', () => {
     const ui = await $.ui.mount({ plugin: 'tokenscope-live', surface: 'terminal', component: 'Pane', requestId: 'tokenscope-live', props: PANE_PROPS })
     expect(await ui.find({ type: 'Text', text: /^tokenscope · local$/ })).toBeDefined()
     expect(await ui.find({ type: 'Text', text: /^ {2}● idle$/ })).toBeDefined()
-    expect(await ui.find({ type: 'Text', text: /^ {2}1m0[56]s$/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /^ {2}1m[56]s$/ })).toBeDefined()
     expect(await ui.find({ type: 'Text', text: /^◼ idle$/ })).toBeDefined()
     // CW per turn = 1000 + 1.25*2000 + 0.1*10000 + 5*100 = 5000
     expect(await ui.find({ type: 'Text', text: /^10k CW$/ })).toBeDefined()
@@ -668,10 +668,10 @@ describe('tokenscope-live', () => {
     await clock.advance(1000)
     let ui = await mountPane($)
     expect(await ui.find({ type: 'Text', text: '✓ ' })).toBeDefined()
-    expect(await ui.find({ type: 'Text', text: 'Read store.py · 2k' })).toBeDefined()
-    expect(await ui.find({ type: 'Text', text: 'unittest 22 passed · 3k' })).toBeDefined()
-    expect(await ui.find({ type: 'Text', text: 'unittest 1 failed · 3k' })).toBeDefined()
-    const running = await ui.find({ type: 'Text', text: 'Edit store.py · 4k' })
+    expect(await ui.find({ type: 'Text', text: 'Read store.py' })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: 'unittest 22 passed' })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: 'unittest 1 failed' })).toBeDefined()
+    const running = await ui.find({ type: 'Text', text: 'Edit store.py' })
     expect(running.props.bold).toBe(true)
     expect((await ui.findAll({ type: 'Text', text: /^▶ $/ })).length).toBe(2)   // the open step's head and its running call
     expect((await ui.findAll({ type: 'Text', text: /^✗ $/ })).length).toBe(1)
@@ -700,7 +700,7 @@ describe('tokenscope-live', () => {
     await $.tool.call({ tool: 'Edit', tool_use_id: 'd', input: { file_path: '/r/y.py' } })
     await clock.advance(1000)
     const ui = await mountPane($)
-    expect(await ui.find({ type: 'Text', text: 'Read store.py · 2k' })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: 'Read store.py' })).toBeDefined()
     expect(await ui.find({ type: 'Text', text: 'Edit y.py' })).toBeDefined()   // pending, after the declare call
     expect(await ui.find({ type: 'Text', text: /declare_intent/ })).toBeUndefined()
   })
@@ -718,7 +718,7 @@ describe('tokenscope-live', () => {
     await clock.advance(1000)
     let ui = await mountPane($)
     expect(await ui.find({ type: 'Text', text: /^▾1 $/ })).toBeDefined()
-    expect(await ui.find({ type: 'Text', text: 'unittest 22 passed · 3k' })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: 'unittest 22 passed' })).toBeDefined()
     expect(await ui.find({ type: 'Text', text: /^ {3}↳ / })).toBeUndefined()
     await ui.unmount()
     steps = after
@@ -726,8 +726,8 @@ describe('tokenscope-live', () => {
     ui = await mountPane($)
     expect(await ui.find({ type: 'Text', text: /^▸1 $/ })).toBeDefined()
     expect(await ui.find({ type: 'Text', text: '   ↳ Read the code · Fix the store' })).toBeDefined()
-    expect(await ui.find({ type: 'Text', text: 'unittest 22 passed · 3k' })).toBeUndefined()
-    expect(await ui.find({ type: 'Text', text: 'Edit store.py · 4k' })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: 'unittest 22 passed' })).toBeUndefined()
+    expect(await ui.find({ type: 'Text', text: 'Edit store.py' })).toBeDefined()
   })
 
   test('intents: short of rows, the oldest detail lines go first, then whole intents; never the live one', async ($: any, on: any) => {
@@ -747,7 +747,7 @@ describe('tokenscope-live', () => {
     expect(await ui.find({ type: 'Text', text: '   ↳ Sum 13' })).toBeDefined()
     const kept = (await ui.findAll({ type: 'Text', text: /^ {3}↳ Sum \d+$/ })).map((t: any) => Number(String(t.text).match(/\d+/)![0]))
     expect(kept).toEqual(Array.from({ length: kept.length }, (_, i) => 14 - kept.length + i))   // the newest ones
-    expect(await ui.find({ type: 'Text', text: 'Edit store.py · 4k' })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: 'Edit store.py' })).toBeDefined()
     await ui.unmount()
     // far more intents: the oldest fold into "… N earlier"; the live one and its operations stay
     n = 40
@@ -758,7 +758,7 @@ describe('tokenscope-live', () => {
     expect(await ui.find({ type: 'Text', text: /^ Step number 0$/ })).toBeUndefined()
     expect(await ui.find({ type: 'Text', text: /^ Step number 39$/ })).toBeDefined()
     expect(await ui.find({ type: 'Text', text: /^ Live one…$/ })).toBeDefined()
-    expect(await ui.find({ type: 'Text', text: 'Edit store.py · 4k' })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: 'Edit store.py' })).toBeDefined()
   })
 
   test('intents: a ToolSearch step is drawn as OVERHEAD', async ($: any, on: any) => {
@@ -779,45 +779,152 @@ describe('tokenscope-live', () => {
     costliest: { label: 'Find the pricing code', cat: 'investigate', cw: 70_000, usd: 0.21, pct: 58 },
     slowest: { label: 'Run the full suite', cat: 'verify', s: 252 },
     hints: [
-      { rule: 'reread', text: 'Note what store.py holds in CLAUDE.md', evidence: 'store.py read in full 5× across 3 intents', cw_at_stake: 40_000, estimate: 'x' },
+      { rule: 'reread', kind: 'session', action: 'Note what store.py holds in CLAUDE.md', text: 'Note what store.py holds in CLAUDE.md', evidence: 'store.py read in full 5× across 3 intents', cw_at_stake: 40_000, estimate: 'x' },
       { rule: 'polling', text: 'Wait in one call', evidence: '6 wake-ups in a row only waited', cw_at_stake: 30_000, estimate: 'x' },
     ],
     session: {},
   }
+  const texts = async (ui: any) => (await ui.findAll({ type: 'Box' })).slice(1).map((b: any) => String(b.text ?? ''))
 
-  test('recap: shown while waiting (costliest, slowest, hints), gone once the agent works again', async ($: any, on: any) => {
+  test('recap: a bright boxed section right under the header while waiting; removed entirely once the agent works again', async ($: any, on: any) => {
     const clock = base(on)
     const steps = [step(0, 'investigate', 'Find the pricing code'), step(1, 'verify', 'Run the full suite')]
     let payload: any = { ...COMPACT, status: 'waiting', main_tool_calls: 0, recap: RECAP, intents: { steps, groups: [], declared: { calls: 0 } } }
     on('http.fetch', () => ({ value: { status: 200, ok: true, headers: {}, text: JSON.stringify(payload) } }))
     await $.session.start(SESSION)
     await clock.advance(1000)
-    let ui = await mountPane($, 120)
-    expect(await ui.find({ type: 'Text', text: '── recap ──' })).toBeDefined()
-    expect(await ui.find({ type: 'Text', text: 'costliest ' })).toBeDefined()
-    expect(await ui.find({ type: 'Text', text: '58%' })).toBeDefined()
-    expect(await ui.find({ type: 'Text', text: ' Find the pricing code' })).toBeDefined()
-    expect(await ui.find({ type: 'Text', text: ' · 70k · $0.21' })).toBeDefined()
-    expect(await ui.find({ type: 'Text', text: '4m12s' })).toBeDefined()
-    const hint = await ui.find({ type: 'Text', text: '💡 Note what store.py holds in CLAUDE.md' })
-    expect(hint.props.color).toBe('cyan')
-    expect(await ui.find({ type: 'Text', text: ' · store.py read in full 5× across 3 intents' })).toBeDefined()
-    expect(await ui.find({ type: 'Text', text: '💡 Wait in one call' })).toBeDefined()
+    let ui = await mountPane($, 80)
+    let rows = await texts(ui)
+    // the title bar spans the pane, bold and bright, as row 2 (right under the header, above ASKED and the list)
+    const title = await ui.find({ type: 'Text', text: /^━━ DONE · recap · 120k · \$0\.40 ━+$/ })
+    expect(title).toBeDefined()
+    expect(String(title.text).length).toBe(80)
+    expect(title.props.bold).toBe(true)
+    expect(title.props.color).toBe('greenBright')
+    expect(rows[1]).toMatch(/^━━ DONE · recap/)
+    expect(rows.findIndex((t: string) => /^ASKED/.test(t))).toBeGreaterThan(rows.findIndex((t: string) => /^━+$/.test(t)))
+    expect(rows.findIndex((t: string) => /^━+$/.test(t))).toBeLessThan(rows.findIndex((t: string) => t === '── intents ──'))
+    // big top lines: the share / the time first
+    expect(rows).toContain(' 58%  costliest [INVESTIGATE] Find the pricing code · 70k · $0.21')
+    expect(rows).toContain(' 4m12s  slowest [VERIFY] Run the full suite')
+    expect((await ui.find({ type: 'Text', text: '58%' })).props.bold).toBe(true)
+    // hints: the action first (bold, bright), the evidence dim on the line under it; `text` alone still reads
+    const action = await ui.find({ type: 'Text', text: 'Note what store.py holds in CLAUDE.md' })
+    expect(action.props.bold).toBe(true)
+    expect(action.props.color).toBe('yellowBright')
+    const at = rows.indexOf(' ➜ Note what store.py holds in CLAUDE.md')
+    expect(at).toBeGreaterThan(0)
+    expect(rows[at + 1]).toBe('   store.py read in full 5× across 3 intents')
+    expect((await ui.find({ type: 'Text', text: '   store.py read in full 5× across 3 intents' })).props.dimColor).toBe(true)
+    expect(rows).toContain(' ➜ Wait in one call')
+    expect(rows.filter((t: string) => /^━+$/.test(t)).length).toBe(1)   // the closing rule
     await ui.unmount()
-    // the agent resumes: the server says working (and stops sending the recap); a stale recap is not drawn either
-    payload = { ...payload, status: 'working' }
+    // the agent resumes after a new prompt: the server says working (and stops sending the recap); not a single
+    // recap line is left, and the intent list goes on
+    payload = { ...payload, status: 'working', recap: undefined, intents: { steps: [...steps, step(2, 'change', 'Fix rounding', { open: true })], groups: [], declared: { calls: 0 } } }
     await clock.advance(1000)
-    ui = await mountPane($, 120)
-    expect(await ui.find({ type: 'Text', text: '── recap ──' })).toBeUndefined()
-    expect(await ui.find({ type: 'Text', text: /^💡/ })).toBeUndefined()
+    ui = await mountPane($, 80)
+    rows = await texts(ui)
+    expect(rows.some((t: string) => /━|➜|costliest|slowest|recap/.test(t))).toBe(false)
+    expect(rows[1]).toMatch(/^ASKED/)
+    expect(await ui.find({ type: 'Text', text: ' Fix rounding' })).toBeDefined()
+    await ui.unmount()
+    // a stale recap with a working status is not drawn either
+    payload = { ...payload, recap: RECAP }
+    await clock.advance(1000)
+    ui = await mountPane($, 80)
+    expect(await ui.find({ type: 'Text', text: /DONE · recap/ })).toBeUndefined()
     await ui.unmount()
     // idle with no hints: costliest and slowest only
     payload = { ...payload, status: 'idle', recap: { ...RECAP, hints: [] } }
     await clock.advance(1000)
-    ui = await mountPane($, 120)
-    expect(await ui.find({ type: 'Text', text: '── recap ──' })).toBeDefined()
-    expect(await ui.find({ type: 'Text', text: 'slowest   ' })).toBeDefined()
-    expect(await ui.find({ type: 'Text', text: /^💡/ })).toBeUndefined()
+    ui = await mountPane($, 80)
+    rows = await texts(ui)
+    expect(rows[1]).toMatch(/^━━ DONE · recap/)
+    expect(rows).toContain(' 4m12s  slowest [VERIFY] Run the full suite')
+    expect(rows.some((t: string) => t.includes('➜'))).toBe(false)
+  })
+
+  test('recap: hints of any kind render action, evidence, skill and stub path', async ($: any, on: any) => {
+    const clock = base(on)
+    const hints = [{ rule: 'repeat', kind: 'cross-session', action: 'Make it a skill', evidence: 'done 4× in 3 sessions, ≈180k CW each', skill: 'release-notes', stub_path: '.claude/skills/release-notes/SKILL.md', cw_at_stake: 1 }]
+    on('http.fetch', () => ({ value: { status: 200, ok: true, headers: {}, text: JSON.stringify({ ...COMPACT, status: 'waiting', main_tool_calls: 0, recap: { ...RECAP, hints } }) } }))
+    await $.session.start(SESSION)
+    await clock.advance(1000)
+    const ui = await mountPane($, 100)
+    const rows = await texts(ui)
+    const at = rows.indexOf(' ➜ Make it a skill')
+    expect(at).toBeGreaterThan(0)
+    expect(rows[at + 1]).toBe('   cross-session: done 4× in 3 sessions, ≈180k CW each')
+    expect(rows[at + 2]).toBe('   ✦ release-notes · stub: .claude/skills/release-notes/SKILL.md')
+    expect((await ui.find({ type: 'Text', text: '✦ release-notes' })).props.color).toBe('magentaBright')
+  })
+
+  test('recap: a cross_session hint from the server: action first, evidence dim after "cross-session:", stub path dim', async ($: any, on: any) => {
+    const clock = base(on)
+    const make = { rule: 'repeat', kind: 'cross_session', action: 'Make "change cli.py + README.md and test" a skill', text: 'x',
+      evidence: '≈60k/run saving · done 4× in 4 sessions · ≈210k CW each · read cli.py → edit cli.py, README.md → run unittest (estimate)',
+      est_saving_cw: 60_000, cw_at_stake: 60_000, estimate: 'estimate: median CW ...', skill: null,
+      stub_path: '~/.cache/tokenscope/skill-drafts/change-cli-py/SKILL.md', matches: [{ sid: 'aaaaaaaa', cw: 200_000, score: 0.7 }] }
+    const use = { ...make, rule: 'existing_skill', action: 'Use skill /release-notes for this', skill: 'release-notes', stub_path: null,
+      evidence: '≈40k/run saving · done 3× without it in 2 sessions · ≈150k CW each · you have skill release-notes ("Write release notes") that covers this (estimate)' }
+    let hints: any[] = [make, RECAP.hints[0]]
+    on('http.fetch', () => ({ value: { status: 200, ok: true, headers: {}, text: JSON.stringify({ ...COMPACT, status: 'waiting', main_tool_calls: 0, recap: { ...RECAP, hints } }) } }))
+    await $.session.start(SESSION)
+    await clock.advance(1000)
+    let ui = await mountPane($, 200)
+    let rows = await texts(ui)
+    const at = rows.indexOf(' ➜ Make "change cli.py + README.md and test" a skill')
+    expect(at).toBeGreaterThan(0)
+    expect(rows[at + 1]).toBe('   cross-session: ≈60k/run saving · done 4× in 4 sessions · ≈210k CW each · read cli.py → edit cli.py, README.md → run unittest (estimate)')
+    expect((await ui.find({ type: 'Text', text: rows[at + 1] })).props.dimColor).toBe(true)
+    expect(rows[at + 2]).toBe('   stub: ~/.cache/tokenscope/skill-drafts/change-cli-py/SKILL.md')
+    expect((await ui.find({ type: 'Text', text: 'stub: ~/.cache/tokenscope/skill-drafts/change-cli-py/SKILL.md' })).props.dimColor).toBe(true)
+    expect(rows[at + 3]).toBe(' ➜ Note what store.py holds in CLAUDE.md')   // the session hint follows
+    hints = [use]
+    await clock.advance(3000)
+    rows = await texts(ui)
+    const u = rows.indexOf(' ➜ Use skill /release-notes for this')
+    expect(u).toBeGreaterThan(0)
+    expect(rows[u + 1]).toMatch(/^   cross-session: ≈40k\/run saving · done 3× without it in 2 sessions · ≈150k CW each · you have skill release-notes/)
+    expect(rows[u + 2]).toBe('   ✦ release-notes')
+  })
+
+  test('recap: evidence wraps onto up to 3 dim lines, its leading numbers whole at 30, 50 and 80 columns', async ($: any, on: any) => {
+    const clock = base(on)
+    const cross = { rule: 'repeat', kind: 'cross_session', action: 'Make "Add CLI subcommand with tests" a skill', cw_at_stake: 34_000,
+      evidence: '≈34k/run saving · done 4× in 4 sessions · ≈95k CW each · read cli.py, models.py → edit cli.py + tests → update README.md, CHANGELOG.md → run unittest (estimate)' }
+    const sess = { rule: 'reread', kind: 'session', action: 'Note what store.py holds in CLAUDE.md', cw_at_stake: 20_000,
+      evidence: '≈20k at stake · store.py read in full 5× across 3 intents, 4 of them unchanged since the read before' }
+    on('http.fetch', () => ({ value: { status: 200, ok: true, headers: {}, text: JSON.stringify({ ...COMPACT, status: 'waiting', main_tool_calls: 0, recap: { ...RECAP, hints: [cross, sess] } }) } }))
+    await $.session.start(SESSION)
+    await clock.advance(1000)
+    for (const width of [30, 50, 80]) {
+      const ui = await mountPane($, width)
+      const rows = await texts(ui)
+      for (const t of rows) expect(t.length).toBeLessThanOrEqual(width)
+      for (const [h, lead] of [[cross, /^   cross-session: ≈34k\/run|^   cross-session:$/], [sess, /^   ≈20k at stake/]] as const) {
+        const at = rows.findIndex((t: string) => t.startsWith(' ➜ ') && h.action.startsWith(t.slice(3).replace(/…$/, '')))
+        expect(at).toBeGreaterThan(0)
+        const ev: string[] = []
+        for (let k = at + 1; k < rows.length && rows[k].startsWith('   ') && !rows[k].startsWith('   stub') && !rows[k].startsWith(' ➜'); k++) ev.push(rows[k])
+        expect(ev.length).toBeGreaterThan(1)        // wrapped, not cut at the pane width
+        expect(ev.length).toBeLessThanOrEqual(3)
+        expect(ev[0]).toMatch(lead)
+        const joined = ev.map((t) => t.slice(3)).join(' ')
+        // the numbers come through whole on every width; the words after them may lose their tail
+        if (h === cross) {
+          expect(joined).toContain('≈34k/run saving')
+          expect(joined).toContain('done 4×')
+        } else expect(joined).toContain('≈20k at stake')
+        for (const t of ev) expect((await ui.find({ type: 'Text', text: t })).props.dimColor).toBe(true)
+        if (width === 80 && h === cross) expect(ev).toEqual(['   cross-session: ≈34k/run saving · done 4× in 4 sessions · ≈95k CW each · read',
+          '   cli.py, models.py → edit cli.py + tests → update README.md, CHANGELOG.md →',
+          '   run unittest (estimate)'])
+        if (width === 30) expect(ev[2]).toMatch(/…$/)   // out of lines: only the tail is cut
+      }
+      await ui.unmount()
+    }
   })
 
   test('recap: the share leads so a narrow pane cuts the label, not the 38%; the cost stays too', async ($: any, on: any) => {
@@ -827,25 +934,23 @@ describe('tokenscope-live', () => {
     await $.session.start(SESSION)
     await clock.advance(1000)
     const ui = await mountPane($, 60)
-    expect(await ui.find({ type: 'Text', text: 'costliest ' })).toBeDefined()
-    expect(await ui.find({ type: 'Text', text: '38%' })).toBeDefined()
-    expect(await ui.find({ type: 'Text', text: /^ Add multi-warehouse.*…$/ })).toBeDefined()
-    expect(await ui.find({ type: 'Text', text: ' · 63k · $0.22' })).toBeDefined()
+    const rows = await texts(ui)
+    const cost = rows.find((t: string) => t.includes('costliest'))!
+    expect(cost).toMatch(/^ 38%  costliest \[CHANGE\] Add multi-warehouse.*… · 63k · \$0\.22$/)
+    expect(cost.length).toBeLessThanOrEqual(60)
+    for (const t of rows) expect(t.length).toBeLessThanOrEqual(60)
   })
 
   test('recap: costliest and slowest on one line when they are the same intent', async ($: any, on: any) => {
     const clock = base(on)
-    const recap = { ...RECAP, hints: [], slowest: { label: 'Find the pricing code', cat: 'investigate', s: 32 } }
+    const recap = { ...RECAP, hints: [], slowest: { label: 'Find the pricing code', cat: 'investigate', s: 72 } }
     on('http.fetch', () => ({ value: { status: 200, ok: true, headers: {}, text: JSON.stringify({ ...COMPACT, status: 'waiting', main_tool_calls: 0, recap }) } }))
     await $.session.start(SESSION)
     await clock.advance(1000)
     const ui = await mountPane($, 120)
-    expect(await ui.find({ type: 'Text', text: 'costliest & slowest ' })).toBeDefined()
-    expect(await ui.find({ type: 'Text', text: '58%' })).toBeDefined()
-    expect(await ui.find({ type: 'Text', text: '32s' })).toBeDefined()
-    expect(await ui.find({ type: 'Text', text: ' · 70k · $0.21' })).toBeDefined()
-    expect(await ui.find({ type: 'Text', text: /^costliest $/ })).toBeUndefined()
-    expect(await ui.find({ type: 'Text', text: /^slowest/ })).toBeUndefined()
+    const rows = await texts(ui)
+    expect(rows).toContain(' 58%  1m12s  costliest & slowest [INVESTIGATE] Find the pricing code · 70k · $0.21')
+    expect(rows.some((t: string) => /^ \S+ +slowest/.test(t))).toBe(false)
   })
 
   test('recap: a call seen in-process (agent working again before the transcript says so) hides it', async ($: any, on: any) => {
@@ -855,29 +960,112 @@ describe('tokenscope-live', () => {
     await $.session.start(SESSION)
     await clock.advance(1000)
     let ui = await mountPane($)
-    expect(await ui.find({ type: 'Text', text: '── recap ──' })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /DONE · recap/ })).toBeDefined()
     await ui.unmount()
     await $.tool.call({ tool: 'Read', tool_use_id: 'a', input: { file_path: '/r/x.py' } })
     await clock.advance(1000)
     ui = await mountPane($)
-    expect(await ui.find({ type: 'Text', text: '── recap ──' })).toBeUndefined()
+    expect(await ui.find({ type: 'Text', text: /DONE · recap/ })).toBeUndefined()
+    expect(await ui.find({ type: 'Text', text: /➜/ })).toBeUndefined()
   })
 
-  test('recap: within the row budget, the intent list yields its oldest rows first', async ($: any, on: any) => {
+  test('recap: within the row budget, the intent list yields its oldest rows first; the recap stays whole', async ($: any, on: any) => {
     const clock = base(on)
     const steps = Array.from({ length: 40 }, (_, i) => step(i, 'investigate', 'Step number ' + i, { summary: 'Sum ' + i }))
-    const hints = Array.from({ length: 5 }, (_, i) => ({ rule: 'r' + i, text: 'Hint ' + i, evidence: 'ev ' + i, cw_at_stake: 1 }))
+    const hints = Array.from({ length: 5 }, (_, i) => ({ rule: 'r' + i, action: 'Hint ' + i, evidence: 'ev ' + i, cw_at_stake: 1 }))
     on('http.fetch', () => ({ value: { status: 200, ok: true, headers: {}, text: JSON.stringify({ ...COMPACT, status: 'waiting', main_tool_calls: 0, recap: { ...RECAP, hints }, intents: { steps, groups: [], declared: { calls: 0 } } }) } }))
     await $.session.start(SESSION)
     await clock.advance(1000)
     const ui = await mountPane($)
-    expect((await ui.findAll({ type: 'Box' })).length - 1).toBeLessThanOrEqual(38)
-    expect(await ui.find({ type: 'Text', text: '── recap ──' })).toBeDefined()
-    expect(await ui.find({ type: 'Text', text: '💡 Hint 2' })).toBeDefined()
-    expect(await ui.find({ type: 'Text', text: '💡 Hint 3' })).toBeUndefined()   // at most 3 hints
+    const rows = await texts(ui)
+    expect(rows.length).toBeLessThanOrEqual(38)
+    expect(rows).toContain(' ➜ Hint 2')
+    expect(rows).toContain('   ev 2')
+    expect(rows).not.toContain(' ➜ Hint 3')   // at most 3 hints
+    expect(rows.filter((t: string) => /^━+$/.test(t)).length).toBe(1)
     expect(await ui.find({ type: 'Text', text: /^… \d+ earlier$/ })).toBeDefined()
     expect(await ui.find({ type: 'Text', text: /^ Step number 39$/ })).toBeDefined()
     expect(await ui.find({ type: 'Text', text: /^ Step number 0$/ })).toBeUndefined()
+  })
+
+  // wall time on every operation, step and group line; skills shown distinctly
+  test('times: ops, steps and groups show wall time after tokens / $; a narrow pane cuts the label, never the numbers', async ($: any, on: any) => {
+    const clock = base(on)
+    const ops = [
+      { tool: 'Bash unittest', target: 'unittest', cw: 3_000, err: false, dur_s: 4.2, test: { ok: true, passed: 22, failed: 0 } },
+      { tool: 'Edit', target: 'store.py', cw: 4_000, err: null, dur_s: 75 },
+    ]
+    const steps = [
+      step(0, 'change', 'Add X', { group: 0, dur_s: 3720 }),
+      step(1, 'verify', 'Run store tests', { group: 0, summary: 'Bash unittest ✓', dur_s: 9 }),
+      step(2, 'change', 'Fix the store with a very long label that will not fit a narrow pane', { open: true, locked: true, dur_s: 72, cw: 63_000, usd: 0.22, ops }),
+    ]
+    const groups = [{ label: 'Implement it', source: 'haiku', first: 0, last: 1, cat: 'change', cw: 20_000, usd: 0.06, steps: 2, dur_s: 3780 }]
+    on('http.fetch', () => ({ value: { status: 200, ok: true, headers: {}, text: JSON.stringify({ ...COMPACT, main_tool_calls: 2, intents: { steps, groups, declared: { calls: 0 } } }) } }))
+    await $.session.start(SESSION)
+    await clock.advance(1000)
+    let ui = await mountPane($, 120)
+    let rows = await texts(ui)
+    expect(rows).toContain('▸1 [CHANGE] Implement it · 2 steps · 20k · $0.06 · 1h3m')
+    expect(rows).toContain('▶ [CHANGE] Fix the store with a very long label that will not fit a narrow pane · 63k · $0.22 · 1m12s')
+    expect(rows).toContain('   ✓ unittest 22 passed · 3k · 4s')
+    expect(rows).toContain('   ▶ Edit store.py · 4k · 1m15s')
+    await ui.unmount()
+    ui = await mountPane($, 44)
+    rows = await texts(ui)
+    for (const t of rows) expect(t.length).toBeLessThanOrEqual(44)
+    expect(rows.find((t: string) => t.startsWith('▸1'))).toMatch(/…? · 2 steps · 20k · \$0\.06 · 1h3m$/)
+    expect(rows.find((t: string) => t.startsWith('▶ [CHANGE]'))).toMatch(/^▶ \[CHANGE\] Fix the.*… · 63k · \$0\.22 · 1m12s$/)
+    await ui.unmount()
+    ui = await mountPane($, 30)
+    rows = await texts(ui)
+    expect(rows).toContain('   ✓ unittest 22 pa… · 3k · 4s')
+  })
+
+  test('times: an in-process call the transcript has not caught up with shows its live elapsed time', async ($: any, on: any) => {
+    const clock = base(on)
+    const steps = [step(0, 'change', 'Fix the store', { open: true, locked: true, ops: [] })]
+    on('http.fetch', () => ({ value: { status: 200, ok: true, headers: {}, text: JSON.stringify({ ...COMPACT, main_tool_calls: 0, intents: { steps, groups: [], declared: { calls: 0 } } }) } }))
+    on('tool.call', () => ({ result: 'ok' }))
+    await $.session.start(SESSION)
+    await $.tool.call({ tool: 'Bash', tool_use_id: 'a', input: { command: 'make build' } })
+    await clock.advance(3000)
+    const ui = await mountPane($, 80)
+    expect(await texts(ui)).toContain('   ▶ make build · 3s')
+  })
+
+  test('skills: ✦ operations, step and group marks, the SKILLS row; an in-process Skill call', async ($: any, on: any) => {
+    const clock = base(on)
+    const ops = [{ tool: 'skill:pr-review', target: 'pr-review', cw: 2_000, err: false, dur_s: 3, skill: 'pr-review' },
+                 { tool: 'Read', target: 'store.py', cw: 2_000, err: false, dur_s: 0.4 }]
+    const steps = [
+      step(0, 'investigate', 'Review the PR', { group: 0, skills: ['pr-review'], summary: '✦ pr-review · Read ×2' }),
+      step(1, 'change', 'Apply the review', { group: 0 }),
+      step(2, 'investigate', 'Check the diff', { open: true, locked: true, skills: ['pr-review'], summary: '✦ pr-review · Read ×1', ops }),
+    ]
+    const groups = [{ label: 'Review PR 218', source: 'haiku', first: 0, last: 1, cat: 'investigate', cw: 20_000, usd: 0.06, steps: 2, skills: ['pr-review', 'tdd'] }]
+    on('http.fetch', () => ({ value: { status: 200, ok: true, headers: {}, text: JSON.stringify({ ...COMPACT, main_tool_calls: 2, skills: [{ name: 'pr-review', count: 2 }, { name: 'tdd', count: 1 }], intents: { steps, groups, declared: { calls: 0 } } }) } }))
+    on('tool.call', () => ({ result: 'ok' }))
+    await $.session.start(SESSION)
+    await clock.advance(1000)
+    let ui = await mountPane($, 100)
+    let rows = await texts(ui)
+    expect(rows).toContain('SKILLS ✦ pr-review ×2 · tdd')
+    expect(rows).toContain('▸1 [INVESTIGATE] Review PR 218 ✦ pr-review +1 · 2 steps · 20k · $0.06')
+    expect(rows).toContain('▶ [INVESTIGATE] Check the diff ✦ pr-review · 10k · $0.03')
+    expect(rows).toContain('   ✦ skill:pr-review · 2k · 3s')
+    expect(rows).toContain('   ✓ Read store.py · 2k · 0s')
+    const icon = await ui.find({ type: 'Text', text: '✦ ' })
+    expect(icon.props.color).toBe('magentaBright')
+    await ui.unmount()
+    // a skill invoked in-process before the transcript has it
+    await $.tool.call({ tool: 'Read', tool_use_id: 'a', input: { file_path: '/r/a.py' } })
+    await $.tool.call({ tool: 'Read', tool_use_id: 'b', input: { file_path: '/r/b.py' } })
+    await $.tool.call({ tool: 'Skill', tool_use_id: 'c', input: { skill: 'tdd' } })
+    await clock.advance(2000)
+    ui = await mountPane($, 100)
+    rows = await texts(ui)
+    expect(rows).toContain('   ✦ skill:tdd · 2s')
   })
 
   test('without an intents key the phase tree still draws', async ($: any, on: any) => {

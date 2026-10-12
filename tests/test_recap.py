@@ -125,7 +125,7 @@ class Recap(unittest.TestCase):
         s = Sess().prompt().turn(read("a.py")).turn(read("b.py"), dt=300).turn(edit("a.py")).answer()
         _, r = hints_of(s)
         self.assertEqual(r["slowest"]["cat"], "investigate")
-        self.assertEqual(r["slowest"]["s"], 301.0)   # the second read's turn starts 300 s + its result's 1 s later
+        self.assertEqual(r["slowest"]["s"], 302.0)   # first read's call -> the second read's result (300 s + 1 s + 1 s)
 
     # (a) re-discovery
     def _rereads(self, n_intents, edit_between=False):

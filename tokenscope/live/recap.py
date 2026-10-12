@@ -131,7 +131,11 @@ def fmt_k(n):
 
 
 def _hint(rule, text, evidence, cw, estimate):
-    return {"rule": rule, "text": text, "evidence": evidence, "cw_at_stake": int(round(cw)), "estimate": estimate}
+    """`action` (= `text`, kept for older clients) is what to do, `evidence` why; `kind` "session" (this session's
+    own evidence; "cross_session" hints come from tokenscope/xindex.py, see with_cross) with optional `skill` /
+    `stub_path`."""
+    return {"rule": rule, "kind": "session", "action": text, "text": text, "evidence": evidence,
+            "cw_at_stake": int(round(cw)), "estimate": estimate}
 
 
 # ---------------------------------------------------------------- rules (each returns a hint or None)
@@ -378,6 +382,17 @@ def hints(intents, turns, k0, win, total, agents=(), ctx=None, compact_at=(), na
         h.pop("_intent", None)
     out.sort(key=lambda h: -h["cw_at_stake"])
     return out[:MAX_HINTS]
+
+
+def with_cross(hints_, h, n=MAX_HINTS):
+    """The session hints plus one cross-session hint (kind "cross_session", ranked with the others by its
+    estimated saving `cw_at_stake`); at most `n` hints. The cross-session hint passed strict gates and is
+    always kept: when the list is full it replaces the lowest-ranked session hint."""
+    out = [x for x in hints_ if x.get("kind") != "cross_session"] + [h]
+    out.sort(key=lambda x: -x.get("cw_at_stake", 0))
+    if h not in out[:n]:
+        out = out[:n - 1] + [h]
+    return out[:n]
 
 
 def recap(steps, groups, turns, prompt_at=(), agents=(), ctx=None, compact_at=(), name=_ident, lab=_ident):

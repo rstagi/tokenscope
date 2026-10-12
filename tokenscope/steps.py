@@ -3,13 +3,16 @@
 Input format of `segment(turns, events, open_last=True)`:
 
     turns  = [{"ts": float|None, "cw": float, "usd": float,
+               "ts_end": float|None,     # when its last call's result arrived (step durations); defaults to ts
                "tools": [{"name": raw tool_use name, "input": dict}],   # inputs may be slimmed (see slim_input)
                "thinking": int,          # thinking blocks in / before this turn
                "text": str,              # visible text / reasoning in / before this turn (labelling only)
                "test": None|"pass"|"fail",   # outcome of a test run in this turn
                "sub_cw": float, "sub_usd": float,    # cost of the subagents / workflow agents this turn launched
                "wf_agents": int}]                    # workflow agents its Workflow calls launched
-    events = [{"kind": "prompt", "at": k}]   # a user prompt (incl. a queued follow-up) arrived before turns[k]
+    events = [{"kind": "prompt", "at": k},   # a user prompt (incl. a queued follow-up) arrived before turns[k]
+              {"kind": "skill", "at": k, "name": str, "user": bool}]   # a slash-command skill was invoked before
+                                                                        # turns[k]; `user`: typed (a boundary)
 
 One turn = one assistant API message of the main thread that called tools; a turn mixing ToolSearch with other
 calls is split into parts (see call_parts), and a step records which part of its first / last turn it holds
@@ -22,6 +25,7 @@ import re
 from collections import Counter
 
 from . import intents
+from .skills import tool_skill
 from .understand import test_runner
 
 TEXT_CHARS = 300
@@ -93,12 +97,12 @@ def program(cmd):
 
 
 def display_name(name, inp):
-    """Tool display name: "Bash <program>", "Skill <name>", "<server>.<tool>" for MCP, else the tool name."""
+    """Tool display name: "Bash <program>", "✦ <skill name>", "<server>.<tool>" for MCP, else the tool name."""
     inp = inp if isinstance(inp, dict) else {}
     if name == "Bash":
         return ("Bash " + (program(" ".join(str(inp.get("command") or "").split())) or "")).strip()
     if name == "Skill":
-        return ("Skill " + str(inp.get("skill") or inp.get("name") or inp.get("command") or "")).strip()
+        return ("✦ " + (tool_skill(name, inp) or "skill")).strip()
     if name.startswith("mcp__"):
         parts = name.split("__")
         return "%s.%s" % (parts[1] if len(parts) > 1 else "?", parts[-1] if len(parts) > 2 else "?")
@@ -112,6 +116,7 @@ def _digest(turn):
     if hit and hit[0] == len(tools):
         return hit[1]
     recs, names, files, cmds, agents, todos, declared, plan, runners, loads = [], [], [], [], [], [], None, None, [], []
+    skills = []
     kind = None
     for t in tools:
         name, inp = str(t.get("name") or "?"), t.get("input") if isinstance(t.get("input"), dict) else {}
@@ -124,6 +129,8 @@ def _digest(turn):
             todos.append(inp["todos"])
         if name == "ToolSearch":
             loads.append(loaded_tools(inp.get("query")))
+        if tool_skill(name, inp):
+            skills.append(tool_skill(name, inp))
         if name == "ExitPlanMode":
             n = len(re.findall(r"(?m)^\s*(?:[-*]|\d+[.)])\s+\S", str(inp.get("plan") or "")))
             plan = "Plan %d steps" % n if n >= 2 else "Write a plan"
@@ -146,7 +153,7 @@ def _digest(turn):
     intent = intents.turn_intent(recs)[0] if recs else None
     d = {"intent": intent, "group": intents.GROUP.get(intent, "other") if intent else None, "names": names,
          "files": files, "cmds": cmds, "agents": agents, "todos": todos, "declared": declared, "plan": plan,
-         "runners": runners, "kind": kind, "loads": loads}
+         "runners": runners, "kind": kind, "loads": loads, "skills": skills}
     turn["_d"] = (len(tools), d)
     return d
 
@@ -201,7 +208,7 @@ def _parts(turn):
     work = [j for j, x in enumerate(subs) if not _is_search(x["tools"][0].get("name"))]
     for x in subs:
         share = len([t for t in x["tools"] if not is_declare(t.get("name"))]) / n   # n > 0: a part is ToolSearch
-        x.update(ts=turn.get("ts"), cw=cw * share, usd=usd * share, thinking=0, text="", test=None, sub_cw=0,
+        x.update(ts=turn.get("ts"), ts_end=turn.get("ts_end"), cw=cw * share, usd=usd * share, thinking=0, text="", test=None, sub_cw=0,
                  sub_usd=0, wf_agents=0)
     subs[work[0]].update(thinking=turn.get("thinking") or 0, text=turn.get("text") or "")
     subs[work[-1]].update({k: turn.get(k) for k in ("test", "sub_cw", "sub_usd", "wf_agents")})
@@ -214,12 +221,17 @@ def _new_step(i, k, turn, cat, prompt_before, part=None):
             "cw": 0.0, "usd": 0.0, "turns": 0, "tools": Counter(), "thinking": 0, "files": [], "cmds": [],
             "tested": None, "todo": None, "declared": None, "kind": None, "agents": [], "prompt_before": prompt_before,
             "closed": False, "text": "", "intents": Counter(), "plan": None, "runners": [], "wf_agents": 0,
-            "loads": []}
+            "loads": [], "skills": []}
 
 
 def segment(turns, events=(), open_last=True):
     """Steps of a main thread (rules 1-6 of the spec, see module doc for the input format)."""
-    prompts = {e.get("at") for e in events or () if e.get("kind") == "prompt"}
+    prompts = {e.get("at") for e in events or () if e.get("kind") == "prompt" or (e.get("kind") == "skill"
+                                                                                   and e.get("user"))}
+    slash = {}
+    for e in events or ():
+        if e.get("kind") == "skill" and e.get("name"):
+            slash.setdefault(e.get("at"), []).append(str(e["name"]))
     steps, cur = [], None
     todo_state, active, declared, kind = {}, None, None, None
     prev_test = prev_moved = prev_launch = prev_search = False
@@ -263,8 +275,9 @@ def segment(turns, events=(), open_last=True):
         if d["plan"] and d["group"] in (None, "plan"):
             cur["plan"] = cur["plan"] or d["plan"]
         # accumulate
-        cur["turn_last"], cur["part_last"], cur["ts1"] = k, part, turn.get("ts") or cur["ts1"]
+        cur["turn_last"], cur["part_last"] = k, part
         cur["ts0"] = cur["ts0"] or turn.get("ts")
+        cur["ts1"] = max([x for x in (cur["ts1"], turn.get("ts"), turn.get("ts_end")) if x] or [None])
         cur["turns"] += 1
         cur["cw"] += float(turn.get("cw") or 0) + float(turn.get("sub_cw") or 0)
         cur["usd"] += float(turn.get("usd") or 0) + float(turn.get("sub_usd") or 0)
@@ -280,6 +293,9 @@ def segment(turns, events=(), open_last=True):
         cur["runners"] += [r for r in d["runners"] if r not in cur["runners"]]
         cur["agents"] += d["agents"]
         cur["loads"] += d["loads"]
+        for n in (slash.get(k, []) if not part else []) + d["skills"]:
+            if n not in cur["skills"]:
+                cur["skills"].append(n)
         if d["intent"]:
             cur["intents"][d["intent"]] += 1
         if turn.get("test"):
@@ -297,7 +313,9 @@ def segment(turns, events=(), open_last=True):
         cur["closed"] = not open_last or prev_test or prev_moved
     for s in steps:
         s["cw"], s["usd"] = round(s["cw"], 1), round(s["usd"], 6)
+        s["dur_s"] = duration(s.get("ts0"), s.get("ts1"))
         s["cat"] = "overhead" if overhead_label(s) else s["cat"] or "other"
+    skill_spans(steps)
     # a todo / declared span of >= 2 steps labels its group, not each step (see groups); the last step's span may
     # still grow while the session goes on, so a todo / declared label is not locked on it yet
     for key in ("todo", "declared"):
@@ -309,17 +327,52 @@ def segment(turns, events=(), open_last=True):
     return steps
 
 
+def skill_spans(steps):
+    """A step that only loads a skill (skill_label) takes ~0s itself (its Skill call returns at once), so its wall
+    time is the work the skill drove: from the skill load to the end of the last following step before the next
+    user prompt or the next step that loads a skill. Sets `drive_last` (that step's index), `drive_ts1` (the latest
+    end over the span) and `dur_s` on such steps; other steps keep their own first-to-last-event time. Groups take
+    `drive_ts1` into their span (_stats), so a group is never shorter than a skill step in it; ops keep each call's
+    own tool_use -> tool_result time."""
+    for n, s in enumerate(steps):
+        if not skill_label(s):
+            continue
+        j = n
+        while j + 1 < len(steps) and not steps[j + 1]["prompt_before"] and not steps[j + 1]["skills"]:
+            j += 1
+        ends = [x["ts1"] for x in steps[n:j + 1] if x.get("ts1")]
+        s["drive_last"], s["drive_ts1"] = j, max(ends) if ends else s.get("ts1")
+        s["dur_s"] = duration(s.get("ts0"), s["drive_ts1"])
+    return steps
+
+
 # ---------------------------------------------------------------- summaries and labels
 
+def duration(ts0, ts1):
+    """Seconds from ts0 to ts1 (rounded to 0.1), None when either is unknown."""
+    return round(max(0.0, ts1 - ts0), 1) if ts0 and ts1 else None
+
+
+def fmt_dur(s):
+    """Compact wall time: "4s", "1m12s", "1h3m" ("" for None)."""
+    if s is None:
+        return ""
+    v = int(max(0, s))
+    h, m = v // 3600, v % 3600 // 60
+    return "%dh%dm" % (h, m) if h else "%dm%ds" % (m, v % 60) if m else "%ds" % v
+
+
 def summary(step):
-    """"Read ×6 · Grep ×2 · Bash unittest ✓ · 1 thinking": top 4 tools by count, then thinking. Workflow calls
-    that launched agents are always shown, with the agent count: "Workflow ×1 (12 agents)"."""
-    tools = step.get("tools") or {}
+    """"✦ pr-review · Read ×6 · Grep ×2 · Bash unittest ✓ · 1 thinking": the skills that drove the step first (Skill
+    tool calls and slash-command skills), then the top 4 other tools by count, then thinking. Workflow calls that
+    launched agents are always shown, with the agent count: "Workflow ×1 (12 agents)"."""
+    skills = ["✦ " + n for n in step.get("skills") or ()]
+    tools = {k: v for k, v in (step.get("tools") or {}).items() if k not in skills}
     order = list(tools)
     wf = int(step.get("wf_agents") or 0)
     top = sorted(tools.items(), key=lambda kv: (not (wf and kv[0] == "Workflow"), -kv[1], order.index(kv[0])))[:4]
     top.sort(key=lambda kv: (-kv[1], order.index(kv[0])))
-    parts = []
+    parts = skills[:2] + (["✦ +%d" % (len(skills) - 2)] if len(skills) > 2 else [])
     for name, n in top:
         s = name + (" ×%d" % n if n > 1 else "")
         if wf and name == "Workflow":
@@ -367,12 +420,22 @@ def overhead_label(step):
     return "Load %d deferred tools" % len(names) if names else "Load deferred tools"
 
 
+def skill_label(step):
+    """"Use skill tdd" / "Use skills a, b" for a step that only loads skills (Skill tool calls and / or a
+    slash-command skill, no other tool), else None. The step keeps its category."""
+    tools = set(step.get("tools") or ()) - NEUTRAL
+    names = step.get("skills") or []
+    if not names or any(not t.startswith("✦ ") for t in tools):
+        return None
+    return clip_words(("Use skill %s" if len(names) == 1 else "Use skills %s") % ", ".join(names))
+
+
 def label_from_signals(step):
-    """(label, source) from the agent's own signals: a ToolSearch-only step (a deterministic "rule" label, never
-    sent to the model), plan evidence, todo item, subagent descriptions, declared intent; (None, None) when there
+    """(label, source) from the agent's own signals: a ToolSearch-only or skill-only step (a deterministic "rule"
+    label, never sent to the model), plan evidence, todo item, subagent descriptions, declared intent; (None, None) when there
     is none. A todo item / declared label spanning >= 2 steps belongs to their
     group, so those steps fall through to the next source (in the end a model or rule label of their own)."""
-    lab = overhead_label(step)
+    lab = overhead_label(step) or skill_label(step)
     if lab:
         return lab, "rule"
     if step.get("plan") and step.get("cat") == "plan":
@@ -417,14 +480,19 @@ def _stats(g, steps):
     sub = steps[g["first"]:g["last"] + 1]
     cat = Counter()
     tools = Counter()
+    skills = []
     for s in sub:
         cat[s["cat"]] += s.get("cw") or 0
         tools.update(s.get("tools") or {})
+        skills += [n for n in s.get("skills") or () if n not in skills]
+    ts = [t for s in sub for t in (s.get("ts0"), s.get("ts1"), s.get("drive_ts1")) if t]
     out = dict(g)
     out.update(cat=KIND_CAT.get(g.get("kind")) or (max(cat, key=cat.get) if cat else "other"), cw=round(sum(s["cw"] for s in sub), 1),
-               usd=round(sum(s["usd"] for s in sub), 6), steps=len(sub),
+               usd=round(sum(s["usd"] for s in sub), 6), steps=len(sub), skills=skills,
+               ts0=min(ts) if ts else None, ts1=max(ts) if ts else None,
+               dur_s=duration(min(ts), max(ts)) if ts else None,
                summary=summary({"tools": tools, "thinking": sum(s.get("thinking") or 0 for s in sub),
-                                "wf_agents": sum(s.get("wf_agents") or 0 for s in sub)}))
+                                "wf_agents": sum(s.get("wf_agents") or 0 for s in sub), "skills": skills}))
     return out
 
 

@@ -96,15 +96,18 @@ export function fmtTokens(n) {
   return String(Math.round(v))
 }
 
-// 4s, 3m12s, 1h05m
+// 4s, 1m12s, 1h3m
 export function fmtDur(s) {
   const v = Math.max(0, Math.floor(Number(s) || 0))
   const h = Math.floor(v / 3600)
   const m = Math.floor((v % 3600) / 60)
-  if (h > 0) return h + 'h' + String(m).padStart(2, '0') + 'm'
-  if (m > 0) return m + 'm' + String(v % 60).padStart(2, '0') + 's'
+  if (h > 0) return h + 'h' + m + 'm'
+  if (m > 0) return m + 'm' + (v % 60) + 's'
   return v + 's'
 }
+
+const numOrNull = (v) => (typeof v === 'number' && isFinite(v) ? v : null)
+const skillList = (v) => (Array.isArray(v) ? v.filter((x) => x != null && x !== '').map(String) : [])
 
 const intentLabel = (intent) => (intent ? String(intent).replace(/_/g, ' ') : '')
 
@@ -151,10 +154,14 @@ function normalize(d) {
     subagents: Array.isArray(d.agents) ? d.agents : Array.isArray(d.subagents) ? d.subagents : [],
     intents: normalizeIntents(d.intents),
     recap: normalizeRecap(d.recap),
+    skills: (Array.isArray(d.skills) ? d.skills : []).filter((x) => x && typeof x === 'object' && x.name)
+      .map((x) => ({ name: String(x.name), count: Number(x.count) || 1 })),
   }
 }
 
-// payload.recap (sent only while the session waits for you / is idle) -> { costliest, slowest, hints }, or null
+// payload.recap (sent only while the session waits for you / is idle) -> { cw, usd, costliest, slowest, hints },
+// or null. A hint is drawn whatever its kind ("session", or "cross_session" from your other sessions): its action,
+// its evidence, and an optional skill name and stub path.
 function normalizeRecap(rc) {
   if (!rc || typeof rc !== 'object') return null
   const intent = (x) => (x && typeof x === 'object' ? {
@@ -162,9 +169,15 @@ function normalizeRecap(rc) {
     usd: typeof x.usd === 'number' ? x.usd : null, pct: typeof x.pct === 'number' ? x.pct : null,
     s: typeof x.s === 'number' ? x.s : null,
   } : null)
-  const hints = (Array.isArray(rc.hints) ? rc.hints : []).filter((h) => h && typeof h === 'object' && h.text)
-    .slice(0, MAX_HINTS).map((h) => ({ text: String(h.text), evidence: h.evidence ? String(h.evidence) : '' }))
-  return { costliest: intent(rc.costliest), slowest: intent(rc.slowest), hints }
+  const hints = (Array.isArray(rc.hints) ? rc.hints : []).filter((h) => h && typeof h === 'object' && (h.action || h.text))
+    .slice(0, MAX_HINTS).map((h) => ({
+      action: String(h.action || h.text),
+      evidence: h.evidence ? String(h.evidence) : '',
+      kind: h.kind ? String(h.kind) : 'session',
+      skill: h.skill ? String(h.skill) : null,
+      stubPath: h.stub_path ? String(h.stub_path) : null,
+    }))
+  return { cw: numOrNull(rc.cw), usd: numOrNull(rc.usd), costliest: intent(rc.costliest), slowest: intent(rc.slowest), hints }
 }
 
 // payload.intents (docs/intents-spec.md) -> { steps, groups, declared }, or null for an older server
@@ -182,6 +195,8 @@ function normalizeIntents(it) {
     summary: x.summary ? String(x.summary) : '',
     tested: x.tested === 'pass' || x.tested === 'fail' ? x.tested : null,
     group: typeof x.group === 'number' ? x.group : null,
+    dur: numOrNull(x.dur_s),
+    skills: skillList(x.skills),
     // the live step's calls (the server sends them for the open step, or the last one while working)
     ops: Array.isArray(x.ops) ? x.ops.filter((o) => o && typeof o === 'object' && !isDeclare(o.tool)).map(normalizeOp) : null,
   }))
@@ -194,6 +209,8 @@ function normalizeIntents(it) {
     cw: Number(g && g.cw) || 0,
     usd: g && typeof g.usd === 'number' ? g.usd : null,
     steps: Number(g && g.steps) || 0,
+    dur: numOrNull(g && g.dur_s),
+    skills: skillList(g && g.skills),
   }))
   // the number shown on a group line (▸2): its place in step order
   ;[...groups].sort((a, b) => a.first - b.first).forEach((g, n) => (g.n = n + 1))
@@ -211,6 +228,8 @@ function normalizeOp(o) {
     target: o.target != null && o.target !== '' ? String(o.target) : null,
     cw: Number(o.cw) || 0,
     err: o.err == null ? null : !!o.err,   // null: running (no result yet)
+    dur: numOrNull(o.dur_s),
+    skill: o.skill ? String(o.skill) : /^skill:./.test(String(o.tool || '')) ? String(o.tool).slice(6) : null,
     test: t ? { ok: !!t.ok, passed: typeof t.passed === 'number' ? t.passed : null, failed: typeof t.failed === 'number' ? t.failed : null } : null,
   }
 }
@@ -221,6 +240,30 @@ function fit(text, width) {
   const s = String(text)
   if (width <= 0) return ''
   return s.length > width ? s.slice(0, Math.max(0, width - 1)) + '…' : s
+}
+
+// Word-wrap `text` into at most `maxLines` lines of `width` chars; only the tail of the last line is cut ("…"), so
+// what leads (a hint's evidence starts with its numbers) is always shown whole. A word longer than a line is cut.
+export function wrapText(text, width, maxLines) {
+  const words = String(text).split(/\s+/).filter(Boolean)
+  if (width <= 0 || maxLines <= 0 || !words.length) return []
+  const lines = []
+  let cur = ''
+  let k = 0
+  for (; k < words.length; k++) {
+    const w = words[k]
+    if (!cur) cur = w.length > width ? fit(w, width) : w
+    else if (cur.length + 1 + w.length <= width) cur += ' ' + w
+    else {
+      lines.push(cur)
+      if (lines.length === maxLines) break
+      cur = w.length > width ? fit(w, width) : w
+    }
+  }
+  if (lines.length < maxLines) return [...lines, cur]
+  // out of lines with words left: the last line takes what fits and ends with "…"
+  lines[maxLines - 1] = fit(lines[maxLines - 1] + ' ' + words.slice(k).join(' '), width)
+  return lines
 }
 
 // Styled segments as Texts, cut to `width` across segments.
@@ -377,6 +420,7 @@ function liveTarget(ev) {
     if (/^python[\d.]*$/.test(prog) && w[1] === '-m' && w[2]) return w[2]
     return ['git', 'npm', 'pnpm', 'yarn', 'cargo', 'go', 'make', 'uv', 'docker'].includes(prog) && w[1] ? prog + ' ' + w[1] : prog
   }
+  if (e && typeof e.skill === 'string') return e.skill
   if (e && typeof e.subagent_type === 'string') return e.subagent_type
   if (e && typeof e.pattern === 'string') return e.pattern.slice(0, 24)
   return null
@@ -621,35 +665,55 @@ function groupExpanded(g, live) {
 
 const groupIsLive = (it, g) => it.steps.some((s) => s.open && s.group === g.idx)
 
-function costText(cw, usd) {
-  return ' · ' + fmtTokens(cw) + (usd != null ? ' · $' + usd.toFixed(2) : '')
+// " · 63k · $0.22 · 1m12s": tokens, $ and (when known) wall time
+function costText(cw, usd, dur) {
+  return ' · ' + fmtTokens(cw) + (usd != null ? ' · $' + usd.toFixed(2) : '') + (dur != null ? ' · ' + fmtDur(dur) : '')
 }
 
-// "[VERIFY] Run store tests · Bash unittest ✓ · 9k · $0.03"; the summary (when `withSummary`: a top-level step
-// has it on its detail line instead) gets what room the rest leaves
+const SKILL_COLOR = 'magentaBright'
+
+// " ✦ pr-review" (" ✦ pr-review +1"): the skills that drove a step or group
+function skillMark(skills) {
+  if (!skills || !skills.length) return null
+  return { text: ' ✦ ' + skills[0] + (skills.length > 1 ? ' +' + (skills.length - 1) : ''), color: SKILL_COLOR }
+}
+
+// The label segment gets what room the fixed parts leave, so a narrow pane cuts the label, never the numbers
+// (the `marks` may give way too). `label` is { text, ...style } without the leading space.
+function fitLabel(fixed, label, marks, tail, width) {
+  const fixedLen = segsLen(fixed) + segsLen(tail)
+  let room = width - fixedLen - segsLen(marks)
+  if (room < 6) (marks = []), (room = width - fixedLen)
+  return [...fixed, { ...label, text: ' ' + fit(label.text, Math.max(1, room - 1)) }, ...marks, ...tail]
+}
+
+// "[VERIFY] Run store tests · Bash unittest ✓ · 9k · $0.03 · 12s"; the summary (when `withSummary`: a top-level
+// step has it on its detail line instead) gets what room the rest leaves
 function stepSegs(s, prefix, width, withSummary) {
   const provisional = s.open && !s.locked
-  const head = [
+  const fixed = [
     { text: prefix, dimColor: true },
     s.open && { text: '▶ ', color: GROUP_COLORS[s.cat], bold: true },
     { text: '[' + s.cat.toUpperCase() + ']', color: GROUP_COLORS[s.cat], bold: true },
-    { text: ' ' + s.label + (provisional ? '…' : ''), dimColor: provisional, bold: s.open && !provisional },
-    s.source === 'declared' && { text: ' ✎', dimColor: true },
   ]
-  const cost = { text: costText(s.cw, s.usd), dimColor: true }
-  const room = width - segsLen(head) - cost.text.length - 3
-  const summary = withSummary && s.summary && room >= 4 && { text: ' · ' + fit(s.summary, room), dimColor: true }
-  return [...head, summary, cost]
+  const marks = [s.source === 'declared' && { text: ' ✎', dimColor: true }, skillMark(s.skills)].filter(Boolean)
+  const cost = { text: costText(s.cw, s.usd, s.dur), dimColor: true }
+  const label = { text: s.label + (provisional ? '…' : ''), dimColor: provisional, bold: s.open && !provisional }
+  // the head already names the skills: the summary does not repeat them
+  const sum = (s.skills.length ? s.summary.split(' · ').filter((p) => !p.startsWith('✦')).join(' · ') : s.summary)
+  const room = width - segsLen(fixed) - segsLen(marks) - (label.text.length + 1) - cost.text.length - 3
+  const summary = withSummary && sum && room >= 4 && { text: ' · ' + fit(sum, room), dimColor: true }
+  return fitLabel(fixed, label, marks, [summary, cost].filter(Boolean), width)
 }
 
-function groupSegs(g, expanded, live) {
-  return [
+function groupSegs(g, expanded, live, width) {
+  const fixed = [
     { text: (expanded ? '▾' : '▸') + g.n + ' ', bold: live, dimColor: !live },
     { text: '[' + g.cat.toUpperCase() + ']', color: GROUP_COLORS[g.cat], bold: true },
-    { text: ' ' + g.label, bold: live },
-    g.source === 'declared' && { text: ' ✎', dimColor: true },
-    { text: ' · ' + g.steps + (g.steps === 1 ? ' step' : ' steps') + costText(g.cw, g.usd), dimColor: true },
   ]
+  const marks = [g.source === 'declared' && { text: ' ✎', dimColor: true }, skillMark(g.skills)].filter(Boolean)
+  const tail = [{ text: ' · ' + g.steps + (g.steps === 1 ? ' step' : ' steps') + costText(g.cw, g.usd, g.dur), dimColor: true }]
+  return fitLabel(fixed, { text: g.label, bold: live }, marks, tail, width)
 }
 
 // The step that is happening now: the open one, or the one the server sent calls for (a test run closes a step
@@ -692,31 +756,52 @@ function detailRow(Box, Text, key, text, width) {
   return line(Box, Text, key, [{ text: DETAIL_PREFIX + text, dimColor: true }], width)
 }
 
-// "▶ Edit store.py · 4k", "✓ unittest 22 passed · 3k", "✗ unittest 1 failed · 3k"
-export function opText(o) {
+// An operation row's label ("unittest 22 passed", "skill:pr-review") and numbers (" · 3k · 4s")
+function opParts(o) {
   const tool = /^Bash ./.test(o.tool) ? o.tool.slice(5) : o.tool
-  const target = o.target && o.target !== tool && !tool.endsWith(' ' + o.target) ? ' ' + o.target : ''
+  const t0 = o.target
+  const target = t0 && t0 !== tool && !tool.endsWith(' ' + t0) && !tool.endsWith(':' + t0) ? ' ' + t0 : ''
   const t = o.test
   const test = !t ? '' : t.failed > 0 ? ' ' + t.failed + ' failed' : t.passed != null ? ' ' + t.passed + ' passed' : ''
-  return tool + target + test + (o.cw > 0 ? ' · ' + fmtTokens(o.cw) : '')
+  const nums = [o.cw > 0 && fmtTokens(o.cw), o.dur != null && fmtDur(o.dur)].filter(Boolean)
+  return { label: tool + target + test, nums: nums.length ? ' · ' + nums.join(' · ') : '' }
 }
 
-function opSegs(o, prefix) {
+// "Edit store.py · 4k · 2s", "unittest 22 passed · 3k · 4s", "skill:pr-review · 2k · 3s"
+export function opText(o) {
+  const p = opParts(o)
+  return p.label + p.nums
+}
+
+// "▶ Edit store.py · 4k · 2s" (running), "✓ …", "✗ …"; a skill is "✦ skill:pr-review · 2k · 3s". The label is cut
+// to fit, never the numbers.
+function opSegs(o, prefix, width) {
   const failed = o.err || (o.test && (!o.test.ok || o.test.failed > 0))
-  const icon = o.err == null ? { text: '▶ ', color: 'green', bold: true } : failed ? { text: '✗ ', color: 'red' } : { text: '✓ ', color: 'green' }
-  return [{ text: prefix, dimColor: true }, icon, { text: opText(o), dimColor: o.err != null, bold: o.err == null }]
+  const icon = failed ? { text: '✗ ', color: 'red' }
+    : o.skill ? { text: '✦ ', color: SKILL_COLOR, bold: o.err == null }
+      : o.err == null ? { text: '▶ ', color: 'green', bold: true } : { text: '✓ ', color: 'green' }
+  const p = opParts(o)
+  const style = { dimColor: o.err != null, bold: o.err == null }
+  const room = width - prefix.length - icon.text.length - p.nums.length
+  if (room < 4) return [{ text: prefix, dimColor: true }, icon, { text: p.label + p.nums, ...style }]
+  return [{ text: prefix, dimColor: true }, icon, { text: fit(p.label, room), ...style }, p.nums && { text: p.nums, dimColor: true }]
 }
 
 // In-process calls the transcript has not caught up with, as running ops of the live step
 function pendingOps(r) {
   if (r.toolCalls == null) return []
   return (local.liveCalls || []).filter((c) => c.calls > r.toolCalls && (r.status === 'working' || fresh(c)) && !isDeclare(c.tool))
-    .map((c) => ({ tool: c.tool === 'Bash' && c.target ? 'Bash ' + c.target : c.tool, target: c.tool === 'Bash' ? null : c.target, cw: 0, err: null, test: null }))
+    .map((c) => ({
+      tool: c.tool === 'Bash' && c.target ? 'Bash ' + c.target : c.tool === 'Skill' ? 'skill:' + (c.target || '?') : c.tool,
+      target: c.tool === 'Bash' || c.tool === 'Skill' ? null : c.target, cw: 0, err: null, test: null,
+      skill: c.tool === 'Skill' ? c.target || '?' : null,
+      dur: c.atMs != null ? Math.max(0, (local.nowMs - c.atMs) / 1000) : null,
+    }))
 }
 
 function opRows(Box, Text, width, s, prefix, extra) {
   const ops = [...(s.ops || []), ...extra].slice(-MAX_OPS)
-  return ops.map((o, j) => line(Box, Text, 'op-' + s.i + '-' + j, opSegs(o, prefix), width))
+  return ops.map((o, j) => line(Box, Text, 'op-' + s.i + '-' + j, opSegs(o, prefix, width), width))
 }
 
 // Groups (collapsed to one line unless expanded) and ungrouped steps, oldest first, as blocks of rows. A block
@@ -745,7 +830,7 @@ function intentBlocks(Box, Text, Button, width, it, $, r) {
     const expanded = groupExpanded(g, live)
     const head = Box({ key: 'group-' + g.first, flexDirection: 'row', children: [Button({
       key: 'group-' + g.first, plain: true, onPress: () => toggleGroup($, g.first),
-      children: texts(Text, groupSegs(g, expanded, live), width),
+      children: texts(Text, groupSegs(g, expanded, live, width), width),
     })] })
     const rows = []
     if (expanded) {
@@ -798,40 +883,70 @@ function toggleGroup($, first) {
 
 const intentView = (r) => view === 'intents' && r.intents && r.intents.steps.length > 0
 
-// "── recap ──": what the work since your last prompt cost and up to 3 hints, while the session waits for you;
-// gone as soon as the agent works again (or a call the transcript has not caught up with is running)
+// The idle recap, a box right under the header while the session waits for you: a bright title bar
+// "━━ DONE · recap · 120k · $0.40 ━━━…" across the pane, the costliest and slowest intents (share / time first),
+// then up to 3 hints, the action first ("➜ Make it a skill") and the evidence dim under it (wrapped onto up to
+// EVIDENCE_LINES lines, the tail cut, never its leading numbers), then a closing rule.
+// Gone entirely as soon as the agent works again (or a call the transcript has not caught up with is running).
+const RECAP_COLOR = 'greenBright'
+const HINT_COLOR = 'yellowBright'
+const EVIDENCE_LINES = 3
+
 function recapRows(Box, Text, width, r) {
   const rc = r.recap
   if (!rc || (r.status !== 'waiting' && r.status !== 'idle') || liveNow(r)) return []
-  const rows = [line(Box, Text, 'recap', [{ text: '── recap ──', dimColor: true }], width)]
-  // "costliest 38% · [CHANGE] <label> · 63k · $0.22": the share (and duration) lead, the label gets what room is left
-  const intentLine = (key, name, lead, x, cost) => {
-    const head = [{ text: name, dimColor: true }, ...lead.flatMap((t) => [{ text: t, bold: true }, { text: ' · ', dimColor: true }]),
-      { text: '[' + x.cat.toUpperCase() + ']', color: GROUP_COLORS[x.cat], bold: true }]
-    const tail = cost ? { text: costText(x.cw, x.usd), dimColor: true } : null
-    const label = { text: ' ' + fit(x.label, width - segsLen(head) - (tail ? tail.text.length : 0) - 1) }
-    return line(Box, Text, key, [...head, label, tail], width)
+  const rule = (key, title) => {
+    const head = title ? '━━ ' + title + ' ' : ''
+    return line(Box, Text, key, [{ text: head + '━'.repeat(Math.max(0, width - head.length)), color: RECAP_COLOR, bold: true }], width)
+  }
+  const total = rc.cw != null ? ' · ' + fmtTokens(rc.cw) + (rc.usd != null ? ' · $' + rc.usd.toFixed(2) : '') : ''
+  const rows = [rule('recap', 'DONE · recap' + total)]
+  // "58%  costliest  [CHANGE] <label> · 63k · $0.22": the share (and time) lead, the label gets what room is left
+  const intentLine = (key, lead, name, x, cost) => {
+    const fixed = [{ text: ' ' }, ...lead.flatMap((t) => [{ text: t, bold: true, color: RECAP_COLOR }, { text: '  ' }]),
+      { text: name, dimColor: true }, { text: '[' + x.cat.toUpperCase() + ']', color: GROUP_COLORS[x.cat], bold: true }]
+    const tail = cost ? [{ text: costText(x.cw, x.usd), dimColor: true }] : []
+    return line(Box, Text, key, fitLabel(fixed, { text: x.label, bold: true }, [], tail, width), width)
   }
   const c = rc.costliest
-  const s = rc.slowest && rc.slowest.s != null ? rc.slowest : null
+  const sl = rc.slowest && rc.slowest.s != null ? rc.slowest : null
   const share = c && c.pct != null ? [c.pct + '%'] : []
-  if (c && s && s.label === c.label && s.cat === c.cat) {
-    rows.push(intentLine('recap-cost', 'costliest & slowest ', [...share, fmtDur(s.s)], c, true))
+  if (c && sl && sl.label === c.label && sl.cat === c.cat) {
+    rows.push(intentLine('recap-cost', [...share, fmtDur(sl.s)], 'costliest & slowest ', c, true))
   } else {
-    if (c) rows.push(intentLine('recap-cost', 'costliest ', share, c, true))
-    if (s) rows.push(intentLine('recap-slow', 'slowest   ', [fmtDur(s.s)], s, false))
+    if (c) rows.push(intentLine('recap-cost', share, 'costliest ', c, true))
+    if (sl) rows.push(intentLine('recap-slow', [fmtDur(sl.s)], 'slowest ', sl, false))
   }
-  rc.hints.forEach((h, i) => rows.push(line(Box, Text, 'recap-hint-' + i, [
-    { text: '💡 ' + h.text, color: 'cyan' },
-    h.evidence && { text: ' · ' + h.evidence, dimColor: true },
-  ], width)))
+  rc.hints.forEach((h, i) => {
+    rows.push(line(Box, Text, 'recap-hint-' + i, [{ text: ' ➜ ', color: HINT_COLOR, bold: true }, { text: h.action, color: HINT_COLOR, bold: true }], width))
+    // a cross-session hint (kind "cross_session": evidence from your other sessions) says so before its evidence
+    const kind = h.kind && h.kind !== 'session' ? h.kind.replace(/_/g, '-') + ': ' : ''
+    wrapText(kind + h.evidence, width - 3, EVIDENCE_LINES).forEach((t, k) =>
+      rows.push(line(Box, Text, 'recap-ev-' + i + '-' + k, [{ text: '   ' + t, dimColor: true }], width)))
+    if (h.skill || h.stubPath) {
+      rows.push(line(Box, Text, 'recap-skill-' + i, [
+        { text: '   ' },
+        h.skill && { text: '✦ ' + h.skill, color: SKILL_COLOR },
+        h.stubPath && { text: (h.skill ? ' · ' : '') + 'stub: ' + h.stubPath, dimColor: true },
+      ], width))
+    }
+  })
+  rows.push(rule('recap-end', ''))
   return rows
+}
+
+// "SKILLS ✦ pr-review ×2 · tdd": skills used in the session (Skill tool and slash-command skills)
+function skillsSegs(skills) {
+  return [{ text: '✦ ', color: SKILL_COLOR }, { text: skills.map((x) => x.name + (x.count > 1 ? ' ×' + x.count : '')).join(' · ') }]
 }
 
 function drawRemote(Box, Text, width, Button, $) {
   const pending = pendingTurns(remote)
   const r = pending.length ? { ...remote, turns: [...remote.turns, ...pending] } : remote
   const top = [header(Box, Text, width, 'tokenscope', r.status, r.elapsed_s != null ? fmtDur(r.elapsed_s) : '')]
+  // the recap goes right under the header, where it is seen without scrolling; the intent list yields rows first
+  const recap = recapRows(Box, Text, width, r)
+  top.push(...recap)
   top.push(row(Box, Text, 'asked', 'ASKED', [
     { text: r.goal || '(no prompt yet)', bold: !!r.goal, dimColor: !r.goal },
     r.goalSource === 'haiku' && { text: ' (haiku)', dimColor: true },
@@ -842,6 +957,7 @@ function drawRemote(Box, Text, width, Button, $) {
   const files = filesText(r)
   if (files) top.push(row(Box, Text, 'files', 'FILES', [{ text: files }], width))
   top.push(row(Box, Text, 'cost', 'COST', costSegs(width, r.cw, r.cost_usd, r.ctx_tokens, r.series), width))
+  if (r.skills.length) top.push(row(Box, Text, 'skills', 'SKILLS', skillsSegs(r.skills), width))
   const intents = intentView(r)
   if (intents) top.push(line(Box, Text, 'flow', [{ text: '── intents ──', dimColor: true }], width))
   else if (r.turns.length) top.push(line(Box, Text, 'flow', [{ text: '── flow ──', dimColor: true }], width))
@@ -858,11 +974,9 @@ function drawRemote(Box, Text, width, Button, $) {
   if (intents && r.intents.declared > 0) {
     bottom.push(line(Box, Text, 'declared', [{ text: '✎ declared ×' + r.intents.declared, dimColor: true }], width))
   }
-  // the recap goes under the list, which yields its older rows first to make room
-  const recap = recapRows(Box, Text, width, r)
-  const budget = Math.max(3, MAX_ROWS - top.length - recap.length - bottom.length)
+  const budget = Math.max(3, MAX_ROWS - top.length - bottom.length)
   const tree = intents ? intentList(Box, Text, Button, width, r.intents, budget, $, r) : flowTree(Box, Text, width, r, budget)
-  return [...top, ...tree, ...recap, ...bottom].slice(0, MAX_ROWS)
+  return [...top, ...tree, ...bottom].slice(0, MAX_ROWS)
 }
 
 function drawLocal(Box, Text, width) {

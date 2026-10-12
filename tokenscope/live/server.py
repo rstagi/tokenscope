@@ -36,12 +36,17 @@ class Live:
     """Tailer + hook events + state behind one lock, plus SSE subscriber queues."""
 
     def __init__(self, root, redact=True, since_minutes=120, haiku=False,
-                 events_path=None, hooks=True, project="*"):
+                 events_path=None, hooks=True, project="*", xhints=False, index_root=None, skills_dirs=()):
         self.lock = threading.Lock()
         self.namer = HaikuNamer(self._named) if haiku else None
         self.step_namer = StepNamer(self._steps_named) if haiku else None   # step labels (docs/intents-spec.md)
         self.state = LiveState(redact=redact, on_goal=self.namer.request if self.namer else None,
                                on_prompt=self._name_prompt if self.namer else None, model_labels=haiku)
+        self.suggester = None
+        if xhints:   # cross-session recap hints (tokenscope/xindex.py): the index builds in the background
+            from ..xindex import Suggester
+            self.suggester = Suggester(index_root or os.environ.get("TOKENSCOPE_INDEX_ROOT") or root, skills_dirs)
+            self.state.xhints = self.suggester
         self.tailer = Tailer(root, since_minutes=since_minutes, project=project)
         self.hooks = HookEvents(events_path) if hooks else None
         self.subscribers = []
@@ -88,6 +93,8 @@ class Live:
                     q.put(m)
 
     def run(self):
+        if self.suggester is not None:
+            threading.Thread(target=self.suggester.run, args=(self.stop,), daemon=True).start()
         while not self.stop.is_set():
             try:
                 self.poll_once()
@@ -240,6 +247,13 @@ def add_arguments(p):
                    help="only watch project dirs matching this glob, e.g. '*myrepo*' (default: all)")
     p.add_argument("--since-minutes", type=int, default=120,
                    help="at startup, track transcripts modified within this many minutes (default 120)")
+    p.add_argument("--index-root", default=None, metavar="DIR",
+                   help="transcripts the cross-session hints compare with (default $TOKENSCOPE_INDEX_ROOT, else "
+                        "the transcripts root)")
+    p.add_argument("--skills-dir", action="append", default=[], metavar="DIR",
+                   help="extra skills dir for 'use skill' hints, besides ~/.claude/skills and <project>/.claude/skills "
+                        "(repeatable)")
+    p.add_argument("--no-xhints", action="store_true", help="no cross-session recap hints (no index is built)")
     return p
 
 
@@ -249,7 +263,8 @@ def main(args=None):
         args = add_arguments(argparse.ArgumentParser(prog="tokenscope live")).parse_args(args)
     ensure_static()
     live = Live(resolve_root(getattr(args, "root", None)), redact=not args.no_redact,
-                since_minutes=args.since_minutes, project=args.project, haiku=args.haiku)
+                since_minutes=args.since_minutes, project=args.project, haiku=args.haiku,
+                xhints=not args.no_xhints, index_root=args.index_root, skills_dirs=args.skills_dir)
     srv = make_server(live, args.host, args.port)
     threading.Thread(target=live.run, daemon=True).start()
     print("tokenscope live: http://%s:%d/  (redaction %s; Ctrl-C to stop)" % (

@@ -20,15 +20,19 @@ Status heuristic (hooks make it exact):
 """
 import os
 import re
+import sys
 import time
+from collections import Counter
 from datetime import datetime
 from urllib.parse import urlparse
 
 from .. import intents, pricing, steps as stepsmod
+from ..xindex import prompt_words
 from ..analyze import est_tokens
 from ..parse import prompt_source, real_prompt_text
 from ..understand import parse_test_output, test_runner
 from ..redact import Redactor
+from ..skills import SkillScanner, tool_skill
 from . import goalname, recap as recapmod
 
 WORKING_S = 90
@@ -322,6 +326,7 @@ class Session:
         self.path = path
         self.project_raw = project_dir   # transcript dir slug until a record's cwd names the project
         self.project_from_cwd = False
+        self.cwd = None                  # the main thread's working directory (project skills: <cwd>/.claude/skills)
         self.started = None
         self.last_ts = None
         self.last_kind = "other"
@@ -349,11 +354,15 @@ class Session:
         self.hook = {"last": (None, 0), "stop_ts": 0, "active_ts": 0, "notify_ts": 0, "end_ts": 0, "open_tools": 0}
         self.prompt_at = []       # main-thread turn count when each prompt (incl. queued) arrived: step boundaries
         self.ctx_at_prompt = []   # context tokens when each prompt arrived (idle recap)
+        self.prompt_words = []    # xindex.prompt_words of each prompt (cross-session matching only; never emitted)
         self.headless = False     # a prompt came from `claude -p` / an SDK program (parse.prompt_source): no next task
         self.compact_at = []      # main-thread turn count at each compaction (idle recap)
-        self.recap_cache = None   # (seq, recap)
+        self.recap_cache = None   # ((steps key, index version), recap)
         self.labeller = stepsmod.Labeller()
         self.intents_cache = None  # (key, payload)
+        self.skills = Counter()   # skill name -> invocations (Skill tool in any thread + slash-command skills)
+        self.skill_scan = SkillScanner()   # main thread: slash-command skills
+        self.slash_skills = []    # {"at": main-thread turn count, "name", "user": typed} per slash-command skill
 
     def next_seq(self):
         self.seq += 1
@@ -371,6 +380,7 @@ class LiveState:
         self.project_names = {}
         self.on_goal = on_goal    # callback(session_id, first prompt text) for optional Haiku naming
         self.new_steps = []       # (session_id, step) emitted since the last drain()
+        self.xhints = None        # cross-session hints: callable(sid, project, cwd, steps, groups, used skills) -> hint
         self.version = 0
 
     # ------------------------------------------------------------ helpers
@@ -467,6 +477,8 @@ class LiveState:
     def _record(self, s, branch, agent_id, r):
         ts = parse_ts(r.get("timestamp"))
         typ = r.get("type")
+        if not agent_id and r.get("cwd") and s.cwd is None:
+            s.cwd = str(r["cwd"])
         if not agent_id and r.get("cwd") and not s.project_from_cwd:
             s.project_raw = os.path.basename(str(r["cwd"]).rstrip("/")) or "?"
             s.project_from_cwd = True
@@ -493,10 +505,22 @@ class LiveState:
                 s.last_kind, s.last_active_ts = "prompt", ts
                 self._new_prompt(s, branch, text.strip(), ts, queued=True, src=prompt_source(r, text))   # a follow-up typed mid-turn
             return
+        if not agent_id and typ in ("user", "assistant"):
+            self._slash_skills(s, r, ts)
         if typ == "assistant":
             self._assistant(s, branch, agent_id, r, ts)
         elif typ == "user":
             self._user(s, branch, agent_id, r, ts)
+
+    def _slash_skills(self, s, r, ts):
+        """Slash-command skills of the main thread (skills.SkillScanner): counted, and a step boundary when typed."""
+        for kind, name in s.skill_scan.feed(r):
+            if kind != "slash":
+                continue
+            s.skills[name] += 1
+            s.slash_skills.append({"at": len(s.main.turn_steps), "name": name, "user": s.skill_scan.typed})
+            if s.skill_scan.typed:
+                s.last_kind, s.last_active_ts = "prompt", ts   # a request: the agent is about to work
 
     def _notifications(self, s, r):
         """<task-notification> for a background agent, in any thread (a subagent's own background children report
@@ -563,6 +587,7 @@ class LiveState:
             p["text"] = step["text"] = text
         s.prompts.append(p)
         s.prompt_at.append(len(s.main.turn_steps))
+        s.prompt_words.append(prompt_words(text))
         s.ctx_at_prompt.append(s.context_tokens)
         self._emit(s, branch, step)
         if s.goal is None:
@@ -748,6 +773,8 @@ class LiveState:
                     "intent": intents.tool_intent(rec),
                     "target": tool_target(name, inp, rec, self.redact), "id": tid, "err": None}
             s.recs[tid] = rec
+            if tool_skill(name, inp):
+                s.skills[tool_skill(name, inp)] += 1
             step["tools"].append(tool)
             s.tools[tid] = (step, tool, branch, ts)
             s.totals["tool_calls"] += 1
@@ -998,6 +1025,7 @@ class LiveState:
                 "agents": [self._agent_row(s, a, None) for a in s.agents.values()],
                 "main_tool_calls": sum(len(t["tools"]) for t in s.main.turn_steps),
                 "intents": self.intents(s, now),
+                "skills": [{"name": n, "count": c} for n, c in sorted(s.skills.items(), key=lambda kv: (-kv[1], kv[0]))],
                 **self._edited(s), **self._recap_key(s, now)}
 
     # ------------------------------------------------------------ idle recap (recap.py)
@@ -1025,15 +1053,37 @@ class LiveState:
 
     def recap(self, s, now=None):
         """The idle recap of the work since the last user prompt (+ a session variant), redaction-aware; None
-        before any work. Cached until the session changes."""
-        if s.recap_cache and s.recap_cache[0] == s.seq:
-            return s.recap_cache[1]
+        before any work. Cached until the session, its step labels (model labels arrive late) or the cross-session
+        index change."""
         steps, gs = self.steps(s, now)
+        key = (s.intents_cache[0], getattr(self.xhints, "version", 0))
+        if s.recap_cache and s.recap_cache[0] == key:
+            return s.recap_cache[1]
         turns, agents, ctx = self.recap_input(s)
         name = (lambda p: self.redactor.path(p)) if self.redact else os.path.basename
         r = recapmod.recap(steps, gs, turns, s.prompt_at, agents, ctx, s.compact_at, name=name, lab=self._lab)
-        s.recap_cache = (s.seq, r)
+        if r and self.xhints is not None:
+            try:
+                h = self.xhints(s.id, s.project_raw, s.cwd, steps, gs, tuple(s.skills),
+                                prompts=list(zip(s.prompt_at, s.prompt_words)))
+            except Exception as e:  # noqa: BLE001 - the recap works without cross-session hints
+                print("tokenscope live: cross-session hint: %r" % (e,), file=sys.stderr)
+                h = None
+            if h:
+                r["hints"] = recapmod.with_cross(r["hints"], self._redact_hint(h))
+        s.recap_cache = (key, r)
         return r
+
+    def _redact_hint(self, h):
+        """A cross-session hint's free text through the session redactor (file names, labels, paths)."""
+        if not self.redact:
+            return h
+        h = dict(h)
+        for k in ("action", "text", "evidence", "estimate", "seq", "stub_path"):
+            if h.get(k):
+                h[k] = self._lab(h[k])
+        h["matches"] = [dict(m, label=self._lab(m.get("label") or "")) for m in h.get("matches") or ()]
+        return h
 
     # ------------------------------------------------------------ steps and intent groups (docs/intents-spec.md)
     @staticmethod
@@ -1068,11 +1118,13 @@ class LiveState:
                                    "text": t.get("_text", "")}
             subs = [by_tool[x["id"]] for x in t["tools"] if x.get("id") in by_tool]
             wfs = [a for x in t["tools"] for a in by_wf.get(x.get("id"), ())]
-            seg.update(cw=t.get("cw") or 0, usd=t.get("usd") or 0, test=t.get("_test"),
+            ends = [x["ts"] + x["dur_ms"] / 1000.0 for x in t["tools"] if x.get("ts") and x.get("dur_ms") is not None]
+            seg.update(ts_end=max(ends) if ends else None, cw=t.get("cw") or 0, usd=t.get("usd") or 0, test=t.get("_test"),
                        sub_cw=sum(a["cw"] for a in subs + wfs), sub_usd=sum(a["usd"] for a in subs + wfs),
                        wf_agents=len(wfs))
             turns.append(seg)
-        return turns, [{"kind": "prompt", "at": k} for k in s.prompt_at]
+        events = [{"kind": "prompt", "at": k} for k in s.prompt_at]
+        return turns, events + [dict(e, kind="skill") for e in s.slash_skills]
 
     def steps(self, s, now=None, final=False):
         """Labelled steps + groups of the main thread. The last step stays open while the session works."""
@@ -1115,9 +1167,10 @@ class LiveState:
         return self.redactor.string(text) if self.redact and text else text
 
     @staticmethod
-    def _ops(s, step, last_n=12):
+    def _ops(s, step, now, working, last_n=12):
         """The live step's calls, newest last (at most `last_n`): tool label, target (both redaction-aware, as in
-        "now"), CW (the turn's, split over its calls), err (None while running) and the test outcome of a run.
+        "now"), CW (the turn's, split over its calls), err (None while running), the test outcome of a run, and
+        dur_s: tool_use to tool_result, or for a running call (while the session works) the time since it started.
         declare_intent calls are the label source, not work: never an op, their CW share goes to the turn's other
         calls."""
         out = []
@@ -1131,7 +1184,13 @@ class LiveState:
                 if x not in tools or (lo is not None and j < lo) or (hi is not None and j > hi):
                     continue
                 op = {"tool": x["label"], "target": x.get("target"), "cw": round((t.get("cw") or 0) / len(tools), 1),
-                      "err": x.get("err")}
+                      "err": x.get("err"), "dur_s": None}
+                if x.get("dur_ms") is not None:
+                    op["dur_s"] = round(x["dur_ms"] / 1000.0, 1)
+                elif x.get("err") is None and working and x.get("ts"):
+                    op["dur_s"] = round(max(0.0, now - x["ts"]), 1)
+                if tool_skill(x["name"], {"skill": x.get("target")}):
+                    op["skill"] = x.get("target")
                 if x.get("test"):
                     op["test"] = x["test"]
                 out.append(op)
@@ -1139,10 +1198,21 @@ class LiveState:
 
     def intents(self, s, now=None, last_n=40):
         """The compact payload's "intents" key."""
+        now = self.clock() if now is None else now
         steps, gs = self.steps(s, now)
+        working = self.status(s, now) == "working"
         # the live step, with its calls: the open one, or the last while the session works (a test run closes a
         # step before the next turn opens one)
-        live = steps[-1] if steps and (not steps[-1]["closed"] or self.status(s, now) == "working") else None
+        live = steps[-1] if steps and (not steps[-1]["closed"] or working) else None
+
+        def dur(ts0, ts1, ticking):
+            """Wall time first to last event (a skill-only step: to the end of the work it drove, steps.skill_spans);
+            the live step, its group and a skill step driving it tick up to now while the session works."""
+            return stepsmod.duration(ts0, now if ticking and ts0 else ts1)
+
+        def drives(x):
+            """x is the live step, or a skill step whose driven span (steps.skill_spans) reaches it."""
+            return live is not None and (x is live or x["i"] <= live["i"] <= x.get("drive_last", -1))
         gi = {}
         for n, g in enumerate(gs):
             for i in range(g["first"], g["last"] + 1):
@@ -1151,13 +1221,18 @@ class LiveState:
         return {"steps": [{"i": x["i"], "cat": x["cat"], "label": self._lab(x["label"]), "source": x["source"],
                            "locked": x["locked"], "open": not x["closed"], "cw": x["cw"], "usd": x["usd"],
                            "turns": x["turns"], "summary": self._summary(x), "tested": x["tested"],
-                           "group": gi.get(x["i"]),
-                           **({"ops": self._ops(s, x)} if x is live else {})} for x in steps[-last_n:]],
+                           "group": gi.get(x["i"]), "skills": x["skills"],
+                           "dur_s": dur(x["ts0"], x.get("drive_ts1") or x["ts1"], working and drives(x)),
+                           **({"ops": self._ops(s, x, now, working)} if x is live else {})} for x in steps[-last_n:]],
                 "groups": [{"label": self._lab(g["label"]), "source": g["source"], "first": g["first"],
                             "last": g["last"], "cat": g["cat"], "cw": g["cw"], "usd": g["usd"], "steps": g["steps"],
+                            "skills": g["skills"],
+                            "dur_s": dur(g["ts0"], g["ts1"], working and any(
+                                drives(x) for x in steps[g["first"]:g["last"] + 1])),
                             "summary": self._lab(g["summary"]) if not self.redact else
-                            self._summary({"tools": self._group_tools(steps, g), "thinking": 0, "wf_agents": sum(
-                                x.get("wf_agents") or 0 for x in steps[g["first"]:g["last"] + 1])})} for g in gs],
+                            self._summary({"tools": self._group_tools(steps, g), "thinking": 0, "skills": g["skills"],
+                                           "wf_agents": sum(x.get("wf_agents") or 0
+                                                            for x in steps[g["first"]:g["last"] + 1])})} for g in gs],
                 "declared": {"calls": len(decl), "steps": sum(1 for x in steps if x["declared"])},
                 "labeller": dict(s.labeller.stats, pending=len(s.labeller.pending(steps)))}
 

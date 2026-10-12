@@ -56,11 +56,20 @@ COST   ⣀⣤⣶⣿ 182k CW · $0.41 · ctx ▕███░░░░░░░▏
   yellow, research cyan, wait gray, plan bright magenta, other gray
 - **subagents** launched by a phase are sub-branches under it (`├─↳ Explore · 6 turns · done`).
   Agents in `agents` that no turn claims are listed at the bottom
-- **recap** (only while the session waits for you or is idle, from the server's `recap`):
-  `── recap ──`, then `costliest [CAT] <label> · CW · $ · N%` and `slowest [CAT] <label> · 4m12s`
-  for the work since your last prompt, and up to 3 cyan hints `💡 <what to do> · <evidence>`
-  (only when the server found evidence; often none). It sits under the intent list, which
-  folds its older rows first to make room, and disappears as soon as the agent works again
+- **times**: every operation, step and group line ends with its wall time after tokens / $
+  (`✓ unittest 22 passed · 3k · 4s`, `[CHANGE] Add X · 63k · $0.22 · 1m12s`, `1h3m`); the live
+  step, its group and a running call tick. A narrow pane cuts the label, never the numbers
+- **skills** (magenta `✦`): Skill-tool calls are `✦ skill:pr-review · 2k · 3s` rows; a step or
+  group a skill drove has ` ✦ pr-review` after its label; `SKILLS ✦ pr-review ×2 · tdd` lists
+  the session's skills (Skill tool and slash-command skills)
+- **recap** (only while the session waits for you or is idle, from the server's `recap`): a box
+  right under the header, `━━ DONE · recap · 120k · $0.40 ━━━…` in bold bright green across the
+  pane, then ` 58%  costliest [CAT] <label> · CW · $` and ` 4m12s  slowest [CAT] <label>` for the
+  work since your last prompt, then up to 3 hints: `➜ <action>` bold, the evidence dim under it
+  (numbers first: `≈34k/run saving · done 4× in 4 sessions · ≈95k CW each · …`, wrapped onto up to
+  3 lines, only the tail cut), and `✦ <skill> · stub: <path>` when the hint names them (only when the server
+  found evidence; often none), then a closing rule. The intent list gives up rows first to make
+  room; the box is removed entirely as soon as the agent works again
 - **warnings** are rare and come only from the server's `warnings`: one yellow line each,
   `⚠ <text> — <hint>`. A warning rule that appears after the first payload also raises one
   toast. A session without warnings shows no `⚠` anywhere

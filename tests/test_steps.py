@@ -116,7 +116,7 @@ class Segment(unittest.TestCase):
     def test_bash_program(self):
         self.assertEqual(sp.display_name("Bash", {"command": "cd x && git status"}), "Bash git status")
         self.assertEqual(sp.display_name("Bash", {"command": "h=$(git rev-parse HEAD) && echo $h"}), "Bash git rev-parse")
-        self.assertEqual(sp.display_name("Skill", {"skill": "pr-review"}), "Skill pr-review")
+        self.assertEqual(sp.display_name("Skill", {"skill": "pr-review"}), "✦ pr-review")
         self.assertEqual(sp.display_name("Bash", {"command": "FOO=1 python3 -m pytest -q"}), "Bash pytest")
 
     def test_program_skips_shell_syntax(self):
@@ -249,6 +249,31 @@ class Labels(unittest.TestCase):
                                ("overhead", "Load deferred tools", "rule", True)])
         self.assertNotIn(0, [x["i"] for x in lab.pending(s)])
         self.assertEqual([x["i"] for x in lab.pending(s)], [1, 3])
+
+    def test_skill_only_step_has_rule_label_and_keeps_category(self):
+        sk = lambda n: ("Skill", {"skill": n})
+        turns = [T(read("a.py")), T(sk("tdd")), T(edit("a.py")), T(sk("pr-review"), sk("docs")), T(bash("ls")),
+                 T(edit("b.py"), sk("lint"))]
+        lab = sp.Labeller()   # model labels on: the skill-only steps must not wait for one
+        s = sp.segment(turns, open_last=False)
+        lab.assign(s)
+        got = {x["label"]: (x["source"], x["locked"]) for x in s if x["skills"]}
+        self.assertEqual(got.get("Use skill tdd"), ("rule", True))
+        self.assertEqual(got.get("Use skills pr-review, docs"), ("rule", True))
+        mixed = next(x for x in s if "lint" in x["skills"])
+        self.assertIsNone(sp.skill_label(mixed))
+        for x in s:
+            if x["skills"] and sp.skill_label(x):
+                self.assertNotEqual(x["cat"], "overhead")
+                self.assertNotIn(x["i"], [y["i"] for y in lab.pending(s)])
+
+    def test_slash_skill_only_step_has_rule_label(self):
+        step = {"tools": {"TodoWrite": 1}, "skills": ["tdd"], "cat": "other"}
+        self.assertEqual(sp.label_from_signals(step), ("Use skill tdd", "rule"))
+        self.assertEqual(sp.label_from_signals({"tools": {"✦ tdd": 1}, "skills": ["tdd"]}),
+                         ("Use skill tdd", "rule"))
+        self.assertIsNone(sp.skill_label({"tools": {"✦ tdd": 1, "Read": 2}, "skills": ["tdd"]}))
+        self.assertIsNone(sp.skill_label({"tools": {"Read": 2}, "skills": []}))
 
     def test_toolsearch_in_mixed_turn_is_its_own_step(self):
         ts = ("ToolSearch", {"query": "select:mcp__tokenscope-intents__declare_intent"})

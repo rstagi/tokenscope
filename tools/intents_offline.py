@@ -7,7 +7,8 @@ expensive sessions first. Steps left without a model label lock their rule label
 
     python3 tools/intents_offline.py [--root DIR] [--out FILE] [--max-haiku-calls 80] [--batch 25] [--jobs N]
 
-Output: {session_id: {"steps": [...], "groups": [...], "totals_by_cat": {cat: {"cw", "usd", "steps"}}}}.
+Output: {session_id: {"steps": [...], "groups": [...], "skills": [{"name", "count"}], "totals_by_cat": {cat: {"cw",
+"usd", "steps"}}}}; steps and groups carry `dur_s` (wall time, first to last event) and `skills`.
 """
 import argparse
 import glob
@@ -25,8 +26,8 @@ os.environ.setdefault("TOKENSCOPE_CACHE_DIR", os.path.expanduser("~/.cache/token
 from tokenscope import stepnames, steps as sp  # noqa: E402
 from tokenscope.live.replay import replay  # noqa: E402
 
-STEP_KEYS = ("i", "cat", "label", "source", "cw", "usd", "turns", "ts0", "ts1", "tested", "prompt_before",
-             "turn_first", "turn_last")
+STEP_KEYS = ("i", "cat", "label", "source", "cw", "usd", "turns", "ts0", "ts1", "dur_s", "tested", "prompt_before",
+             "turn_first", "turn_last", "skills")
 
 
 def main_transcripts(root):
@@ -34,7 +35,8 @@ def main_transcripts(root):
 
 
 def replay_one(path):
-    """(session id, goal name, closed steps, declare_intent calls) of one transcript; None if it has no turns."""
+    """(session id, goal name, closed steps, declare_intent calls, skills {name: invocations}) of one transcript;
+    None if it has no turns."""
     try:
         state, s = replay(path, redact=False, model_labels=True)
     except Exception as e:  # noqa: BLE001 - one bad transcript must not stop the run
@@ -45,7 +47,7 @@ def replay_one(path):
     turns, events = state.segment_input(s)
     steps = sp.segment(turns, events, open_last=False)
     decl = sum(1 for t in s.main.turn_steps for x in t.get("_raw") or () if sp.is_declare(x["name"]))
-    return s.id, (s.goal or {}).get("name"), steps, decl
+    return s.id, (s.goal or {}).get("name"), steps, decl, dict(s.skills)
 
 
 def plan_batches(sessions, max_calls, batch):
@@ -72,6 +74,11 @@ def totals_by_cat(steps):
             for k, v in sorted(out.items(), key=lambda kv: -kv[1]["cw"])}
 
 
+def skills_rows(skills):
+    """[{"name", "count"}], most used first (the shape of the live /compact `skills`)."""
+    return [{"name": n, "count": c} for n, c in sorted((skills or {}).items(), key=lambda kv: (-kv[1], kv[0]))]
+
+
 def step_row(x, group):
     row = {k: x.get(k) for k in STEP_KEYS}
     row.update(summary=sp.summary(x), group=group, usd=round(x["usd"], 4))
@@ -96,10 +103,10 @@ def main(argv=None):
     t_replay = time.time() - t0
 
     sess = {}
-    for sid, goal, steps, decl in replays:
+    for sid, goal, steps, decl, skills in replays:
         lab = sp.Labeller()
         lab.assign(steps)
-        sess[sid] = {"goal": goal, "steps": steps, "lab": lab, "decl": decl, "cw": sum(x["cw"] for x in steps),
+        sess[sid] = {"goal": goal, "steps": steps, "lab": lab, "decl": decl, "skills": skills, "cw": sum(x["cw"] for x in steps),
                      "pending": lab.pending(steps)}
     need = {sid for sid, v in sess.items() if v["pending"]}
     plan = plan_batches(sess, a.max_haiku_calls, a.batch)
@@ -127,10 +134,10 @@ def main(argv=None):
             got = sum(1 for x in v["pending"] if x["source"] == "haiku")
             full += got == len(v["pending"])
             part += 0 < got < len(v["pending"])
-        out[sid] = {"goal": v["goal"], "declared_calls": v["decl"],
+        out[sid] = {"goal": v["goal"], "declared_calls": v["decl"], "skills": skills_rows(v["skills"]),
                     "steps": [step_row(x, gi.get(x["i"])) for x in v["steps"]],
                     "groups": [{k: g[k] for k in ("label", "source", "first", "last", "cat", "cw", "usd", "steps",
-                                                  "summary")} for g in gs],
+                                                  "dur_s", "skills", "summary")} for g in gs],
                     "totals_by_cat": totals_by_cat(v["steps"])}
     with open(a.out, "w", encoding="utf-8") as f:
         json.dump(out, f, separators=(",", ":"))

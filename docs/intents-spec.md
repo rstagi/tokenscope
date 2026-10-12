@@ -18,7 +18,7 @@ Input: the main thread's turns in order (a turn = one assistant API message; see
 A new step starts at turn t when any of:
 1. category change: t's group differs from the open step's group;
 2. the previous turn contained a test run (`understand.test_runner`) -> the step closes after it;
-3. a user prompt (incl. queued follow-up) arrived before t;
+3. a user prompt (incl. queued follow-up) or a slash-command skill the user typed (see 8) arrived before t;
 4. t launches a subagent (Agent/Task): it starts its own DELEGATE step (subagent cost is added to that step);
    the agents a Workflow call launches add their cost to the step of the turn that made the call (see 5);
 5. a TodoWrite in the previous turn moved an item to in_progress or completed;
@@ -99,8 +99,18 @@ tokens / cost from the CLI's JSON output.
 
 ## 5. Costs and summaries
 
-Per step: CW, $, turns, duration, compact summary "Read ×6 · Grep ×2 · Skill pr-review · 1 thinking",
-test outcome when it ran tests, files. Per group: sums. Per category: sums.
+Per step: CW, $, turns, duration, compact summary "✦ pr-review · Read ×6 · Grep ×2 · 1 thinking" (the step's
+skills first, see 8), test outcome when it ran tests, files, `skills`. Per group: sums, `skills`. Per category: sums.
+
+Wall time (`dur_s`, seconds): a step runs from its first call to its last event, i.e. the latest of its turns'
+timestamps and their calls' tool results (`ts_end` of a segment turn). A step that only loads a skill ("Use skill
+tdd": its Skill call returns at once) instead runs from the skill load to the end of the work the skill drove: the
+following steps up to the next user prompt or the next step that loads a skill (`steps.skill_spans`). A group runs
+from its first step's start to the latest end of its steps (a skill step's driven end included, so a group is never
+shorter than a step in it). Live, the live step, the group holding it and a skill step driving it tick up to now
+while the session works. An operation
+runs from its tool_use to its tool_result; a running one (no result yet, session working) shows the time since it
+started. The pane formats them compactly: 4s, 1m12s, 1h3m.
 
 A step's CW and $ include the subagents its turns launched (Agent/Task, matched by the agent's meta `toolUseId`)
 and the agents of the workflows its turns launched. Workflow agents live under
@@ -116,10 +126,12 @@ no step, so the step total is a little below the session CW.
 Every intent line (a collapsed group or a top-level step) has one dim detail line under it: a group's step labels
 ("↳ Read store.py · Edit models.py ×2 · Run tests ✓", equal neighbours folded, cut with "+N"), a step's tools
 summary. The live step (the open one, or the last one while the session works) carries `ops` in the payload: its
-last 12 calls, `{"tool", "target", "cw" (the turn's CW split over its calls), "err" (null while running), "test"
-({"ok","passed","failed"}, test runs only)}`, tool / target redaction-aware as in "now". The pane draws one row per
-call ("▶ Edit store.py · 4k", "✓ unittest 22 passed · 3k") plus the in-process calls the transcript has not caught
-up with. Short of rows: older expanded groups collapse, then the oldest intents lose their detail lines, then fold
+last 12 calls, `{"tool", "target", "cw" (the turn's CW split over its calls), "err" (null while running), "dur_s",
+"test" ({"ok","passed","failed"}, test runs only), "skill" (Skill calls only)}`, tool / target redaction-aware as in
+"now". Steps and groups carry `dur_s` and `skills`. The pane draws one row per call ("▶ Edit store.py · 4k · 2s",
+"✓ unittest 22 passed · 3k · 4s", "✦ skill:pr-review · 2k · 3s") plus the in-process calls the transcript has not
+caught up with (their elapsed time from the mod's own clock); step / group lines end with "· CW · $ · 1m12s". The
+label is cut to fit, never the numbers. Short of rows: older expanded groups collapse, then the oldest intents lose their detail lines, then fold
 into "… N earlier"; the live intent always stays.
 
 ## 7. Idle recap
@@ -138,6 +150,91 @@ took the context past 85% of the window, near autocompaction; never in headless 
 reads of the extra context over the session's median turns per request), shared_reads (>= 2 files, not images /
 PDFs / binaries, each read in full by >= 3 and >= 20% of the request's subagents, duplicate reads >= 100k CW, sized by the read results themselves: chars/4 x (1.25 cache write + 0.1 per later turn of that subagent)), polling (>= 5 wake-ups in a row that only waited), outlier (an intent >= 8× the session's median intent
 and >= 200k CW, >= 70% of its calls reads / searches). File names and labels go through the session redactor. The
-pane draws a `── recap ──` section under the intent list (which yields its older rows first) and drops it as soon as
-the agent works again. `tools/eval_hints.py` replays real transcripts and reports per rule how often each fires at
+pane draws it as a boxed section right under the header, above the intent list (which yields its rows first): a bright
+full-width title bar `━━ DONE · recap · 120k · $0.40 ━━━`, the costliest / slowest lines with the share / time first,
+then each hint as `➜ <action>` with its evidence dim on the line under it (and `✦ <skill> · stub: <path>` when the
+hint names them), then a closing rule. It is removed entirely as soon as the agent works again (a new prompt, or a
+call seen in-process). A hint also carries `action` (= `text`) and `kind` ("session", or "cross_session", section 9); the pane draws any kind (a
+cross-session one shows `cross-session:` before its evidence) with optional `skill` and `stub_path`. `tools/eval_hints.py` replays real transcripts and reports per rule how often each fires at
 idle points.
+
+## 8. Skills
+
+Two kinds of invocation (`tokenscope/skills.py`, `SkillScanner` over a thread's records in order):
+- the Skill tool: a tool_use named `Skill` (input `skill`, else `name` / `command`). The skill's body then arrives as
+  a meta user message "Base directory for this skill: ..." with `sourceToolUseID`; it is not counted again.
+- a slash-command skill: a user message with `<command-name>/foo</command-name>` that is a skill, not a built-in
+  (/model, /compact ...): it says `<skill-format>true</skill-format>`, or the next user message is a meta one starting
+  with "Base directory for this skill:" and no `sourceToolUseID` (name = the command, else the directory's name).
+A Skill call tags its turn's step; a slash-command skill tags the step of the next turn and, when typed (not a meta
+message), is a step boundary like a prompt (rule 3) and counts as activity for the status. Steps and groups carry
+`skills: [name]`; summaries lead with "✦ <name>"; the live compact payload has `skills: [{"name", "count"}]` (all
+threads, most used first) and the offline output (`tools/intents_offline.py`) the same per session.
+`tools/skills_stats.py [--root DIR]` counts invocations per skill (both kinds, main and subagent transcripts).
+
+## 9. Cross-session suggestions
+
+`tokenscope/xindex.py`; recap hints that know about your other sessions. Deterministic, no model calls.
+
+Index. Every main transcript under the index root (`--index-root` on `tokenscope live` / the tools, else
+`$TOKENSCOPE_INDEX_ROOT`, else ~/.claude/projects) is replayed through the live state, segmented (section 1) and
+labelled without a model (rule / todo / subagent / declared labels), and cut into requests (a user prompt up to the
+next one). Each request, and each group of >= 2 steps in it, becomes a record with a workflow signature: label
+words (lowercase, light stemming; stopwords, the rule labels' generic words, identifiers, file names and numbers
+dropped; a rule label contributes no words, its targets are compared as files / tools; an OVERHEAD label none),
+the category sequence (repeats folded), the tool multiset (display names: Read, Edit, "Bash unittest", "Bash git
+status"), file types, file basenames (only names that look like files: an extension, a dotfile or a known bare name
+such as Makefile; directories, devices such as /dev/null and `*.output` task captures dropped), skills used,
+CW, $, wall time and CW per category, plus its steps (category, label, files, commands, test runner, CW). Records
+are cached per transcript in `<cache dir>/xindex/<hash of root>.json` keyed by path + size + mtime of the transcript
+(+ count and size of its subagent transcripts); a rebuild replays only new or changed transcripts (a few hundred
+sessions load from the cache in well under a second), and label words are recomputed on load. A request's words
+come mainly from the user prompt that started it (fenced code, `backticked` identifiers, paths, file names and
+numbers stripped; stored as cleaned words, never shown) plus its steps' own labels; a skill-only step ("Use skill
+tdd") gives no words, no category and never names the request.
+
+Matching. The finished request (and its groups) against records of the same level from OTHER sessions (never the
+current one): similarity = 0.4 × label-word Jaccard + 0.3 × category-sequence similarity (difflib ratio) + 0.3 ×
+tool / file overlap (0.4 tool-multiset weighted Jaccard + 0.1 file-type Jaccard + 0.5 file overlap); when neither
+side has label words the score is the other two parts renormalised. Two requests with prompt words on both sides
+use the prompt words' Dice coefficient and 0.5 / 0.15 / 0.35 weights (the prompt says what the task is, the step
+shape only how it was done: a /tdd run cycles test / edit where a plain run edits once), anchor Dice >= 0.5. File overlap is idf-weighted (a file most
+requests touch, README.md, weighs little) and divided by the smaller set. A match needs score >= 0.55 and an anchor:
+label-word Jaccard >= 0.34, or >= 2 shared files with overlap >= 0.5. A hint needs >= 3 prior matches in >= 2
+distinct sessions, each >= 50k CW, the current request / group >= 50k CW, and an estimated saving >= 15k CW.
+
+Saving (an estimate, labelled so): the workflow's file map = files touched by >= half of the runs (>= 2); per prior
+run, the CW of its investigate steps on those files (re-discovering what a skill with the file map and the steps
+would give up front); the median over the runs. Never the whole run's cost.
+
+Outcomes, at most one per recap (the best candidate by saving; ranked with the session hints by `cw_at_stake` and
+always kept, replacing the weakest session hint when 3 are already there):
+- `skill_filemap`: a skill this request used ran in >= half of the matching runs too: `➜ Add a file map to skill
+  /<name> (<files>)`, evidence "≈Y/run saving · /<name> in N of M runs, K sessions · ≈X CW each · they re-read the
+  same files ...".
+- `existing_skill`: a SKILL.md (frontmatter name / description + first lines; from ~/.claude/skills,
+  <project>/.claude/skills and each `--skills-dir`) this session did not use shares >= 3 words with the workflow
+  (label words, file stems, programs; shell utilities ignored), >= 30% of the smaller word set and a word of its name:
+  `➜ Use skill /<name> for this`, evidence `≈Y/run saving · done N× without it in K sessions · ≈X CW each · you have
+  skill <name> ("<description>") that covers this (estimate)`.
+- `repeat`: otherwise `➜ Make "<name>" a skill` (name = the task verb and first-clause words of the current prompt
+  that most runs' prompts share, project-name words dropped, plus the tests / README / CHANGELOG most runs edited:
+  "Add CLI subcommand with tests, README and CHANGELOG"; else shared label words, else "change <top edited files> and
+  test"; the only prompt-derived text the pane shows), evidence `≈Y/run saving · done N× in K sessions · ≈X CW each · <steps> (estimate)`, the
+  steps being the request's reads / edits on the file map and its test runs ("read cli.py → edit cli.py, README.md →
+  run unittest"). A SKILL.md draft (frontmatter, steps, file map with counts, commands, one run's step labels) is
+  written to `<cache dir>/skill-drafts/<slug>/SKILL.md` (slug: whole words up to 40 characters), never into a skills
+  directory; its path is `stub_path`, shown as `~/...` under home, else `<cache>/skill-drafts/<slug>/SKILL.md` (never
+  an absolute machine path). Its "## Steps" are the ordered steps the matched runs share (`common_steps`: the phase
+  sequence of the run agreeing most with the others, each phase and target kept when >= half the runs have it):
+  "1. read cli.py, models.py, store.py 2. edit cli.py + tests 3. update README.md, CHANGELOG.md 4. run unittest".
+  Evidence always leads with the numbers; the pane wraps it onto up to 3 dim lines and cuts only the tail.
+Hint fields: `rule`, `kind: "cross_session"`, `action` (= `text`), `evidence`, `est_saving_cw` (= `cw_at_stake`),
+`estimate`, `skill` (existing skill or null), `stub_path` (or null), `matches` ([{sid prefix, level, label, cw,
+score}]), `seq`. Live: the server builds the index in a background thread (refreshed every 10 min; `--no-xhints`
+disables it); text fields go through the session redactor.
+
+`tools/eval_xhints.py --root DIR [--skills-dir DIR ...] [--out FILE]`: chronological leave-future-out replay: for
+each session (in start order) each finished request is an idle point evaluated against the sessions that started
+earlier only. Prints firing rates per outcome (idle points, sessions) and the index build / rebuild timing; writes up
+to 20 random firings with their evidence and the matched prior requests' step labels to --out.
