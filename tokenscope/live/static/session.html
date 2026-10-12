@@ -22,14 +22,13 @@
 <main>
   <div id="notfound" class="empty" style="display:none"></div>
   <div id="body">
-    <section class="card fmapc"><div class="fm-head"><b>Flow map</b><span class="sub">goal → phases → tools · arrow width ∝ CW · subagents branch below</span><span id="fm-meta" class="sub" style="margin-left:auto"></span></div>
-      <svg id="fmap" class="fmap" xmlns="http://www.w3.org/2000/svg"></svg></section>
-    <div class="tools"><span class="sub">Flow — consecutive turns of the same phase are collapsed; click to expand.</span>
-      <label class="toggle"><input type="checkbox" id="follow" checked> follow</label></div>
-    <div id="s-empty" class="empty" style="display:none">Nothing happened in this session yet.</div>
-    <div id="timeline" class="timeline"></div>
+    <section id="recap" class="recap" style="display:none"></section>
+    <section class="card hrows" id="h-rows"></section>
+    <div class="tools"><span><b class="sect">Intents</b> <span id="i-meta" class="sub"></span></span>
+      <span class="sub">click a card to expand · <button class="more" id="i-expand">expand all</button> · <button class="more" id="i-collapse">collapse all</button></span></div>
+    <div id="intents" class="intents"></div>
+    <section id="agents" class="card agents" style="display:none"><b class="sect">Subagents</b><div id="agents-list"></div></section>
   </div>
 </main>
-<button id="jump" class="jump">↓ new steps</button>
 <script src="/static/live.js"></script>
 </body></html>

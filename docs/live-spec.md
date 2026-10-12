@@ -132,7 +132,8 @@ ThreadingHTTPServer bound to 127.0.0.1 by default. Background thread runs the ta
 - `GET /api/board` -> {"now", "redacted": bool, "sessions":[{"id","short","project","goal","status",
   "current_intent","current_group","last_step":{"label","ts","err"},"started","last_ts","elapsed_s","cw","usd",
   "turns","tool_calls","errors","agents_running","agents_total","context_tokens","flags":[{"flag","count"}],"warnings":[...],
-  "intent_mix":[[group,cw],...]}]} sorted by last_ts desc; sessions idle for more than 6 h dropped.
+  "intent_mix":[[group,cw],...],"intent":{"label","cat","open"} or null (the last intent step's group, else the
+  step, labelled as in the pane),"skills":[names]}]} sorted by last_ts desc; sessions idle for more than 6 h dropped.
 - `GET /api/session/<id>` -> full session model (as above, steps of main + agents), plus "seq" (max).
 - `GET /api/session/<id>?since=<seq>` -> only steps with seq > since (+ totals, status, flags, agents summary).
 - `GET /api/session/<id>/compact` -> small payload for the Claude Code mod: {"goal","status","cw","usd","elapsed_s","turns","tool_calls","errors","cw_series" (CW per main turn, last 120),
@@ -146,7 +147,8 @@ ThreadingHTTPServer bound to 127.0.0.1 by default. Background thread runs the ta
   "recent":[last 60 main turn steps as {"intent","group","label","cw","tools":["label",...],"targets":[...],
   "tool_err","agents","err"}], "agents":[{"type","status","turns"}], "skills":[{"name","count"}] (Skill tool + slash-command skills, see
   docs/intents-spec.md section 8), "intents" (steps / groups with `dur_s` and `skills`, see docs/intents-spec.md),
-  "recap" (only while waiting / idle)}.
+  "recap" (only while waiting / idle)}. `?ops=all`: every intent step carries its `ops` (calls), not only the live
+  one (the session page shows them when an older step is expanded).
 - `GET /events` -> Server-Sent Events: `event: board` every 1 s when anything changed (same JSON as /api/board),
   and `event: step` {"session","step"} for every new step (so a live view can append without polling).
   Heartbeat comment every 15 s.

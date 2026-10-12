@@ -6,7 +6,8 @@ Endpoints (see docs/live-spec.md):
   GET /static/<file>             files from tokenscope/live/static/
   GET /api/board                 all sessions (sorted by last activity; idle > 6 h dropped)
   GET /api/session/<id>          full session model (+ "seq"); ?since=<seq> -> only new / updated steps
-  GET /api/session/<id>/compact  small payload for a Claude Code mod
+  GET /api/session/<id>/compact  small payload for a Claude Code mod (and the session page: ?ops=all -> every
+                                 intent step with its calls)
   GET /events                    SSE: `board` (1 s, when changed), `step` per new step, heartbeat every 15 s
 """
 import argparse
@@ -162,7 +163,8 @@ class Handler(BaseHTTPRequestHandler):
                 if len(parts) == 4:
                     if parts[3] != "compact":
                         return self._json({"error": "not found"}, 404)
-                    return self._json(st.session_compact(s))
+                    ops = parse_qs(u.query).get("ops") == ["all"]   # every step's calls, not only the live one
+                    return self._json(st.session_compact(s, all_ops=ops))
                 since = parse_qs(u.query).get("since")
                 if since:
                     try:

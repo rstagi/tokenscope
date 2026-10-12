@@ -24,6 +24,6 @@ API, hooks, statusline). Anything not listed here was not verified.
 ## What we did not do
 
 - A richer in-terminal flow diagram: possible with `Raster` (coloured cells) but not with SVG in the terminal; the
-  pane shows an intent strip + recent turns instead, and the full flow map lives in the browser view.
+  pane shows the intent list instead, and the browser view shows the same intents as expandable cards.
 - Session-to-session messaging, prompt rewriting, tool approval: the mod API allows these; tokenscope does not use
   them on purpose (read-only observer).

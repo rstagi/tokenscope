@@ -26,11 +26,12 @@
     <div class="kpi gauge"><div class="l">context <span id="h-ctx" class="mut"></span></div><div class="bar"><i id="h-gauge" style="width:0"></i></div></div></div></div>
   <div id="ribbon" class="ribbon"></div><div id="legend" class="legend"></div></header>
 <main><div id="notfound" class="empty" style="display:none"></div><div id="body">
-  <div class="tools"><span class="sub">Flow — consecutive turns of the same phase are collapsed; click to expand.</span>
-  <label class="toggle"><input type="checkbox" id="follow" checked> follow</label></div>
-  <div id="s-empty" class="empty" style="display:none">Nothing happened in this session yet.</div>
-  <div id="timeline" class="timeline"></div></div></main>
-<button id="jump" class="jump">↓ new steps</button>
+  <section id="recap" class="recap" style="display:none"></section>
+  <section class="card hrows" id="h-rows"></section>
+  <div class="tools"><span><b class="sect">Intents</b> <span id="i-meta" class="sub"></span></span>
+    <span class="sub"><button class="more" id="i-expand">expand all</button> · <button class="more" id="i-collapse">collapse all</button></span></div>
+  <div id="intents" class="intents"></div>
+  <section id="agents" class="card agents" style="display:none"><b class="sect">Subagents</b><div id="agents-list"></div></section></div></main>
 </template>
 <script>
 (function () {
@@ -161,6 +162,36 @@
         a.steps.forEach(function (x) { if (x.seq > since) { var y = clone(x); y.agent_id = k; d.steps.push(y); } });
       });
       return Promise.resolve(clone(d));
+    },
+    // a rough stand-in for /compact: one intent step per main turn, consecutive same-group turns as a group
+    compact: function (id) {
+      var s = S[id];
+      if (!s) { var e = new Error("nf"); e.status = 404; return Promise.reject(e); }
+      var tt = s.steps.filter(function (x) { return x.k === "turn"; }).slice(-40), steps = [], groups = [];
+      tt.forEach(function (t, i) {
+        var nx = tt[i + 1], tool = (t.tools || [])[0] || {};
+        steps.push({i: i, cat: t.group, label: String(t.intent || t.group).replace(/_/g, " ") + (tool.target ? " · " + tool.target : ""),
+          source: "rule", locked: true, open: false, cw: t.cw, usd: t.usd, summary: (t.tools || []).map(function (x) { return x.label; }).join(" · "),
+          tested: null, group: null, skills: [], dur_s: nx ? Math.max(0, nx.ts - t.ts) / (t.ts > 1e12 ? 1000 : 1) : 3,
+          ops: (t.tools || []).map(function (x) { return {tool: x.label, target: x.target, cw: t.cw / t.tools.length, err: !!x.err, dur_s: (x.dur_ms || 0) / 1000}; })});
+      });
+      for (var i = 0; i < steps.length;) {
+        var j = i; while (j + 1 < steps.length && steps[j + 1].cat === steps[i].cat) j++;
+        if (j > i) {
+          var g = {label: steps[i].cat + " work", source: "rule", first: steps[i].i, last: steps[j].i, cat: steps[i].cat, cw: 0, usd: 0, steps: j - i + 1, skills: [], dur_s: 0};
+          for (var k = i; k <= j; k++) { steps[k].group = groups.length; g.cw += steps[k].cw; g.usd += steps[k].usd; g.dur_s += steps[k].dur_s; }
+          groups.push(g);
+        }
+        i = j + 1;
+      }
+      if (steps.length && s.status === "working") { steps[steps.length - 1].open = true; steps[steps.length - 1].ops[0].err = null; }
+      var lt = tt[tt.length - 1];
+      var gn = s.goal && typeof s.goal === "object" ? s.goal.name : s.goal;
+      return Promise.resolve(clone({goal: gn, status: s.status, asked: {goal: gn, prompt_n: 1},
+        now: lt ? {label: String(lt.intent || "").replace(/_/g, " "), group: lt.group, tool: (lt.tools[0] || {}).label, since_s: 2} : null,
+        tests: null, files_edited_n: 0, skills: [], agents: [], intents: {steps: steps, groups: groups, declared: {calls: 0}},
+        recap: s.status === "waiting" && steps.length ? {cw: s.totals.cw, usd: s.totals.usd, costliest: {label: steps[0].label, cat: steps[0].cat, cw: steps[0].cw, usd: steps[0].usd, pct: 30},
+          hints: [{action: "Demo hint: run the tests once per change", evidence: "synthetic evidence line", kind: "session"}]} : null}));
     },
     subscribe: function (h) {
       var w = {board: function (d) { sseOn && h.board(d); }, step: function (m) { sseOn && h.step(m); }, up: h.up, down: h.down};

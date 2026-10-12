@@ -555,6 +555,12 @@ class LivePayload(unittest.TestCase):
             self.assertEqual([o["err"] for o in ops], [False, False])
             self.assertAlmostEqual(ops[0]["cw"] + ops[1]["cw"], s.main.turn_steps[-1]["cw"], places=0)
             json.dumps(it)
+            # all_ops (the web page's ?ops=all): the closed steps carry their calls too, the live one the same
+            full = state.intents(s, all_ops=True)
+            self.assertTrue(all("ops" in x for x in full["steps"]))
+            self.assertEqual(full["steps"][-1]["ops"], ops)
+            self.assertEqual(sum(len(x["ops"]) for x in full["steps"]),
+                             sum(1 for t in s.main.turn_steps for x in t["tools"] if not sp.is_declare(x["name"])))
         # a call without its result yet is running: err None
         state = st.LiveState(redact=False, clock=lambda: 1_790_000_000.0)
         s = state.ingest(TrackedFile("/x/%s.jsonl" % SID, SID, "-srv-app"), recs[:9])

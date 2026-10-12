@@ -927,7 +927,19 @@ class LiveState:
                 "agents_total": len(s.agents), "context_tokens": s.context_tokens,
                 "flags": [{"flag": w["rule"], "count": w["count"]} for w in s.warnings.values()],
                 "warnings": self.warnings_list(s),
-                "intent_mix": sorted([[g, round(c, 1)] for g, c in mix.items()], key=lambda x: -x[1])}
+                "intent_mix": sorted([[g, round(c, 1)] for g, c in mix.items()], key=lambda x: -x[1]),
+                **self._board_intent(s, now)}
+
+    def _board_intent(self, s, now):
+        """The current intent as the pane names it (the last step's group, else the step: label + category) and
+        the session's skills, for a board card."""
+        steps, gs = self.steps(s, now) if s.main.turn_steps else ([], [])
+        cur = None
+        if steps:
+            x = steps[-1]
+            g = next((g for g in gs if g["first"] <= x["i"] <= g["last"]), None)
+            cur = {"label": self._lab((g or x)["label"]), "cat": (g or x)["cat"], "open": not x["closed"]}
+        return {"intent": cur, "skills": [n for n, _ in sorted(s.skills.items(), key=lambda kv: (-kv[1], kv[0]))]}
 
     def board(self, now=None, max_idle_s=6 * 3600):
         now = self.clock() if now is None else now
@@ -1004,8 +1016,9 @@ class LiveState:
             return []
         return [c for c in s.agents.values() if c is not a and self._parent(s, c) == a["id"]]
 
-    def session_compact(self, s, now=None, recent_n=60):
-        """Small payload for the in-terminal mod / status line (see docs/live-spec.md)."""
+    def session_compact(self, s, now=None, recent_n=60, all_ops=False):
+        """Small payload for the in-terminal mod / status line and the web session page (see docs/live-spec.md);
+        `all_ops`: every intent step with its calls (?ops=all)."""
         now = self.clock() if now is None else now
         turns = s.main.turn_steps
         recent = turns[-recent_n:]
@@ -1028,7 +1041,7 @@ class LiveState:
                 "cw_series": [round(t.get("cw") or 0) for t in turns[-120:]],
                 "agents": [self._agent_row(s, a, None) for a in s.agents.values()],
                 "main_tool_calls": sum(len(t["tools"]) for t in s.main.turn_steps),
-                "intents": self.intents(s, now),
+                "intents": self.intents(s, now, all_ops=all_ops),
                 "skills": [{"name": n, "count": c} for n, c in sorted(s.skills.items(), key=lambda kv: (-kv[1], kv[0]))],
                 **self._edited(s), **self._recap_key(s, now)}
 
@@ -1200,8 +1213,9 @@ class LiveState:
                 out.append(op)
         return out[-last_n:]
 
-    def intents(self, s, now=None, last_n=40):
-        """The compact payload's "intents" key."""
+    def intents(self, s, now=None, last_n=40, all_ops=False):
+        """The compact payload's "intents" key; `all_ops`: every step carries its calls (the web page shows them on
+        an older step it expands), not only the live one."""
         now = self.clock() if now is None else now
         steps, gs = self.steps(s, now)
         working = self.status(s, now) == "working"
@@ -1227,7 +1241,8 @@ class LiveState:
                            "turns": x["turns"], "summary": self._summary(x), "tested": x["tested"],
                            "group": gi.get(x["i"]), "skills": x["skills"],
                            "dur_s": dur(x["ts0"], x.get("drive_ts1") or x["ts1"], working and drives(x)),
-                           **({"ops": self._ops(s, x, now, working)} if x is live else {})} for x in steps[-last_n:]],
+                           **({"ops": self._ops(s, x, now, working and x is live)} if x is live or all_ops else {})}
+                          for x in steps[-last_n:]],
                 "groups": [{"label": self._lab(g["label"]), "source": g["source"], "first": g["first"],
                             "last": g["last"], "cat": g["cat"], "cw": g["cw"], "usd": g["usd"], "steps": g["steps"],
                             "skills": g["skills"],

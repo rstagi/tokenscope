@@ -395,8 +395,10 @@ class TestServer(LiveFixture):
         row = b["sessions"][0]
         for k in ("id", "short", "project", "goal", "status", "current_intent", "current_group", "last_step",
                   "started", "last_ts", "elapsed_s", "cw", "usd", "turns", "tool_calls", "errors", "agents_running",
-                  "agents_total", "context_tokens", "flags", "intent_mix"):
+                  "agents_total", "context_tokens", "flags", "intent_mix", "intent", "skills"):
             self.assertIn(k, row)
+        self.assertEqual(set(row["intent"]), {"label", "cat", "open"})   # the last intent, labelled as in the pane
+        self.assertEqual(row["skills"], [])
         self.assertEqual(row["agents_total"], 1)
         self.assertIn({"flag": "stuck_error", "count": 1}, row["flags"])
         self.assertEqual(row["warnings"][0]["rule"], "stuck_error")
@@ -427,6 +429,11 @@ class TestServer(LiveFixture):
         self.assertEqual(len(c["cw_series"]), len(c["recent"]))   # one value per main-thread tool turn
         self.assertEqual([{k: a[k] for k in ("type", "status", "turns", "parent")} for a in c["agents"]],
                          [{"type": "Explore", "status": "done", "turns": 1, "parent": None}])
+        steps = c["intents"]["steps"]
+        self.assertTrue(all("ops" not in x for x in steps[:-1]))   # only the live step carries its calls ...
+        allc = self.get("/api/session/%s/compact?ops=all" % SID)   # ... unless the page asks for all of them
+        self.assertTrue(all(isinstance(x["ops"], list) for x in allc["intents"]["steps"]))
+        self.assertEqual(set(allc) - {"recap"}, set(c) - {"recap"})
         with self.assertRaises(urllib.error.HTTPError):
             self.get("/api/session/nope")
 
