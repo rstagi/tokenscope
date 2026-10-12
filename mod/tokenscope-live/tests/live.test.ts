@@ -600,6 +600,30 @@ describe('tokenscope-live', () => {
     expect((await $.command.run({ command: 'tokenscope', args: 'bogus' })).text).toMatch(/^usage:/)
   })
 
+  test('/tokenscope top <window>: the server\'s top spenders as the command output', async ($: any, on: any) => {
+    const clock = base(on)
+    const urls: string[] = []
+    const TOP = {
+      window: '24h', total: { usd: 2.5, cw: 900_000, sessions: 2 },
+      sessions: [{ sid: 'aaaa1111-x', short: 'aaaa1111', label: 'Fix: parser', usd: 2, share: 80, cw: 700_000, wall_s: 3720 }],
+      intents: [{ sid: 'aaaa1111-x', short: 'aaaa1111', label: 'Run tests', cat: 'verify', usd: 0.5, share: 20, cw: 200_000, wall_s: 75 }],
+    }
+    on('http.fetch', (_$: any, e: any) => {
+      urls.push(String(e.url))
+      const body = String(e.url).includes('/api/top') ? TOP : COMPACT
+      return { value: { status: 200, ok: true, headers: {}, text: JSON.stringify(body) } }
+    })
+    await $.session.start(SESSION)
+    await clock.advance(1000)
+    const res = await $.command.run({ command: 'tokenscope', args: 'top 24h' })
+    expect(urls.some((u) => u.endsWith('/api/top?limit=5&window=24h'))).toBe(true)
+    expect(res.text.split('\n')).toEqual([
+      'tokenscope top 24h: $2.50 · 900k CW · 2 sessions',
+      'sessions', '  $2.00 80.0% · 700k CW · 1h2m · aaaa1111 Fix: parser',
+      'intents', '  $0.50 20.0% · 200k CW · 1m15s · aaaa1111 [VERIFY] Run tests',
+    ])
+  })
+
   test('intents: pressing a group line toggles it', async ($: any, on: any) => {
     const clock = base(on)
     on('http.fetch', () => ({ value: { status: 200, ok: true, headers: {}, text: JSON.stringify({ ...COMPACT, intents: INTENTS }) } }))

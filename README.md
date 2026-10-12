@@ -198,6 +198,17 @@ One line per session: id, project, start, calls (`*` = includes subagent calls),
 on the first prompt: bugfix / feature / docs / ...), first prompt. Use `goals` for what the requests were actually for.
 `--project` is a case-insensitive substring match on the project name.
 
+### `top` – top spenders by time window
+
+```sh
+tokenscope top [--window 5h|24h|7d|30d] [--index-root DIR] [--now ISO] [--limit N] [--json]
+```
+
+The costliest sessions, intents and steps of the last 5 h (the usage-limit window), day, week or month: $, share of
+the window's $, CW, tokens, wall and active time. Only calls whose own timestamp falls in the window count, so a
+session straddling its start is split. Reads the cross-session index (cached per transcript). Also on the live
+board (a "Top spenders" panel, `GET /api/top?window=5h`) and in the mod (`/tokenscope top 5h`).
+
 ### `analyze` – one session in the terminal
 
 ```sh

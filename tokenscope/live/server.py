@@ -11,6 +11,9 @@ Endpoints (see docs/live-spec.md):
   GET /api/session/<id>/flow     the session canvas payload: compact + every call + header + subagent sub-flows;
                                  ?replay=1[&restart=1][&duration=<s>]: the same payload from a replay of the
                                  session's transcripts in a fresh state, advancing with wall time (replay.LiveReplay)
+  GET /api/top                   top spenders (sessions, intents) of a window: ?window=5h|24h|7d|30d (day, week, month)
+                                 [&now=<ISO>][&limit=N], from the cross-session index (tokenscope/top.py); while the
+                                 index builds in the background: {"pending": true}
   GET /events                    SSE: `board` (1 s, when changed), `step` per new step, heartbeat every 15 s
 """
 import argparse
@@ -35,6 +38,7 @@ from ..stepnames import StepNamer, label_batch
 STATIC = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
 POLL_S = 0.5
 HEARTBEAT_S = 15
+TOP_REFRESH_S = 60   # /api/top rebuilds the cross-session index (incrementally) at most this often
 
 
 class Live:
@@ -66,6 +70,11 @@ class Live:
         self.stop = threading.Event()
         self.replays = {}   # session id -> LiveReplay (the session page's ?replay=1)
         self.replay_lock = threading.Lock()
+        self.top_root = index_root or os.environ.get("TOKENSCOPE_INDEX_ROOT") or root
+        self.top_index = None    # xindex.XIndex for /api/top, built in the background
+        self.top_built = 0.0     # when its last build finished
+        self.top_building = False
+        self.top_lock = threading.Lock()
 
     def _name_prompt(self, sid, n, text):
         self.namer.request((sid, n), text)   # cached per (session, prompt n); keyword name until it arrives
@@ -128,6 +137,32 @@ class Live:
                     path, redact=self.state.redact, duration=duration, xhints=self.suggester,
                     labeller=functools.partial(label_batch, cache_only=True))
             return rp.flow()
+
+    def _build_top(self):
+        from ..xindex import XIndex
+        try:
+            x = XIndex(self.top_root)
+            x.build()
+        except Exception as e:  # noqa: BLE001 - the board works without the panel
+            print("tokenscope live: top spenders index: %r" % (e,), file=sys.stderr)
+            x = None
+        with self.top_lock:
+            self.top_index = x or self.top_index
+            self.top_built = time.time()
+            self.top_building = False
+
+    def top(self, window, now=None, limit=10):
+        """tokenscope.top payload of `window` ending at `now`, or {"pending": true} until the index is first built;
+        a stale index (> TOP_REFRESH_S) is rebuilt in the background while the old one answers."""
+        from ..top import top_spenders
+        with self.top_lock:
+            if time.time() - self.top_built > TOP_REFRESH_S and not self.top_building:
+                self.top_building = True
+                threading.Thread(target=self._build_top, daemon=True).start()
+            x = self.top_index
+        if x is None:
+            return {"pending": True, "window": window}
+        return top_spenders(window, now=now, limit=limit, index=x)
 
     def subscribe(self):
         q = queue.Queue()
@@ -204,6 +239,8 @@ class Handler(BaseHTTPRequestHandler):
                         return self._json({"error": "bad since"}, 400)
                     return self._json(st.session_since(s, n))
                 return self._json(st.session_full(s))
+        if parts == ["api", "top"]:
+            return self._top(parse_qs(u.query))
         if parts == ["events"]:
             return self._events()
         return self._json({"error": "not found"}, 404)
@@ -219,6 +256,24 @@ class Handler(BaseHTTPRequestHandler):
         except ValueError:
             dur = 90.0
         return self._json(self.live.replay_flow(path, sid, restart=q.get("restart") == ["1"], duration=dur))
+
+    def _top(self, q):
+        from ..top import parse_now, window_seconds
+        try:
+            window = window_seconds((q.get("window") or ["5h"])[0])[0]
+            now = parse_now(q["now"][0]) if q.get("now") else None
+            limit = min(100, max(1, int((q.get("limit") or ["10"])[0])))
+        except ValueError as e:
+            return self._json({"error": str(e)}, 400)
+        r = self.live.top(window, now, limit)
+        st = self.live.state
+        if st.redact and not r.get("pending"):
+            with self.live.lock:
+                for key in ("sessions", "intents", "steps"):
+                    for x in r[key]:
+                        x.update(label=st._lab(x["label"]), project=st._project(x["project"]))
+        r.pop("index", None)
+        return self._json(r)
 
     def _events(self):
         self.send_response(200)

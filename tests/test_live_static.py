@@ -10,7 +10,7 @@ sys.path.insert(0, ROOT)
 
 STATIC = os.path.join(ROOT, "tokenscope", "live", "static")
 PRODUCERS = [os.path.join(ROOT, "tokenscope", *p) for p in
-             (("live", "state.py"), ("live", "recap.py"), ("xindex.py",), ("steps.py",), ("intents.py",))]
+             (("live", "state.py"), ("live", "recap.py"), ("xindex.py",), ("steps.py",), ("intents.py",), ("top.py",))]
 
 # Payload objects in the session / board code, by the variable names live.js gives them
 PAYLOAD_VARS = ("C", "rc", "it", "cur", "o", "w", "t", "a", "x", "s", "g", "h", "c", "sl", "m")

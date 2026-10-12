@@ -67,13 +67,14 @@ import os
 import re
 import statistics
 import sys
+import threading
 import time
 from collections import Counter, defaultdict
 
 from . import intents
 from . import pricing
 
-CACHE_VERSION = 7
+CACHE_VERSION = 8
 # similarity
 W_TOK, W_SEQ, W_TOOL = 0.4, 0.3, 0.3
 # two requests with prompt words on both sides: the prompts say what the task is, the step shape how it was done
@@ -472,7 +473,9 @@ def current_records(steps, groups, sid="", project="", prompts=()):
 
 
 def index_transcript(path):
-    """{"sid", "project", "cwd", "ts0", "skills", "records"} of one main transcript (deterministic labels only)."""
+    """{"sid", "project", "cwd", "ts0", "skills", "records", "spend"} of one main transcript (deterministic labels
+    only; "spend": per-call usage by step, for `tokenscope top`, see top.spend_facts)."""
+    from .top import spend_facts
     from .live.replay import replay
     state, s = replay(path, redact=False, model_labels=False)
     if s is None or not s.main.turn_steps:
@@ -482,7 +485,8 @@ def index_transcript(path):
     project = s.project_raw
     return {"sid": s.id, "project": project, "cwd": getattr(s, "cwd", None), "ts0": s.started,
             "skills": sorted(s.skills),
-            "records": requests_of(steps, gs, s.id, project, list(zip(s.prompt_at, s.prompt_words)))}
+            "records": requests_of(steps, gs, s.id, project, list(zip(s.prompt_at, s.prompt_words))),
+            "spend": spend_facts(state, s, steps, gs)}
 
 
 # ---------------------------------------------------------------- the index (cached per transcript)
@@ -557,7 +561,7 @@ class XIndex:
                 files[p] = {"key": keys[p], "entry": entry}
         if todo or set(old) != set(files):
             os.makedirs(os.path.dirname(self.cache), exist_ok=True)
-            tmp = self.cache + ".tmp"
+            tmp = "%s.%d-%d.tmp" % (self.cache, os.getpid(), threading.get_ident())   # the live server builds in 2 threads
             with open(tmp, "w", encoding="utf-8") as f:
                 json.dump({"version": CACHE_VERSION, "root": self.root, "files": files}, f, separators=(",", ":"))
             os.replace(tmp, self.cache)

@@ -143,3 +143,15 @@ body[data-page=session] header{position:static}
 /* board card: current intent + skills */
 .scard .ic{overflow:hidden;white-space:nowrap}
 .scard .ic .il{font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0}
+
+/* board: top spenders */
+.topcard{margin-bottom:14px}
+.toph{display:flex;align-items:center;gap:14px;flex-wrap:wrap;margin-bottom:6px}.toph h2{margin:0}
+.seg{display:inline-flex;border:1px solid var(--line);border-radius:7px;overflow:hidden}
+.seg button{font:inherit;font-size:12px;border:0;background:#fff;color:var(--mut);padding:2px 10px;cursor:pointer}
+.seg button.on{background:var(--acc);color:#fff}
+.topcols{display:grid;grid-template-columns:1fr 1fr;gap:6px 24px}.topcols h3{font-size:12px;text-transform:uppercase;letter-spacing:.4px;color:var(--mut);margin:4px 0}
+.trow{display:grid;grid-template-columns:4.2em 60px 3.4em minmax(0,1fr) auto;gap:8px;align-items:center;padding:3px 4px;border-radius:5px;color:inherit;text-decoration:none;font-size:12.5px;font-variant-numeric:tabular-nums}
+.trow:hover{background:var(--soft)}.trow .tb{height:5px}.trow .tp,.trow .tm{color:var(--mut);font-size:11.5px}
+.trow .tl{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+@media (max-width:900px){.topcols{grid-template-columns:1fr}}

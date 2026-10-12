@@ -316,7 +316,7 @@ class Branch:
         self.turn_steps = []      # turn steps in order (intents feed browser_loop)
         self.err_events = []      # ("edit", None) | ("err", signature) -> stuck_error
         self.file_events = []     # ("read", path) full reads | ("edit", path) | ("compact", None) -> reread_loop
-        self.msgs = {}            # message.id -> {"usage", "cw", "usd", "priced", "step"}
+        self.msgs = {}            # message.id -> {"usage", "cw", "usd", "priced", "step", "ts" (its first record)}
         self.pending_thinking = 0  # thinking blocks / text seen since the last turn step (main thread: step labels)
         self.pending_text = ""
 
@@ -675,7 +675,7 @@ class LiveState:
             s.model = model
         m = branch.msgs.get(mid)
         if m is None:
-            m = branch.msgs[mid] = {"usage": None, "cw": 0.0, "usd": 0.0, "priced": True, "step": None}
+            m = branch.msgs[mid] = {"usage": None, "cw": 0.0, "usd": 0.0, "priced": True, "step": None, "ts": ts}
             s.totals["turns"] += 1
             if agent_id:
                 s.agents[agent_id]["turns"] += 1

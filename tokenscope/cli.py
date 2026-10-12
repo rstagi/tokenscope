@@ -679,6 +679,44 @@ def cmd_intents(args):
     return 0
 
 
+def top_lines(r):
+    """The `tokenscope top` table: the window's totals, then its top sessions, intents and steps."""
+    t = r["total"]
+    out = ["Top spenders, last %s (%s .. %s): %s API-equivalent, %s CW, %s tokens, %d sessions, %d calls" % (
+        r["window"], r["start_iso"], r["end_iso"], fmt_usd(t["usd"]), fmt_tok(t["cw"]), fmt_tok(t["tokens"]),
+        t["sessions"], t["calls"])]
+    for title, key in (("SESSIONS", "sessions"), ("INTENTS", "intents"), ("STEPS", "steps")):
+        out.append("")
+        out.append("%-9s %8s %6s %7s %7s %7s %7s  %s" % (title, "$", "share", "CW", "tokens", "wall", "active",
+                                                          "session  label"))
+        if not r[key]:
+            out.append("  (nothing in this window)")
+        for x in r[key]:
+            label = x["label"] or "-"
+            if key != "sessions":
+                label = "[%s] %s" % (str(x.get("cat") or "other").upper(), label)
+            elif x.get("project"):
+                label = "%s · %s" % (x["project"], label)
+            out.append("%-9s %8s %5.1f%% %7s %7s %7s %7s  %s  %s" % (
+                "", fmt_usd(x["usd"]), x["share"], fmt_tok(x["cw"]), fmt_tok(x["tokens"]), fmt_dur(x["wall_s"]),
+                fmt_dur(x["active_s"]), x["short"], label[:70]))
+    return out
+
+
+def cmd_top(args):
+    from .top import parse_now, top_spenders
+    try:
+        now = parse_now(args.now) if args.now else None
+        r = top_spenders(args.window, now=now, root=args.index_root, limit=args.limit)
+    except ValueError as e:
+        raise argparse.ArgumentTypeError(str(e))
+    if args.json:
+        print(json.dumps(r, indent=2))
+    else:
+        print("\n".join(top_lines(r)))
+    return 0
+
+
 def main(argv=None):
     p = argparse.ArgumentParser(prog="tokenscope", description="Explain where Claude Code tokens go.")
     p.add_argument("--version", action="version", version="tokenscope " + __version__)
@@ -817,6 +855,15 @@ def main(argv=None):
                     help="label steps without own signals with `claude -p --model haiku` (masked text, cached)")
     ip.add_argument("--json", action="store_true")
     ip.set_defaults(func=cmd_intents)
+
+    tp = sub.add_parser("top", help="top spenders (sessions, intents, steps) in the last 5h / 24h / 7d / 30d")
+    tp.add_argument("--window", default="5h", help="5h (usage-limit window), 24h, 7d or 30d (default 5h)")
+    tp.add_argument("--index-root", default=None, metavar="DIR",
+                    help="transcripts to rank (default $TOKENSCOPE_INDEX_ROOT, else ~/.claude/projects)")
+    tp.add_argument("--now", metavar="ISO", help="end of the window (default: now), e.g. 2026-10-12T09:00:00Z")
+    tp.add_argument("--limit", type=int, default=10, metavar="N", help="rows per section (default 10)")
+    tp.add_argument("--json", action="store_true")
+    tp.set_defaults(func=cmd_top)
 
     args = p.parse_args(argv)
     set_cache(not getattr(args, "no_cache", False))

@@ -124,6 +124,7 @@
     }
     return {
       board: function () { return getJSON("/api/board"); },
+      top: function (w) { return getJSON("/api/top?window=" + encodeURIComponent(w)); },
       session: function (id, since) {
         return getJSON("/api/session/" + encodeURIComponent(id) + (since != null ? "?since=" + since : ""));
       },
@@ -301,6 +302,7 @@
     }
 
     setInterval(tickElapsed, 1000);
+    initTop(root);
     SRC.board().then(render, function () { $("#empty", root).textContent = "Cannot reach the tokenscope server."; $("#empty", root).style.display = ""; });
     liveLink({
       connEl: $("#conn", root), every: 2000,
@@ -308,6 +310,55 @@
       poll: function () { return SRC.board().then(render); },
       resync: function () {}
     });
+  }
+
+  // Top spenders: the window's costliest sessions and intents (/api/top, from the cross-session index); every row
+  // opens the session canvas. The index builds in the background: "pending" retries shortly.
+  function initTop(root) {
+    var box = $("#top", root);
+    if (!box || !SRC.top) return;
+    box.style.display = "";
+    var win = "5h", timer = 0;
+    function rows(node, list, intents) {
+      node.innerHTML = "";
+      if (!list.length) { node.appendChild(el("div", "mut small", "nothing in this window")); return; }
+      list.forEach(function (x) {
+        var a = el("a", "trow");
+        a.href = SRC.sessionHref(x.sid);
+        a.title = x.short + (x.project ? " · " + x.project : "");
+        var lb = el("span", "tl");
+        if (intents) { var t = el("span", "cat", "[" + String(x.cat || "other").toUpperCase() + "] "); t.style.color = tcol(x.cat); lb.appendChild(t); }
+        lb.appendChild(document.createTextNode(x.label || (intents ? "—" : x.short)));
+        a.appendChild(el("b", "tu", fmtUsd(x.usd)));
+        var bar = el("span", "bar tb"), fill = el("i");
+        fill.style.width = Math.min(100, +x.share || 0) + "%";
+        bar.appendChild(fill);
+        a.appendChild(bar);
+        a.appendChild(el("span", "tp", (+x.share || 0).toFixed(1) + "%"));
+        a.appendChild(lb);
+        a.appendChild(el("span", "tm", fmtK(x.cw) + " CW · " + fmtDur(x.wall_s)));
+        node.appendChild(a);
+      });
+    }
+    function load() {
+      clearTimeout(timer);
+      var w = win;
+      SRC.top(w).then(function (d) {
+        if (w !== win) return;
+        if (d.pending) { $("#top-total", root).textContent = "indexing transcripts…"; timer = setTimeout(load, 3000); return; }
+        var t = d.total || {};
+        $("#top-total", root).textContent = fmtUsd(t.usd) + " · " + fmtK(t.cw) + " CW · " + (t.sessions || 0) + " sessions";
+        rows($("#top-sessions", root), d.sessions || [], false);
+        rows($("#top-intents", root), d.intents || [], true);
+        timer = setTimeout(load, 60000);
+      }, function () { $("#top-total", root).textContent = "unavailable"; timer = setTimeout(load, 60000); });
+    }
+    Array.prototype.forEach.call($("#top-win", root).children, function (b) {
+      b.onclick = function () { win = b.getAttribute("data-w"); sel(); load(); };
+    });
+    function sel() { Array.prototype.forEach.call($("#top-win", root).children, function (b) { b.classList.toggle("on", b.getAttribute("data-w") === win); }); }
+    sel();
+    load();
   }
 
   // ---------- session ----------

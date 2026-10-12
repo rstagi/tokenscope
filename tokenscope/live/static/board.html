@@ -15,6 +15,12 @@
   </div>
 </header>
 <main>
+  <section id="top" class="card topcard" style="display:none">
+    <div class="toph"><h2>Top spenders</h2>
+      <div id="top-win" class="seg"><button data-w="5h" title="rolling 5 h (the usage-limit window)">5h</button><button data-w="24h">day</button><button data-w="7d">week</button><button data-w="30d">month</button></div>
+      <span id="top-total" class="mut small"></span></div>
+    <div class="topcols"><div><h3>Sessions</h3><div id="top-sessions"></div></div><div><h3>Intents</h3><div id="top-intents"></div></div></div>
+  </section>
   <div id="grid" class="grid"></div>
   <div id="empty" class="empty" style="display:none">No active sessions in the last 6 h. Start Claude Code and it will show up here.</div>
 </main>
