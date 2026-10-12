@@ -74,7 +74,7 @@ from collections import Counter, defaultdict
 from . import intents
 from . import pricing
 
-CACHE_VERSION = 8
+CACHE_VERSION = 9
 # similarity
 W_TOK, W_SEQ, W_TOOL = 0.4, 0.3, 0.3
 # two requests with prompt words on both sides: the prompts say what the task is, the step shape how it was done

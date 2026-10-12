@@ -201,13 +201,17 @@ on the first prompt: bugfix / feature / docs / ...), first prompt. Use `goals` f
 ### `top` – top spenders by time window
 
 ```sh
-tokenscope top [--window 5h|24h|7d|30d] [--index-root DIR] [--now ISO] [--limit N] [--json]
+tokenscope top [--window 5h|24h|7d|30d] [--by session|goal|turn|intent] [--index-root DIR] [--now ISO] [--limit N] [--json]
 ```
 
 The costliest sessions, intents and steps of the last 5 h (the usage-limit window), day, week or month: $, share of
 the window's $, CW, tokens, wall and active time. Only calls whose own timestamp falls in the window count, so a
-session straddling its start is split. Reads the cross-session index (cached per transcript). Also on the live
-board (a "Top spenders" panel, `GET /api/top?window=5h`) and in the mod (`/tokenscope top 5h`).
+session straddling its start is split. `--by` ranks something else instead: `session` (just the sessions), `goal`
+(labelled user goals: a follow-up prompt stays in its goal, a session opened by one continues the project's latest
+goal, so a goal can span turns and resumed sessions) or `turn` (one row per real user prompt, labelled with its text);
+each row names its session's goal. Reads the cross-session index (cached per transcript). Also on the live board (a
+"Top spenders" panel with window and grouping toggles, `GET /api/top?window=5h&by=goal`) and in the mod
+(`/tokenscope top 5h`, `/tokenscope top 5h turn`).
 
 ### `analyze` – one session in the terminal
 

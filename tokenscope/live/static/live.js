@@ -124,7 +124,7 @@
     }
     return {
       board: function () { return getJSON("/api/board"); },
-      top: function (w) { return getJSON("/api/top?window=" + encodeURIComponent(w)); },
+      top: function (w, by) { return getJSON("/api/top?window=" + encodeURIComponent(w) + "&by=" + encodeURIComponent(by || "intent")); },
       session: function (id, since) {
         return getJSON("/api/session/" + encodeURIComponent(id) + (since != null ? "?since=" + since : ""));
       },
@@ -312,23 +312,27 @@
     });
   }
 
-  // Top spenders: the window's costliest sessions and intents (/api/top, from the cross-session index); every row
-  // opens the session canvas. The index builds in the background: "pending" retries shortly.
+  // Top spenders: the window's costliest sessions and intents (/api/top, from the cross-session index), or by the
+  // by-toggle just its sessions, goals or turns (each with its session's goal); every row opens the session canvas.
+  // The index builds in the background: "pending" retries shortly.
+  var TOP_KEY = { session: "sessions", goal: "goals", turn: "turns", intent: "intents" };
   function initTop(root) {
     var box = $("#top", root);
     if (!box || !SRC.top) return;
     box.style.display = "";
-    var win = "5h", timer = 0;
-    function rows(node, list, intents) {
+    var win = "5h", by = "intent", timer = 0;
+    function rows(node, list, intents, sub) {
       node.innerHTML = "";
       if (!list.length) { node.appendChild(el("div", "mut small", "nothing in this window")); return; }
       list.forEach(function (x) {
         var a = el("a", "trow");
         a.href = SRC.sessionHref(x.sid);
-        a.title = x.short + (x.project ? " · " + x.project : "");
+        a.title = x.short + (x.project ? " · " + x.project : "") + (x.session_label ? " · " + x.session_label : "");
         var lb = el("span", "tl");
         if (intents) { var t = el("span", "cat", "[" + String(x.cat || "other").toUpperCase() + "] "); t.style.color = tcol(x.cat); lb.appendChild(t); }
-        lb.appendChild(document.createTextNode(x.label || (intents ? "—" : x.short)));
+        lb.appendChild(document.createTextNode(x.label || (intents || sub ? "—" : x.short)));
+        if (sub) lb.appendChild(el("span", "ts", " · " + x.short + (x.session_label && x.session_label !== x.label ? " " + x.session_label : "") +
+          (x.sessions > 1 ? " +" + (x.sessions - 1) + (x.sessions > 2 ? " sessions" : " session") : "")));
         a.appendChild(el("b", "tu", fmtUsd(x.usd)));
         var bar = el("span", "bar tb"), fill = el("i");
         fill.style.width = Math.min(100, +x.share || 0) + "%";
@@ -342,21 +346,31 @@
     }
     function load() {
       clearTimeout(timer);
-      var w = win;
-      SRC.top(w).then(function (d) {
-        if (w !== win) return;
+      var w = win, b = by;
+      SRC.top(w, b).then(function (d) {
+        if (w !== win || b !== by) return;
         if (d.pending) { $("#top-total", root).textContent = "indexing transcripts…"; timer = setTimeout(load, 3000); return; }
         var t = d.total || {};
         $("#top-total", root).textContent = fmtUsd(t.usd) + " · " + fmtK(t.cw) + " CW · " + (t.sessions || 0) + " sessions";
-        rows($("#top-sessions", root), d.sessions || [], false);
-        rows($("#top-intents", root), d.intents || [], true);
+        var one = b !== "intent";
+        $("#top-cols", root).classList.toggle("one", one);
+        $("#top-col2", root).style.display = one ? "none" : "";
+        $("#top-h1", root).textContent = one ? TOP_KEY[b].charAt(0).toUpperCase() + TOP_KEY[b].slice(1) : "Sessions";
+        rows($("#top-sessions", root), d[one ? TOP_KEY[b] : "sessions"] || [], false, b === "goal" || b === "turn");
+        if (!one) rows($("#top-intents", root), d.intents || [], true);
         timer = setTimeout(load, 60000);
       }, function () { $("#top-total", root).textContent = "unavailable"; timer = setTimeout(load, 60000); });
     }
     Array.prototype.forEach.call($("#top-win", root).children, function (b) {
       b.onclick = function () { win = b.getAttribute("data-w"); sel(); load(); };
     });
-    function sel() { Array.prototype.forEach.call($("#top-win", root).children, function (b) { b.classList.toggle("on", b.getAttribute("data-w") === win); }); }
+    Array.prototype.forEach.call($("#top-by", root).children, function (b) {
+      b.onclick = function () { by = b.getAttribute("data-b"); sel(); load(); };
+    });
+    function sel() {
+      Array.prototype.forEach.call($("#top-win", root).children, function (b) { b.classList.toggle("on", b.getAttribute("data-w") === win); });
+      Array.prototype.forEach.call($("#top-by", root).children, function (b) { b.classList.toggle("on", b.getAttribute("data-b") === by); });
+    }
     sel();
     load();
   }

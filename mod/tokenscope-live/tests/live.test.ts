@@ -624,6 +624,64 @@ describe('tokenscope-live', () => {
     ])
   })
 
+  test('/tokenscope top <window> <by>: sessions, goals or turns with their session\'s goal; args in any order', async ($: any, on: any) => {
+    const clock = base(on)
+    const urls: string[] = []
+    const row = { sid: 'aaaa1111-x', short: 'aaaa1111', session_label: 'Fix: parser', usd: 2, share: 80, cw: 700_000, wall_s: 3720 }
+    const BY: any = {
+      session: { sessions: [{ ...row, label: 'Fix: parser' }] },
+      goal: { goals: [{ ...row, label: 'Fix: parser', sessions: 2, turns: 3 }] },
+      turn: { turns: [{ ...row, id: 'u-1', label: 'fix the parser so nested lists work' }] },
+      intent: { sessions: [{ ...row, label: 'Fix: parser' }], intents: [{ ...row, label: 'Run tests', cat: 'verify' }] },
+    }
+    on('http.fetch', (_$: any, e: any) => {
+      const u = String(e.url)
+      urls.push(u)
+      const by = (u.match(/[?&]by=(\w+)/) || [])[1]
+      const body = u.includes('/api/top') ? { window: '5h', by: by || 'intent', total: { usd: 2.5, cw: 900_000, sessions: 2 }, ...BY[by || 'intent'] } : COMPACT
+      return { value: { status: 200, ok: true, headers: {}, text: JSON.stringify(body) } }
+    })
+    await $.session.start(SESSION)
+    await clock.advance(1000)
+    const run = async (args: string) => (await $.command.run({ command: 'tokenscope', args })).text.split('\n')
+    expect(await run('top 5h session')).toEqual([
+      'tokenscope top 5h by session: $2.50 · 900k CW · 2 sessions',
+      'sessions', '  $2.00 80.0% · 700k CW · 1h2m · aaaa1111 Fix: parser',
+    ])
+    expect(urls[urls.length - 1].endsWith('/api/top?limit=5&window=5h&by=session')).toBe(true)
+    expect(await run('top goals 5h')).toEqual([
+      'tokenscope top 5h by goal: $2.50 · 900k CW · 2 sessions',
+      'goals', '  $2.00 80.0% · 700k CW · 1h2m · aaaa1111 Fix: parser « Fix: parser +1',
+    ])
+    expect(urls[urls.length - 1].endsWith('/api/top?limit=5&window=5h&by=goal')).toBe(true)
+    expect(await run('top turn')).toEqual([
+      'tokenscope top 5h by turn: $2.50 · 900k CW · 2 sessions',
+      'turns', '  $2.00 80.0% · 700k CW · 1h2m · aaaa1111 fix the parser so nested lists work « Fix: parser',
+    ])
+    expect(urls[urls.length - 1].endsWith('/api/top?limit=5&window=5h&by=turn')).toBe(true)
+    expect(await run('top 5h intent')).toEqual([
+      'tokenscope top 5h: $2.50 · 900k CW · 2 sessions',
+      'sessions', '  $2.00 80.0% · 700k CW · 1h2m · aaaa1111 Fix: parser',
+      'intents', '  $2.00 80.0% · 700k CW · 1h2m · aaaa1111 [VERIFY] Run tests',
+    ])
+    expect(urls[urls.length - 1].endsWith('/api/top?limit=5&window=5h&by=intent')).toBe(true)
+  })
+
+  test('/tokenscope top <by> <window>: plural grouping first; an empty grouping says so', async ($: any, on: any) => {
+    const clock = base(on)
+    const urls: string[] = []
+    on('http.fetch', (_$: any, e: any) => {
+      urls.push(String(e.url))
+      const body = String(e.url).includes('/api/top') ? { window: '7d', by: 'turn', total: {}, turns: [] } : COMPACT
+      return { value: { status: 200, ok: true, headers: {}, text: JSON.stringify(body) } }
+    })
+    await $.session.start(SESSION)
+    await clock.advance(1000)
+    const res = await $.command.run({ command: 'tokenscope', args: 'top turns 7d' })
+    expect(urls.some((u) => u.endsWith('/api/top?limit=5&window=7d&by=turn'))).toBe(true)
+    expect(res.text.split('\n')).toEqual(['tokenscope top 7d by turn: $0.00 · 0 CW · 0 sessions', 'turns', '  (nothing in this window)'])
+  })
+
   test('intents: pressing a group line toggles it', async ($: any, on: any) => {
     const clock = base(on)
     on('http.fetch', () => ({ value: { status: 200, ok: true, headers: {}, text: JSON.stringify({ ...COMPACT, intents: INTENTS }) } }))

@@ -11,9 +11,10 @@ Endpoints (see docs/live-spec.md):
   GET /api/session/<id>/flow     the session canvas payload: compact + every call + header + subagent sub-flows;
                                  ?replay=1[&restart=1][&duration=<s>]: the same payload from a replay of the
                                  session's transcripts in a fresh state, advancing with wall time (replay.LiveReplay)
-  GET /api/top                   top spenders (sessions, intents) of a window: ?window=5h|24h|7d|30d (day, week, month)
-                                 [&now=<ISO>][&limit=N], from the cross-session index (tokenscope/top.py); while the
-                                 index builds in the background: {"pending": true}
+  GET /api/top                   top spenders of a window: ?window=5h|24h|7d|30d (day, week, month)
+                                 [&by=intent|session|goal|turn] (intent: sessions, intents and steps; else just the
+                                 sessions, goals or turns) [&now=<ISO>][&limit=N], from the cross-session index
+                                 (tokenscope/top.py); while the index builds in the background: {"pending": true}
   GET /events                    SSE: `board` (1 s, when changed), `step` per new step, heartbeat every 15 s
 """
 import argparse
@@ -29,7 +30,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
 from ..parse import resolve_root
-from .goalname import HaikuNamer
+from .goalname import HaikuNamer, mask
 from .hookevents import HookEvents
 from .state import LiveState
 from .tail import Tailer
@@ -151,9 +152,9 @@ class Live:
             self.top_built = time.time()
             self.top_building = False
 
-    def top(self, window, now=None, limit=10):
-        """tokenscope.top payload of `window` ending at `now`, or {"pending": true} until the index is first built;
-        a stale index (> TOP_REFRESH_S) is rebuilt in the background while the old one answers."""
+    def top(self, window, now=None, limit=10, by="intent"):
+        """tokenscope.top payload of `window` ending at `now` grouped `by`, or {"pending": true} until the index is
+        first built; a stale index (> TOP_REFRESH_S) is rebuilt in the background while the old one answers."""
         from ..top import top_spenders
         with self.top_lock:
             if time.time() - self.top_built > TOP_REFRESH_S and not self.top_building:
@@ -161,8 +162,8 @@ class Live:
                 threading.Thread(target=self._build_top, daemon=True).start()
             x = self.top_index
         if x is None:
-            return {"pending": True, "window": window}
-        return top_spenders(window, now=now, limit=limit, index=x)
+            return {"pending": True, "window": window, "by": by}
+        return top_spenders(window, now=now, limit=limit, index=x, by=by)
 
     def subscribe(self):
         q = queue.Queue()
@@ -258,20 +259,25 @@ class Handler(BaseHTTPRequestHandler):
         return self._json(self.live.replay_flow(path, sid, restart=q.get("restart") == ["1"], duration=dur))
 
     def _top(self, q):
-        from ..top import parse_now, window_seconds
+        from ..top import parse_by, parse_now, window_seconds
         try:
             window = window_seconds((q.get("window") or ["5h"])[0])[0]
+            by = parse_by((q.get("by") or ["intent"])[0])
             now = parse_now(q["now"][0]) if q.get("now") else None
             limit = min(100, max(1, int((q.get("limit") or ["10"])[0])))
         except ValueError as e:
             return self._json({"error": str(e)}, 400)
-        r = self.live.top(window, now, limit)
+        r = self.live.top(window, now, limit, by)
         st = self.live.state
         if st.redact and not r.get("pending"):
             with self.live.lock:
-                for key in ("sessions", "intents", "steps"):
-                    for x in r[key]:
-                        x.update(label=st._lab(x["label"]), project=st._project(x["project"]))
+                for key in ("sessions", "intents", "steps", "goals", "turns"):
+                    for x in r.get(key, ()):
+                        label = mask(x["label"]) if key == "turns" else x["label"]   # a turn's label is prompt text
+                        x.update(label=st._lab(label), project=st._project(x["project"]),
+                                 session_label=st._lab(x["session_label"]))
+                        if "goal" in x:
+                            x["goal"] = st._lab(x["goal"])
         r.pop("index", None)
         return self._json(r)
 

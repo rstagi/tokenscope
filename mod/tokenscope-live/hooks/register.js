@@ -1105,27 +1105,51 @@ async function poll($) {
   if (!remote) dirty = true   // local mode: the header's clock ticks once a second
 }
 
-const USAGE = 'usage: /tokenscope [expand <n|all> | collapse <n|all> | view intents|phases | top [5h|24h|7d|30d]]'
+const USAGE = 'usage: /tokenscope [expand <n|all> | collapse <n|all> | view intents|phases | top [5h|24h|7d|30d] [session|goal|turn|intent]]'
+const TOP_BY = { session: 'sessions', goal: 'goals', turn: 'turns', intent: 'intents' }
 
-// `/tokenscope top 5h`: the window's costliest sessions and intents from the server's GET /api/top, as the
-// command's output (not the pane)
+// `/tokenscope top 5h [session|goal|turn|intent]`: the window's costliest sessions and intents (or, grouped by
+// session / goal / turn, just those, each with its session's goal) from the server's GET /api/top, as the command's
+// output (not the pane)
 export function topText(d) {
   if (!d || d.error) return 'tokenscope: ' + ((d && d.error) || 'no top spenders')
   if (d.pending) return 'tokenscope: indexing transcripts, try again in a few seconds'
   const t = d.total || {}
+  const by = TOP_BY[d.by] ? d.by : 'intent'
   const usd = (v) => '$' + (Number(v) || 0).toFixed(2)
-  const row = (x, cat) => '  ' + usd(x.usd) + ' ' + (Number(x.share) || 0).toFixed(1) + '% · ' + fmtTokens(x.cw) + ' CW · ' +
-    fmtDur(x.wall_s) + ' · ' + x.short + ' ' + (cat ? '[' + String(x.cat || 'other').toUpperCase() + '] ' : '') + (x.label || '')
-  const lines = ['tokenscope top ' + d.window + ': ' + usd(t.usd) + ' · ' + fmtTokens(t.cw) + ' CW · ' + (t.sessions || 0) + ' sessions']
-  lines.push('sessions', ...(d.sessions || []).map((x) => row(x, false)))
-  lines.push('intents', ...(d.intents || []).map((x) => row(x, true)))
+  const sub = (x) => ' « ' + (x.session_label || '-') + (x.sessions > 1 ? ' +' + (x.sessions - 1) : '')
+  const row = (x, cat, of) => '  ' + usd(x.usd) + ' ' + (Number(x.share) || 0).toFixed(1) + '% · ' + fmtTokens(x.cw) + ' CW · ' +
+    fmtDur(x.wall_s) + ' · ' + x.short + ' ' + (cat ? '[' + String(x.cat || 'other').toUpperCase() + '] ' : '') + (x.label || '') +
+    (of ? sub(x) : '')
+  const lines = ['tokenscope top ' + d.window + (by === 'intent' ? '' : ' by ' + by) + ': ' + usd(t.usd) + ' · ' +
+    fmtTokens(t.cw) + ' CW · ' + (t.sessions || 0) + ' sessions']
+  if (by === 'intent') {
+    lines.push('sessions', ...(d.sessions || []).map((x) => row(x, false)))
+    lines.push('intents', ...(d.intents || []).map((x) => row(x, true)))
+  } else {
+    const list = d[TOP_BY[by]] || []
+    lines.push(TOP_BY[by], ...(list.length ? list.map((x) => row(x, false, by !== 'session')) : ['  (nothing in this window)']))
+  }
   return lines.join('\n')
 }
 
-async function runTop($, arg) {
+// `top` arguments in any order: a grouping (session|goal|turn|intent, plural accepted) and a window (default 5h)
+function topArgs(args) {
+  let window = '5h', by = null
+  for (const a of args.filter(Boolean)) {
+    const b = a.replace(/s$/, '')
+    if (TOP_BY[a] || TOP_BY[b]) by = TOP_BY[a] ? a : b
+    else window = a
+  }
+  return { window, by }
+}
+
+async function runTop($, args) {
   const base = (await $.env.get('TOKENSCOPE_LIVE_URL')) || DEFAULT_BASE
+  const { window, by } = topArgs(args)
   try {
-    const res = await $.http.fetch(base.replace(/\/+$/, '') + '/api/top?limit=5&window=' + encodeURIComponent(arg || '5h'))
+    const res = await $.http.fetch(base.replace(/\/+$/, '') + '/api/top?limit=5&window=' + encodeURIComponent(window) +
+      (by ? '&by=' + by : ''))
     return topText(JSON.parse(res.text))
   } catch {
     return 'tokenscope: cannot reach the tokenscope server (tokenscope live)'
@@ -1163,8 +1187,8 @@ export function register(onEvent) {
   onEvent('session.start', async ($, e, next) => {
     await $.command.register({
       name: 'tokenscope',
-      description: 'Toggle the tokenscope live pane; expand|collapse <n|all>, view intents|phases, top <window>',
-      argumentHint: '[expand <n|all> | collapse <n|all> | view intents|phases | top 5h|24h|7d|30d]',
+      description: 'Toggle the tokenscope live pane; expand|collapse <n|all>, view intents|phases, top <window> [by]',
+      argumentHint: '[expand <n|all> | collapse <n|all> | view intents|phases | top 5h|24h|7d|30d [session|goal|turn|intent]]',
       immediate: true,
     })
     timers.forEach((t) => t.cancel())
@@ -1188,8 +1212,8 @@ export function register(onEvent) {
   })
 
   onEvent('command.run', { command: 'tokenscope' }, async ($, e) => {
-    const [verb, arg] = String(e.args || '').trim().toLowerCase().split(/\s+/)
-    if (verb === 'top') return { text: await runTop($, arg) }
+    const [verb, arg, ...more] = String(e.args || '').trim().toLowerCase().split(/\s+/)
+    if (verb === 'top') return { text: await runTop($, [arg, ...more]) }
     if (verb) {
       const text = runView(verb, arg)
       void $.ui.invalidate('ui.render')

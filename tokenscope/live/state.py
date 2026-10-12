@@ -356,6 +356,7 @@ class Session:
         self.prompt_at = []       # main-thread turn count when each prompt (incl. queued) arrived: step boundaries
         self.ctx_at_prompt = []   # context tokens when each prompt arrived (idle recap)
         self.prompt_words = []    # xindex.prompt_words of each prompt (cross-session matching only; never emitted)
+        self.prompt_uuid = []     # transcript uuid of each prompt record (tokenscope top --by turn; never emitted)
         self.headless = False     # a prompt came from `claude -p` / an SDK program (parse.prompt_source): no next task
         self.compact_at = []      # main-thread turn count at each compaction (idle recap)
         self.recap_cache = None   # ((steps key, index version), recap)
@@ -506,7 +507,7 @@ class LiveState:
             text = att.get("prompt") if att.get("type") == "queued_command" else None
             if isinstance(text, str) and text.strip() and not text.lstrip().startswith("<"):
                 s.last_kind, s.last_active_ts = "prompt", ts
-                self._new_prompt(s, branch, text.strip(), ts, queued=True, src=prompt_source(r, text))   # a follow-up typed mid-turn
+                self._new_prompt(s, branch, text.strip(), ts, queued=True, src=prompt_source(r, text), uuid=r.get("uuid"))   # a follow-up typed mid-turn
             return
         if not agent_id and typ in ("user", "assistant"):
             self._slash_skills(s, r, ts)
@@ -577,9 +578,9 @@ class LiveState:
                     a["status"] = "done"
                     self.version += 1
             return
-        self._new_prompt(s, branch, text, ts, src=prompt_source(r, text))
+        self._new_prompt(s, branch, text, ts, src=prompt_source(r, text), uuid=r.get("uuid"))
 
-    def _new_prompt(self, s, branch, text, ts, queued=False, src="human"):
+    def _new_prompt(self, s, branch, text, ts, queued=False, src="human", uuid=None):
         s.headless = s.headless or src == "headless"
         n = len(s.prompts) + 1
         p = {"ts": ts, "chars": len(text), "name": goalname.keyword_name(text, redact=self.redact), "source": "keyword"}
@@ -591,6 +592,7 @@ class LiveState:
         s.prompts.append(p)
         s.prompt_at.append(len(s.main.turn_steps))
         s.prompt_words.append(prompt_words(text))
+        s.prompt_uuid.append(uuid)
         s.ctx_at_prompt.append(s.context_tokens)
         self._emit(s, branch, step)
         if s.goal is None:

@@ -154,4 +154,5 @@ body[data-page=session] header{position:static}
 .trow{display:grid;grid-template-columns:4.2em 60px 3.4em minmax(0,1fr) auto;gap:8px;align-items:center;padding:3px 4px;border-radius:5px;color:inherit;text-decoration:none;font-size:12.5px;font-variant-numeric:tabular-nums}
 .trow:hover{background:var(--soft)}.trow .tb{height:5px}.trow .tp,.trow .tm{color:var(--mut);font-size:11.5px}
 .trow .tl{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.topcols.one{grid-template-columns:1fr}.trow .ts{color:var(--mut)}
 @media (max-width:900px){.topcols{grid-template-columns:1fr}}

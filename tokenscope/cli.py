@@ -679,27 +679,41 @@ def cmd_intents(args):
     return 0
 
 
+def _cut(text, n):
+    return text if len(text) <= n else text[:n - 1].rstrip() + "…"
+
+
 def top_lines(r):
-    """The `tokenscope top` table: the window's totals, then its top sessions, intents and steps."""
+    """The `tokenscope top` table: the window's totals, then its top sessions, intents and steps (--by intent), or its
+    top sessions, goals or turns (the session's goal after a goal's or turn's label)."""
+    from .top import BY_KEY
     t = r["total"]
-    out = ["Top spenders, last %s (%s .. %s): %s API-equivalent, %s CW, %s tokens, %d sessions, %d calls" % (
-        r["window"], r["start_iso"], r["end_iso"], fmt_usd(t["usd"]), fmt_tok(t["cw"]), fmt_tok(t["tokens"]),
-        t["sessions"], t["calls"])]
-    for title, key in (("SESSIONS", "sessions"), ("INTENTS", "intents"), ("STEPS", "steps")):
+    by = r.get("by") or "intent"
+    out = ["Top spenders%s, last %s (%s .. %s): %s API-equivalent, %s CW, %s tokens, %d sessions, %d calls" % (
+        "" if by == "intent" else " by " + by, r["window"], r["start_iso"], r["end_iso"], fmt_usd(t["usd"]),
+        fmt_tok(t["cw"]), fmt_tok(t["tokens"]), t["sessions"], t["calls"])]
+    keys = ("sessions", "intents", "steps") if by == "intent" else (BY_KEY[by],)
+    for key in keys:
         out.append("")
-        out.append("%-9s %8s %6s %7s %7s %7s %7s  %s" % (title, "$", "share", "CW", "tokens", "wall", "active",
+        out.append("%-9s %8s %6s %7s %7s %7s %7s  %s" % (key.upper(), "$", "share", "CW", "tokens", "wall", "active",
                                                           "session  label"))
         if not r[key]:
             out.append("  (nothing in this window)")
         for x in r[key]:
             label = x["label"] or "-"
-            if key != "sessions":
+            if key in ("intents", "steps"):
                 label = "[%s] %s" % (str(x.get("cat") or "other").upper(), label)
-            elif x.get("project"):
-                label = "%s · %s" % (x["project"], label)
+            elif key == "sessions":
+                if x.get("project"):
+                    label = "%s · %s" % (x["project"], label)
+            else:
+                n = x.get("sessions", 1) - 1
+                more = "  +%d session%s" % (n, "s" if n > 1 else "") if n else ""
+                of = x.get("session_label") or "-"
+                label = _cut(label, 56) + ("" if of == x["label"] else "  « " + _cut(of, 34)) + more
             out.append("%-9s %8s %5.1f%% %7s %7s %7s %7s  %s  %s" % (
                 "", fmt_usd(x["usd"]), x["share"], fmt_tok(x["cw"]), fmt_tok(x["tokens"]), fmt_dur(x["wall_s"]),
-                fmt_dur(x["active_s"]), x["short"], label[:70]))
+                fmt_dur(x["active_s"]), x["short"], label if key in ("goals", "turns") else label[:70]))
     return out
 
 
@@ -707,7 +721,7 @@ def cmd_top(args):
     from .top import parse_now, top_spenders
     try:
         now = parse_now(args.now) if args.now else None
-        r = top_spenders(args.window, now=now, root=args.index_root, limit=args.limit)
+        r = top_spenders(args.window, now=now, root=args.index_root, limit=args.limit, by=args.by)
     except ValueError as e:
         raise argparse.ArgumentTypeError(str(e))
     if args.json:
@@ -856,8 +870,11 @@ def main(argv=None):
     ip.add_argument("--json", action="store_true")
     ip.set_defaults(func=cmd_intents)
 
-    tp = sub.add_parser("top", help="top spenders (sessions, intents, steps) in the last 5h / 24h / 7d / 30d")
+    tp = sub.add_parser("top", help="top spenders (sessions, goals, turns, intents) in the last 5h / 24h / 7d / 30d")
     tp.add_argument("--window", default="5h", help="5h (usage-limit window), 24h, 7d or 30d (default 5h)")
+    tp.add_argument("--by", default="intent", choices=("session", "goal", "turn", "intent"),
+                    help="rank sessions, goals (labelled user goals, across turns and resumed sessions), turns (one "
+                         "per user prompt) or intents (default: sessions, intents and steps)")
     tp.add_argument("--index-root", default=None, metavar="DIR",
                     help="transcripts to rank (default $TOKENSCOPE_INDEX_ROOT, else ~/.claude/projects)")
     tp.add_argument("--now", metavar="ISO", help="end of the window (default: now), e.g. 2026-10-12T09:00:00Z")
