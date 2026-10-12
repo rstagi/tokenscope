@@ -856,6 +856,85 @@ class BoilerplateWords(unittest.TestCase):
         c = self.req("c", "Translate the onboarding emails into French")
         self.assertTrue(xi.is_match(a, c, widf=xi.word_idf(hist))[0])   # the task words still match
 
+    def test_project_boilerplate_weighs_zero_in_that_project(self):
+        words = ("alpha bravo charlie delta echo foxtrot golf hotel india juliet kilo lima mike november oscar papa "
+                 "quebec romeo sierra tango uniform victor whiskey xray yankee zulu amber birch cedar daisy").split()
+        pre = "Release checklist for the warehouse ledger nightly reconciliation pipeline. "
+        hist = [self.req("h%d%s" % (k, v), "%s the %s option" % (v, w), project="other")
+                for k, w in enumerate(words) for v in ("Rename", "Remove", "Document", "Deprecate")]
+        hist += [self.req("q%d" % k, pre + "Fix the %s report" % w, project="ledger") for k, w in enumerate(words[:8])]
+        w = xi.word_idf(hist)
+        self.assertGreater(w.get("reconciliation", 1.0), 0.5)          # 8 of 128 globally: still weighs
+        self.assertEqual(w.of("ledger")["reconciliation"], 0.0)        # but in every ledger prompt
+        self.assertIs(w.of("other"), w.proj["other"])
+        self.assertIs(w.of("tiny"), w)                                  # no per-project weights: the global ones
+        self.assertNotIn("tiny", xi.word_idf(hist + [self.req("t%d" % k, pre, project="tiny") for k in range(7)]).proj)
+        a = self.req("a", pre + "Translate the onboarding emails into German", project="ledger")
+        b = self.req("b", pre + "Profile the slow export endpoint", project="ledger")
+        self.assertTrue(xi.is_match(a, b, widf=dict(w))[0])   # global weights only: the preamble carries it
+        self.assertFalse(xi.is_match(a, b, widf=w)[0])
+        c = self.req("c", pre + "Translate the onboarding emails into French", project="ledger")
+        self.assertTrue(xi.is_match(a, c, widf=w)[0])
+
+
+class StrongPromptMatch(unittest.TestCase):
+    """The same task asked in near-identical words is a match even when the run went another way (one git ls-files
+    and a big cat instead of many Reads / finds)."""
+    def by_reads(self, sid, task):
+        fs = ("cli.py", "registry.py", "models.py", "store.py", "test_cli.py")
+        steps = [step(0, "investigate", "reading code · " + ", ".join(fs), fs, tools={"Read": 6, "Bash find": 3},
+                      prompt=True, cw=60_000),
+                 step(1, "change", "editing files · count.py", ("count.py", "test_count.py"), tools={"Write": 2}),
+                 step(2, "verify", "running tests · unittest", (), ("unittest",), tools={"Bash unittest": 1},
+                      runners=("Bash unittest",))]
+        return xi.requests_of(steps, [], sid, "p", [(0, xi.prompt_words(task))])[0]
+
+    def by_cat(self, sid, task):
+        steps = [step(0, "investigate", "running shell · git ls-files", ("files.txt",),
+                      tools={"Bash git ls-files": 1, "Bash cat": 1}, prompt=True, cw=60_000),
+                 step(1, "change", "editing files · top.py", ("top.py", "test_top.py", "top.md"),
+                      tools={"Edit": 6, "Write": 3}),
+                 step(2, "change", "editing files · CHANGELOG.md", ("CHANGELOG.md",), tools={"Edit": 1}),
+                 step(3, "verify", "running tests · unittest", (), ("unittest",), tools={"Bash unittest": 6},
+                      runners=("Bash unittest",))]
+        return xi.requests_of(steps, [], sid, "p", [(0, xi.prompt_words(task))])[0]
+
+    def test_strong_prompt_match_with_different_tools_matches(self):
+        a = self.by_reads("a", SUBCMD % ("count", TASKS["count"]))
+        b = self.by_cat("b", SUBCMD % ("top", TASKS["top"]))
+        self.assertGreaterEqual(xi.token_sim(a, b)[0], xi.STRONG_PTOK)
+        self.assertLess(xi.similarity(a, b)[0], xi.SIM_MIN)   # the tools / files alone would not carry it
+        self.assertTrue(xi.is_match(a, b)[0])
+
+    def test_weak_prompt_match_with_different_tools_does_not(self):
+        a = self.by_reads("a", SUBCMD % ("count", TASKS["count"]))
+        b = self.by_cat("b", "Add a `top` subcommand that lists the items with the highest stock value; keep the "
+                             "registry sorted and print a table.")
+        self.assertLess(xi.token_sim(a, b)[0], xi.STRONG_PTOK)
+        self.assertFalse(xi.is_match(a, b)[0])
+
+    def test_few_shared_words_are_not_strong_evidence(self):
+        a = self.by_reads("a", "Translate the onboarding emails into German")
+        b = dict(self.by_cat("b", "Translate the onboarding emails into French"), cats=["verify"])
+        self.assertGreaterEqual(xi.token_sim(a, b)[0], xi.STRONG_PTOK)   # 3 shared words
+        self.assertLess(xi.similarity(a, b)[0], xi.SIM_MIN)
+        self.assertFalse(xi.is_match(a, b)[0])
+
+    def test_preamble_dominated_prompts_are_not_strong_evidence(self):
+        pre = ("Nightly warehouse ledger reconciliation: follow the runbook, compare supplier invoices against "
+               "shipment manifests, flag discrepancies, summarise totals per region, attach evidence. ")
+        widf = {t: 0.5 for t in xi.prompt_words(pre)}   # common across the index, not quite boilerplate
+        a = self.by_reads("a", pre + "Translate the onboarding emails")
+        b = dict(self.by_cat("b", pre + "Profile the slow export endpoint"), cats=["verify"])
+        self.assertGreaterEqual(xi.token_sim(a, b, widf)[0], xi.STRONG_PTOK)        # the preamble carries the Dice
+        self.assertGreaterEqual(xi.shared_word_weight(a, b, widf), xi.STRONG_PTOK_W)
+        self.assertLess(xi.similarity(a, b, widf=widf)[0], xi.SIM_MIN)
+        self.assertLess(xi.task_share(a, widf), xi.STRONG_TASK_SHARE)
+        self.assertFalse(xi.strong_prompt_match(a, b, widf))
+        self.assertFalse(xi.is_match(a, b, widf=widf)[0])
+        self.assertTrue(xi.strong_prompt_match(self.by_reads("c", SUBCMD % ("count", TASKS["count"])),
+                                               self.by_cat("d", SUBCMD % ("top", TASKS["top"])), widf))
+
 
 class SkillFrontmatter(unittest.TestCase):
     def test_folded_and_literal_descriptions(self):

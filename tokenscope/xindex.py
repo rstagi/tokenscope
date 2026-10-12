@@ -68,7 +68,7 @@ import re
 import statistics
 import sys
 import time
-from collections import Counter
+from collections import Counter, defaultdict
 
 from . import intents
 from . import pricing
@@ -84,6 +84,10 @@ SIM_MIN = 0.55                # a match: weighted similarity at least this ...
 ANCHOR_TOK = 0.34             # ... and label-token Jaccard >= this, or
 ANCHOR_FILES = 0.5            # ... an idf-weighted file overlap >= this
 ANCHOR_N_FILES = 2            # ... over at least this many shared files
+STRONG_PTOK = 0.7             # two prompts this alike (idf-weighted Dice) are the same task: a match whatever the
+STRONG_PTOK_W = 6.0           # ... tools / files, given at least this much shared word weight (~6 content words)
+STRONG_TASK_SHARE = 0.6       # ... and, on both sides, at least this share of the prompt's words weigh >=
+STRONG_TASK_W = 0.9           # ... this globally (the prompt is mostly task words, not a shared preamble)
 IDF_MAX = 5.0                 # weight of a file the index has never seen
 # gates
 MIN_OCC = 3                   # prior matching occurrences
@@ -112,10 +116,12 @@ MIN_MAP_FILES = 3             # a file map (CLAUDE.md, in a skill) lists at leas
 MIN_SKILL_FILES = 3           # ... a drafted skill at least this many files
 # prompt words: idf over the indexed requests with prompts; a word in >= WORD_DF_ZERO of them (boilerplate an app
 # puts in every prompt) weighs 0, one in <= WORD_DF_FULL of them 1, log-linear between; with fewer than WORD_IDF_MIN
-# requests every word weighs 1 (too few to tell boilerplate from the task)
+# requests every word weighs 1 (too few to tell boilerplate from the task). The same cutoffs over one project's
+# requests (with >= WORD_IDF_PROJ_MIN of them) give per-project weights; a word weighs the lower of the two
 WORD_DF_ZERO = 0.2
 WORD_DF_FULL = 0.04
 WORD_IDF_MIN = 30
+WORD_IDF_PROJ_MIN = 8
 
 STOP = set("""a an the and or of to in on for with by from at as is are be been was were it its this that these those
 into onto via per out up down over under then than so not no yes all any each both few more most other some such own
@@ -602,25 +608,32 @@ def file_overlap(a, b, idf=None):
     return (sum(w(f) for f in shared) / den if den else 0.0), shared
 
 
-def dice(a, b, w=None):
-    """Dice of two word sets; with `w` ({word: weight}, unknown words 1) each word counts its weight."""
+def dice(a, b, w=None, wb=None):
+    """Dice of two word sets; with `w` ({word: weight}, unknown words 1) each word counts its weight (`wb`: other
+    weights for b's side, e.g. b's project's)."""
     a, b = set(a), set(b)
     if not (a and b):
         return 0.0
-    if w is None:
+    if w is None and wb is None:
         return 2 * len(a & b) / (len(a) + len(b))
-    wt = lambda s_: sum(w.get(t, 1.0) for t in s_)
-    den = wt(a) + wt(b)
-    return 2 * wt(a & b) / den if den else 0.0
+    wa, wb = w or {}, wb if wb is not None else (w or {})
+    wt = lambda w_, s_: sum(w_.get(t, 1.0) for t in s_)
+    den = wt(wa, a) + wt(wb, b)
+    return (wt(wa, a & b) + wt(wb, a & b)) / den if den else 0.0
 
 
-def word_idf(records):
-    """{prompt word: weight} over the request records with prompts: 0 for a word in >= WORD_DF_ZERO of them
-    (boilerplate: text an app injects into every prompt), 1 at <= WORD_DF_FULL, log-linear between; only words
-    below 1 are listed. {} (all 1) with fewer than WORD_IDF_MIN such requests."""
-    reqs = [r for r in records if r["level"] == "request" and r.get("pwords")]
+class WordIdf(dict):
+    """The global {word: weight} (unlisted words weigh 1) plus `proj`: {project: {word: min(global, per-project
+    weight)}} for the projects with enough requests (see word_idf)."""
+    proj = {}
+
+    def of(self, project):
+        return self.proj.get(project, self)
+
+
+def _df_weights(reqs, n_min):
     n = len(reqs)
-    if n < WORD_IDF_MIN:
+    if n < n_min:
         return {}
     df = Counter(t for r in reqs for t in set(r["tokens"]))
     lo, hi = math.log(1 / WORD_DF_ZERO), math.log(1 / WORD_DF_FULL)
@@ -632,6 +645,29 @@ def word_idf(records):
     return out
 
 
+def word_idf(records):
+    """WordIdf over the request records with prompts: 0 for a word in >= WORD_DF_ZERO of them (boilerplate: text an
+    app injects into every prompt), 1 at <= WORD_DF_FULL, log-linear between; only words below 1 are listed. {} (all
+    1) with fewer than WORD_IDF_MIN such requests. The same over each project's requests (>= WORD_IDF_PROJ_MIN of
+    them): a word weighs min(global, per-project), so boilerplate common within one project weighs ~0 too."""
+    reqs = [r for r in records if r["level"] == "request" and r.get("pwords")]
+    out = WordIdf(_df_weights(reqs, WORD_IDF_MIN))
+    by_proj = defaultdict(list)
+    for r in reqs:
+        by_proj[r.get("project")].append(r)
+    out.proj = {}
+    for project, rs in by_proj.items():
+        pw = _df_weights(rs, WORD_IDF_PROJ_MIN)
+        if pw:
+            out.proj[project] = {t: min(out.get(t, 1.0), pw.get(t, 1.0)) for t in set(out) | set(pw)}
+    return out
+
+
+def _wfor(widf, rec):
+    """The word weights for `rec`'s prompt words: its project's (WordIdf), else `widf` as is (None: all 1)."""
+    return widf.of(rec.get("project")) if isinstance(widf, WordIdf) else (widf or None)
+
+
 def by_prompt(a, b):
     return bool(a.get("pwords")) and bool(b.get("pwords"))
 
@@ -639,9 +675,32 @@ def by_prompt(a, b):
 def token_sim(a, b, widf=None):
     """(similarity, anchor threshold) of two records' words: Dice of two requests' prompt words (a prompt carries
     task-specific words too: "list the items with the highest stock value"), each word weighted by `widf`
-    (word_idf: boilerplate words weigh ~0), else label-token Jaccard."""
-    return (dice(a["tokens"], b["tokens"], widf or None), ANCHOR_PTOK) if by_prompt(a, b) else \
+    (word_idf: boilerplate words weigh ~0; each side by its project's weights), else label-token Jaccard."""
+    return (dice(a["tokens"], b["tokens"], _wfor(widf, a), _wfor(widf, b)), ANCHOR_PTOK) if by_prompt(a, b) else \
         (jaccard(a["tokens"], b["tokens"]), ANCHOR_TOK)
+
+
+def shared_word_weight(a, b, widf=None):
+    """The weight of the prompt words a and b share (the mean of the two sides' weights)."""
+    shared = set(a["tokens"]) & set(b["tokens"])
+    wa, wb = _wfor(widf, a) or {}, _wfor(widf, b) or {}
+    return sum(wa.get(t, 1.0) + wb.get(t, 1.0) for t in shared) / 2
+
+
+def task_share(rec, widf=None):
+    """The share of `rec`'s prompt words weighing >= STRONG_TASK_W globally (a WordIdf's own weights, not its
+    project's): ~1 for a prompt that is all task, low for one mostly made of a preamble other prompts share."""
+    toks = set(rec["tokens"])
+    w = widf or {}
+    return sum(w.get(t, 1.0) >= STRONG_TASK_W for t in toks) / len(toks) if toks else 0.0
+
+
+def strong_prompt_match(a, b, widf=None):
+    """Two prompts alike enough to be the same task whatever the tools / files: Dice >= STRONG_PTOK over >=
+    STRONG_PTOK_W shared word weight, both prompts mostly task words (task_share >= STRONG_TASK_SHARE)."""
+    return (by_prompt(a, b) and token_sim(a, b, widf)[0] >= STRONG_PTOK
+            and shared_word_weight(a, b, widf) >= STRONG_PTOK_W
+            and min(task_share(a, widf), task_share(b, widf)) >= STRONG_TASK_SHARE)
 
 
 def similarity(a, b, idf=None, widf=None):
@@ -663,8 +722,12 @@ def similarity(a, b, idf=None, widf=None):
 
 def is_match(a, b, idf=None, widf=None):
     """(matches?, score): similarity >= SIM_MIN with an anchor: shared words (token_sim >= ANCHOR_TOK, or
-    ANCHOR_PTOK for prompts), or >= ANCHOR_N_FILES shared files with an overlap >= ANCHOR_FILES."""
+    ANCHOR_PTOK for prompts), or >= ANCHOR_N_FILES shared files with an overlap >= ANCHOR_FILES. Two prompts with
+    Dice >= STRONG_PTOK over >= STRONG_PTOK_W shared word weight, each mostly task words, match regardless of the
+    tools / files (the same task done another way: a git ls-files + cat instead of many Reads; strong_prompt_match)."""
     jt, anchor = token_sim(a, b, widf)
+    if strong_prompt_match(a, b, widf):
+        return True, similarity(a, b, idf, widf)[0]
     fo, shared = file_overlap(a["files"], b["files"], idf)
     if jt < anchor and (fo < ANCHOR_FILES or len(shared) < ANCHOR_N_FILES):
         return False, 0.0
