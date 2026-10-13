@@ -32,23 +32,9 @@ main flow when they return.*
 `tokenscope live` tails `~/.claude/projects/**/*.jsonl` incrementally (byte offsets, partial lines buffered,
 truncation handled) and shows:
 
-- **Board** (`/`, the landing page): every live or recent session (last 6 h) as a card in a stable order (by start;
-  cards never jump as costs change, one moves to the end only when its session ends), next to the
-  top-spenders panel: project (masked as `project-A` … unless `--no-redact`), what was asked (the goal, plus `↳` the
-  latest follow-up), status (working / waiting for you / idle, `done` once a SessionEnd hook fired), current intent,
-  what it is doing now (`▶` the running call and its target, extension only when redacted, with a ticking timer; else
-  the last step), elapsed time, cost-weighted tokens and API-equivalent $ so far with a cost-per-turn sparkline, intent
-  mix bar, subagents running, the skills used and the live warnings (an amber dot by the project, hover for the
-  text, plus the chips). Updates over SSE (polling fallback). Click a card to open its canvas; `← all sessions` on the
-  canvas comes back. ☆ on a card pins it to the follow view (up to 4).
-- **Follow view** (`/follow?s=<id>,<id>,...`): up to 4 pinned sessions side by side (a 2x2 grid that adapts to 1-3),
-  each a compact live flow of its latest steps ([CATEGORY] label, $ and wall time per step) with the running total $,
-  status (running / waiting / idle / ended) and the call running now, auto-scrolling to the newest step (scroll up to
-  stop, `↓ latest` resumes). While a subagent runs, its branch stays pinned in view: the finished main-thread steps
-  around it fold into one `… N earlier steps · $X` line, finished older branches show as one header line (click
-  either to open it), and the tile scrolls so the running branches and the latest step both show. Pins are kept in the browser (localStorage) and in the URL, which wins when it names
-  sessions, so a follow view can be bookmarked. `+ add session` picks another running session; a tile opens the
-  canvas. One `/api/follow` request feeds all tiles.
+- **Board** (`/`, the landing page) and **follow view** (`/follow`): every live or recent session as a card, and up to
+  4 of them side by side as live step flows, subagents included. See
+  [Many sessions at once](#many-sessions-at-once-the-board-and-the-follow-view) below.
 - **Session view** (`/s/<id>`): the session as an infinite canvas (pan, zoom, minimap, fit view). One node per
   intent group or step ([CATEGORY] label, CW, $, wall time, a one-line summary, ✦ skills, ✎ declared), top-down in
   time order; each subagent branches off the step that launched it as its own flow of intents (parallel fan-outs side
@@ -86,8 +72,46 @@ exact status (permission prompts, long-running tools, session end), add the opti
 ```
 
 The hook script is standard-library only, async, always exits 0, and writes only `{ts, event, session_id,
-tool_name, notification_type, message (Notification only, 200 chars)}` to `~/.cache/tokenscope-live/events.jsonl`
-(`$TOKENSCOPE_LIVE_EVENTS`). It never records prompts, tool inputs or tool outputs.
+tool_name, notification_type, message (Notification only, 200 chars), agent_id, agent_type (subagent events only)}`
+to `~/.cache/tokenscope-live/events.jsonl` (`$TOKENSCOPE_LIVE_EVENTS`). It never records prompts, tool inputs or tool outputs.
+
+### Many sessions at once: the board and the follow view
+
+![follow view: 4 live sessions in a 2x2 grid, Explore / general-purpose / Plan subagents nested under the step that launched them](docs/media/follow-subagents.gif)
+
+*Four sessions followed at once. Subagents (Explore, general-purpose, Plan) branch off the step that delegated to
+them, and their cost adds up into that step and the tile total.*
+
+- **Board** (`/`): every live or recent session (last 6 h) as a card, next to the top-spenders panel. Cards stay in a
+  stable order (by start): they don't jump around as costs change, and a card moves to the end only when its session
+  ends. Each card shows the project (masked as `project-A` … unless `--no-redact`), what was asked (the goal, plus
+  `↳` the latest follow-up), status (working / waiting for you / idle, `done` once a SessionEnd hook fired), the
+  current intent, what it is doing now (`▶` the running call and its target, extension only when redacted, with a
+  ticking timer; else the last step), elapsed time, cost-weighted tokens and API-equivalent $ so far with a
+  cost-per-turn sparkline, the intent mix bar, running subagents, the skills used and the live warnings (an amber dot
+  by the project, hover for the text, plus the chips). Updates over SSE (polling fallback). Click a card to open its
+  canvas; `← all sessions` on the canvas comes back.
+- **Pinning**: ☆ on a card pins it to the follow view, up to 4 sessions; `+ add session` in the follow view picks
+  another running one. Pins are kept in the browser (localStorage) and in the URL (`/follow?s=a,b,c,d`), and the URL
+  wins when it names sessions, so a follow view can be bookmarked.
+- **Follow view** (`/follow`): the pinned sessions in a 2x2 grid that adapts to 1-3. Each tile is a compact live flow
+  of the session's latest steps (step title with its [CATEGORY], $ and wall time per step) under a header with the
+  running total $ and the status (running / waiting / idle / ended), plus the call running now. It auto-scrolls to
+  the newest step; scroll up to stop, `↓ latest` resumes. The goal line opens the session's canvas (`/s/<id>`). One
+  `/api/follow` request feeds all tiles.
+- **Subagents, live**: a step that launched subagents (Agent / Task, Workflow, Explore, …) carries them as branches,
+  each labelled with its type and description (type only when redacted) and showing its latest steps and status
+  (running / starting / quiet / done / failed). Parallel ones are siblings in launch order; nested ones
+  hang under the subagent step that launched them (up to 3 levels). A branch's cost, its own subagents included,
+  rolls into the launching step and the tile total. The tile stays *running* (and a SessionEnd does not show it as
+  ended) while any subagent still works, even when the main thread only waits; the NOW line then shows the latest
+  subagent call. While a branch runs it stays pinned in view: the finished main-thread steps around it fold into
+  `… N earlier steps · $X` lines, finished older branches collapse to one header line (click either to open it,
+  which stops following until `↓ latest`), and the tile scrolls so the running branches and the latest step both
+  show.
+
+Goal labels come from the first prompt. One that reads oddly as a label (long, multi-line, filler, paths, code) gets
+a cleaned-up name; `--haiku-odd` asks Haiku for just those (see the options above).
 
 ### Inside Claude Code: the mod and the status line
 
