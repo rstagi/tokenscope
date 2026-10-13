@@ -35,8 +35,9 @@ machine where Claude Code writes transcripts.
 2. Hook events (optional, more precise status). `tokenscope live hooks` prints a settings.json snippet that runs
    `python3 -m tokenscope.live.hook` (async, never blocks, always exit 0, < 50 ms) for UserPromptSubmit,
    PreToolUse, PostToolUse, PostToolUseFailure, Notification, SubagentStart, SubagentStop, Stop, SessionStart,
-   SessionEnd. The hook appends `{"ts", "event": hook_event_name, "session_id", "tool_name"?, "notification_type"?,
-   "message"? (Notification only, truncated 200 chars)}` to `$TOKENSCOPE_LIVE_EVENTS` (default
+   SessionEnd. The hook appends `{"ts", "event": hook_event_name, "session_id", "tool_name"?, "agent_id"?,
+   "agent_type"? (a subagent's own event), "notification_type"?, "message"? (Notification only, truncated 200
+   chars)}` to `$TOKENSCOPE_LIVE_EVENTS` (default
    `~/.cache/tokenscope-live/events.jsonl`). Never write tool inputs/outputs or prompts there. The server tails this
    file too and uses it for status (see below). Everything must work without hooks.
 
@@ -108,6 +109,12 @@ says PreToolUse/UserPromptSubmit after the last Stop, and the last event is < 90
 if a Notification hook (permission prompt / idle prompt) is newer than the last tool/prompt event, or the last
 assistant message has stop_reason end_turn and the session is < 30 min old; `idle` otherwise (> 30 min since
 last activity, or SessionEnd). Document the heuristic in the README; hooks make it exact.
+Subagents keep a session `working` (and keep a SessionEnd from showing it `ended`) while any is active: not finished
+(end_turn, tool result, task-notification) and not stopped by a SubagentStop hook naming it, and it wrote within
+90 s, or one of its calls has no result yet (up to 10 min: a long test run), or a SubagentStart / PreToolUse hook
+naming it (`agent_id`) has no SubagentStop / PostToolUse yet; an Agent/Task call launched < 90 s ago whose
+transcript has not appeared counts too. Hook events that name a subagent update that subagent, not the main
+thread's open-call count.
 
 Goal naming (goalname.py): from the first real prompt (every later prompt gets a keyword name too). The
 imperative clause is used: the first sentence starting with a verb (after filler), else the first non-context
@@ -149,8 +156,15 @@ ThreadingHTTPServer bound to 127.0.0.1 by default. Background thread runs the ta
 - `GET /api/follow?s=<id>,<id>,...` (comma-separated and / or repeated; ids or unique prefixes; at most 4) ->
   {"now", "redacted", "sessions": [{"id","short","project","goal","goal_source","status": running|waiting|idle|ended,
   "cw","usd" (session totals, subagents included),"turns","started","last_ts","seq","steps_n","now": {"tool","target",
-  "since_s"} while running else null,"steps": [the latest 40 main-thread steps: {"i","cat","label","cw","usd","open",
-  "tested","dur_s"}]}]} in the order asked; an unknown id -> {"id", "missing": true}.
+  "since_s","agent"? (the subagent type when the call is a subagent's: the main thread only waits on it)} while running
+  else null,"agents_running","steps": [the latest 40 main-thread steps: {"i","cat","label","cw","usd" (subagents it
+  launched included, nested ones too),"open","tested","dur_s","agents"? (the subagents this step launched, parallel
+  ones as siblings: [{"id" (null: launched, no transcript yet),"type","description" (redacted: null),"workflow",
+  "status": running|starting|idle|done|error,"cw","usd" (with its own subagents),"turns","steps_n","steps": [its
+  latest 6 steps, same shape, nested "agents" up to 3 levels]}]),"agents_more"? (launched by this step, not shown)}]}]}
+  in the order asked; an unknown id -> {"id", "missing": true}. At most 12 subagent branches per tile (active ones
+  first, then the newest; newer steps first), shown in launch order. A subagent's steps are segmented once per change
+  to its own transcript, so polling stays cheap with hundreds of workflow agents.
 - `GET /api/session/<id>` -> full session model (as above, steps of main + agents), plus "seq" (max).
 - `GET /api/session/<id>?since=<seq>` -> only steps with seq > since (+ totals, status, flags, agents summary).
 - `GET /api/session/<id>/flow` -> the session canvas payload (static/session.html, built from web/canvas): the

@@ -201,6 +201,25 @@ body[data-page=session] header{position:static}
 .fnode .fl{font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0}
 .fnode .fc{margin-left:auto;color:var(--mut);font-size:11.5px;font-variant-numeric:tabular-nums;white-space:nowrap;padding-left:8px}
 .fnode.open{border-color:#b8d8c0;box-shadow:0 0 0 3px #e9f7ec}
+/* subagent branches under the step that launched them: parallel ones as siblings, nested ones indented again */
+.fbr+.fnode::before{content:"";position:absolute;left:12px;top:-11px;height:10px;border-left:2px solid #d5dae3}
+.fbr{margin:-4px 0 10px 22px;padding-left:12px;border-left:2px dashed #cfc6ea}
+.fag{position:relative;margin:6px 0 4px}
+.fag::before{content:"";position:absolute;left:-12px;top:9px;width:9px;border-top:2px dashed #cfc6ea}
+.fah{display:flex;align-items:center;gap:6px;font-size:11.5px;color:var(--mut);white-space:nowrap;min-width:0}
+.fah .fat{font-weight:700;color:#6b4fbb;flex:none}
+.fah .fad{overflow:hidden;text-overflow:ellipsis;min-width:0;color:var(--ink)}
+.fah .fas{flex:none}.fag.running>.fah .fas{color:var(--ok);font-weight:600}.fag.error>.fah .fas{color:#c0392b}
+.fah .fc{margin-left:auto;font-variant-numeric:tabular-nums;padding-left:8px}
+.fasteps{margin-top:4px}
+.fasteps::before{content:attr(data-more);display:block;color:var(--mut);font-size:11px;padding:0 0 2px 10px}
+.fasteps[data-more=""]::before{display:none}
+.fag .fnode{margin:0 0 6px 4px;padding:2px 8px;font-size:12px}
+.fag .fnode+.fnode::before{left:6px;top:-7px;height:6px}
+.fag .fbr{margin:-2px 0 6px 12px}
+.fag.done,.fag.idle{opacity:.85}
+.fmore{color:var(--mut);font-size:11.5px;margin:2px 0 4px}
+.fth .fagn{color:#6b4fbb;font-size:11.5px;white-space:nowrap}
 @keyframes fin{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:none}}
 .fjump{position:absolute;right:16px;bottom:12px;font:inherit;font-size:12px;font-weight:600;border:1px solid var(--line);background:#fff;color:var(--acc);border-radius:12px;padding:2px 10px;cursor:pointer;box-shadow:0 2px 8px rgba(28,34,48,.1)}
 @media (max-width:760px){.tiles,.tiles[data-n="2"]{grid-template-columns:1fr;grid-template-rows:none;grid-auto-rows:minmax(320px,1fr)}.tiles[data-n="3"]>.ftile:first-child{grid-row:auto}.followpage{height:auto;overflow:visible}}

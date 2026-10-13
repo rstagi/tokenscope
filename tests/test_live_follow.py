@@ -17,7 +17,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from tokenscope import top  # noqa: E402
 from tokenscope.live import goalname, server, state as st  # noqa: E402
-from test_live import SID, LiveFixture, assistant, lines, result, tool_use, user_prompt  # noqa: E402
+from test_live import SID, T0, LiveFixture, assistant, lines, result, tool_use, user_prompt  # noqa: E402
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 STATIC = os.path.join(ROOT, "tokenscope", "live", "static")
@@ -78,14 +78,15 @@ class TestFollowPayload(LiveFixture):
         s = self.build()
         t = self.state.follow_tile(s, s.last_ts + 1)
         for k in ("id", "short", "project", "goal", "goal_source", "status", "cw", "usd", "turns", "started",
-                  "last_ts", "seq", "steps_n", "now", "steps"):
+                  "last_ts", "seq", "steps_n", "agents_running", "now", "steps"):
             self.assertIn(k, t)
         self.assertEqual(t["status"], "waiting")   # the turn ended (end_turn) moments ago
         self.assertIsNone(t["now"])                # nothing runs while waiting
         self.assertTrue(t["steps"])
         self.assertEqual(len(t["steps"]), t["steps_n"])
-        for x in t["steps"]:
-            self.assertEqual(set(x), {"i", "cat", "label", "cw", "usd", "open", "tested", "dur_s"})
+        for x in t["steps"]:   # + the subagents a step launched (the fixture's Explore survey)
+            self.assertEqual(set(x) - {"agents"}, {"i", "cat", "label", "cw", "usd", "open", "tested", "dur_s"})
+        self.assertEqual([a["type"] for x in t["steps"] for a in x.get("agents", ())], ["Explore"])
         # per-step $ of the main thread; the running total adds subagents and the final answer
         self.assertTrue(0 < sum(x["usd"] for x in t["steps"]) <= t["usd"])
         self.assertEqual(t["usd"], round(s.totals["usd"], 6))
@@ -162,6 +163,245 @@ class TestFollowServer(LiveFixture):
     def test_unknown_paths_still_404(self):
         with self.assertRaises(urllib.error.HTTPError):
             self.fetch("/follow/x")
+
+
+def sub(i, aid, rec):
+    """A subagent transcript record (its own sessionId is the parent's; isSidechain marks it)."""
+    return dict(rec, isSidechain=True, agentId=aid)
+
+
+class TestFollowSubagents(LiveFixture):
+    """A session that delegates: two parallel background agents launched by one step (one launches a nested Explore),
+    each with its own transcript under <session>/subagents/; the tile shows them as branches of that step."""
+
+    def setUp(self):
+        super().setUp()
+        self.state = st.LiveState(redact=False)
+
+    def agent(self, aid, meta, *recs):
+        os.makedirs(self.subdir, exist_ok=True)
+        path = os.path.join(self.subdir, "agent-%s.jsonl" % aid)
+        if meta is not None and not os.path.exists(path[:-len(".jsonl")] + ".meta.json"):
+            with open(path[:-len(".jsonl")] + ".meta.json", "w") as f:
+                json.dump(meta, f)
+        self.write(path, lines(*[sub(0, aid, r) for r in recs]))
+
+    def launch(self):
+        """Main: a prompt, one message with two background Agent calls, their results, end of the turn (t=0..5)."""
+        self.write(self.main, lines(
+            user_prompt(0, "audit the checkout module with parallel subagents"),
+            assistant(1, "m1", [tool_use("tP1", "Agent", {"subagent_type": "general-purpose", "description": "Audit cart.py",
+                                                         "prompt": "x", "run_in_background": True}),
+                                tool_use("tP2", "Agent", {"subagent_type": "general-purpose", "description": "Audit tax.py",
+                                                         "prompt": "y", "run_in_background": True})]),
+            dict(result(2, "tP1"), message={"role": "user", "content": [{"type": "tool_result", "tool_use_id": "tP1",
+                                                                         "content": "Async agent launched successfully."}]}),
+            dict(result(2, "tP2"), message={"role": "user", "content": [{"type": "tool_result", "tool_use_id": "tP2",
+                                                                         "content": "Async agent launched successfully."}]}),
+            assistant(5, "m2", [{"type": "text", "text": "Both audits are running."}], stop="end_turn")))
+        return self.step()
+
+    def work(self):
+        """p1 reads and launches a nested Explore (n1, which greps); p2 runs the tests (t=6..20)."""
+        self.launch()
+        self.agent("p1", {"agentType": "general-purpose", "description": "Audit cart.py", "toolUseId": "tP1"},
+                   assistant(6, "p1m1", [tool_use("p1t1", "Read", {"file_path": "/srv/checkout-app/src/cart.py"})]),
+                   result(7, "p1t1"),
+                   assistant(8, "p1m2", [tool_use("p1t2", "Agent", {"subagent_type": "Explore",
+                                                                     "description": "Map cart callers", "prompt": "z"})]))
+        self.agent("p2", {"agentType": "general-purpose", "description": "Audit tax.py", "toolUseId": "tP2"},
+                   assistant(9, "p2m1", [tool_use("p2t1", "Bash", {"command": "python3 -m pytest -q"})]))
+        self.agent("n1", {"agentType": "Explore", "description": "Map cart callers", "toolUseId": "p1t2",
+                          "parentAgentId": "p1"},
+                   assistant(10, "n1m1", [tool_use("n1t1", "Grep", {"pattern": "cart_total"})]),
+                   result(11, "n1t1"))
+        return self.step()
+
+    def at(self, i):
+        return T0 + i
+
+    def spawning(self, tile):
+        hit = [x for x in tile["steps"] if x.get("agents")]
+        self.assertEqual(len(hit), 1)
+        return hit[0]
+
+    def test_parallel_and_nested_branches(self):
+        s = self.work()
+        t = self.state.follow_tile(s, self.at(12))
+        step = self.spawning(t)
+        p1, p2 = step["agents"]                                          # siblings, in launch order
+        self.assertEqual([(a["id"], a["type"], a["description"]) for a in (p1, p2)],
+                         [("p1", "general-purpose", "Audit cart.py"), ("p2", "general-purpose", "Audit tax.py")])
+        self.assertEqual((p1["status"], p2["status"]), ("running", "running"))
+        self.assertTrue(p1["steps"] and p2["steps"])
+        for a in (p1, p2):
+            for x in a["steps"]:
+                self.assertTrue({"i", "cat", "label", "cw", "usd", "open", "tested", "dur_s"} <= set(x))
+        nested = [n for x in p1["steps"] for n in x.get("agents", ())]   # under the p1 step that launched it
+        self.assertEqual([(n["id"], n["type"], n["description"]) for n in nested], [("n1", "Explore", "Map cart callers")])
+        self.assertFalse([n for x in p2["steps"] for n in x.get("agents", ())])
+        # cost rolls up: n1 into p1, both agents into the step that launched them, everything into the tile total
+        a = s.agents
+        self.assertAlmostEqual(p1["usd"], round(a["p1"]["usd"] + a["n1"]["usd"], 6), places=5)
+        self.assertGreaterEqual(step["usd"] + 1e-6, p1["usd"] + p2["usd"])
+        self.assertEqual(t["usd"], round(s.totals["usd"], 6))
+        self.assertGreater(t["usd"], sum(x["usd"] for x in t["steps"]) - 1e-6 - p1["usd"] - p2["usd"])
+        self.assertEqual(t["agents_running"], 3)
+        self.assertEqual(t["status"], "running")
+        self.assertEqual(t["now"]["agent"], "Explore")                   # the most recent subagent call
+        json.dumps(t)
+
+    def test_tile_keeps_moving_while_only_subagents_work(self):
+        s = self.work()
+        before = self.state.follow_tile(s, self.at(12))
+        self.agent("p2", None, result(30, "p2t1"),
+                   assistant(31, "p2m2", [tool_use("p2t2", "Edit", {"file_path": "/srv/checkout-app/src/tax.py",
+                                                                    "old_string": "a", "new_string": "b"})]),
+                   result(32, "p2t2"))
+        s = self.step()
+        after = self.state.follow_tile(s, self.at(33))
+        self.assertGreater(after["seq"], before["seq"])                  # the tile sees a change ...
+        self.assertEqual(after["steps_n"], before["steps_n"])            # ... with no new main-thread step
+        p2 = self.spawning(after)["agents"][1]
+        self.assertGreater(p2["steps_n"], self.spawning(before)["agents"][1]["steps_n"])
+        self.assertGreater(after["usd"], before["usd"])
+
+    def test_status_stays_running_while_a_subagent_works(self):
+        s = self.work()
+        self.assertEqual(s.last_kind, "end_turn")                        # the main turn is over
+        # p2's test run has no result yet: a long call keeps it (and the session) running, quiet or not
+        for dt in (60, 200, 500):
+            self.assertEqual(self.state.follow_tile(s, self.at(11 + dt))["status"], "running", dt)
+        self.assertEqual(self.state.follow_tile(s, self.at(11 + st.AGENT_CALL_S + 5))["status"], "waiting")
+        # every subagent finishes: the session waits for the user
+        self.agent("p2", None, result(40, "p2t1"), assistant(41, "p2m2", [{"type": "text", "text": "ok"}], stop="end_turn"))
+        self.agent("n1", None, assistant(42, "n1m2", [{"type": "text", "text": "ok"}], stop="end_turn"))
+        self.agent("p1", None, result(43, "p1t2"), assistant(44, "p1m3", [{"type": "text", "text": "ok"}], stop="end_turn"))
+        s = self.step()
+        t = self.state.follow_tile(s, self.at(50))
+        self.assertEqual(t["status"], "waiting")
+        self.assertEqual(t["agents_running"], 0)
+        self.assertEqual({a["status"] for a in self.spawning(t)["agents"]}, {"done"})
+
+    def test_session_end_while_subagents_work_is_not_ended(self):
+        s = self.work()
+        # a SessionEnd newer than every transcript record, while p2's call still runs
+        self.state.apply_hook({"event": "SessionEnd", "session_id": SID, "ts": self.at(12)})
+        self.assertEqual(self.state.follow_tile(s, self.at(20))["status"], "running")
+        self.assertFalse(self.state.board(now=self.at(20))["sessions"][0]["ended"])
+        self.agent("p2", None, result(13, "p2t1"), assistant(14, "p2m2", [{"type": "text", "text": "ok"}], stop="end_turn"))
+        self.agent("p1", None, result(13, "p1t2"), assistant(14, "p1m3", [{"type": "text", "text": "ok"}], stop="end_turn"))
+        self.agent("n1", None, assistant(14, "n1m2", [{"type": "text", "text": "ok"}], stop="end_turn"))
+        s = self.step()
+        self.state.apply_hook({"event": "SessionEnd", "session_id": SID, "ts": self.at(15)})
+        self.assertEqual(self.state.follow_tile(s, self.at(20))["status"], "ended")
+
+    def test_hooks_that_name_a_subagent(self):
+        s = self.work()
+        h = lambda ev, aid, i, **kw: self.state.apply_hook(dict({"event": ev, "session_id": SID, "agent_id": aid,
+                                                                 "ts": self.at(i)}, **kw))  # noqa: E731
+        self.agent("p2", None, result(12, "p2t1"))   # no open call left in p2's transcript
+        self.agent("p1", None, result(12, "p1t2"), assistant(13, "p1m3", [{"type": "text", "text": "ok"}], stop="end_turn"))
+        self.agent("n1", None, assistant(13, "n1m2", [{"type": "text", "text": "ok"}], stop="end_turn"))
+        s = self.step()
+        self.assertEqual(self.state.follow_tile(s, self.at(200))["status"], "waiting")   # p2 quiet for > 90 s
+        h("SubagentStart", "agent-p2", 12, agent_type="general-purpose")
+        h("PreToolUse", "agent-p2", 14, tool_name="Bash")
+        self.assertEqual(s.hook["open_tools"], 0)            # a subagent's call is not the main thread's
+        t = self.state.follow_tile(s, self.at(200))
+        self.assertEqual(t["status"], "running")              # started, not stopped: still working
+        self.assertEqual(t["agents_running"], 1)
+        h("PostToolUse", "agent-p2", 300, tool_name="Bash")
+        h("SubagentStop", "p2", 301)
+        t = self.state.follow_tile(s, self.at(302))
+        self.assertEqual((t["status"], t["agents_running"]), ("waiting", 0))
+        self.assertEqual(self.spawning(t)["agents"][1]["status"], "idle")
+
+    def test_launched_subagent_without_a_transcript_yet(self):
+        s = self.launch()
+        t = self.state.follow_tile(s, self.at(10))
+        self.assertEqual(t["status"], "running")             # the turn ended, but two agents are starting
+        self.assertEqual(t["agents_running"], 2)
+        self.assertEqual([(a["id"], a["status"], a["description"]) for a in self.spawning(t)["agents"]],
+                         [(None, "starting", "Audit cart.py"), (None, "starting", "Audit tax.py")])
+        # never written after 90 s: no longer counted
+        self.assertEqual(self.state.follow_tile(s, self.at(5 + st.WORKING_S + 1))["status"], "waiting")
+
+    def test_many_parallel_agents_are_capped(self):
+        n = st.FOLLOW_AGENTS + 3
+        calls = [tool_use("tw%d" % k, "Agent", {"subagent_type": "Explore", "description": "part %d" % k, "prompt": "p",
+                                                "run_in_background": True}) for k in range(n)]
+        self.write(self.main, lines(user_prompt(0, "survey everything"), assistant(1, "m1", calls),
+                                    assistant(2, "m2", [{"type": "text", "text": "running"}], stop="end_turn")))
+        self.step()
+        for k in range(n):   # the first three are already done, the rest still work
+            recs = [assistant(3 + k, "w%dm1" % k, [tool_use("w%dt" % k, "Grep", {"pattern": "x"})]), result(4 + k, "w%dt" % k)]
+            if k < 3:
+                recs.append(assistant(4 + k, "w%dm2" % k, [{"type": "text", "text": "ok"}], stop="end_turn"))
+            self.agent("w%d" % k, {"agentType": "Explore", "description": "part %d" % k, "toolUseId": "tw%d" % k}, *recs)
+        s = self.step()
+        step = self.spawning(self.state.follow_tile(s, self.at(4 + n)))
+        self.assertEqual(len(step["agents"]), st.FOLLOW_AGENTS)
+        self.assertEqual(step["agents_more"], 3)
+        self.assertEqual({a["status"] for a in step["agents"]}, {"running"})   # the active ones win the budget
+        shown = [a["id"] for a in step["agents"]]
+        self.assertEqual(shown, ["w%d" % k for k in range(3, n)])             # in launch order
+
+    def test_polling_reuses_each_subagents_steps(self):
+        s = self.work()
+        self.state.follow_tile(s, self.at(12))
+        cached = {k: v for k, v in s.agent_steps_cache.items()}
+        self.agent("p2", None, result(13, "p2t1"))   # only p2 changes
+        s = self.step()
+        self.state.follow_tile(s, self.at(14))
+        self.assertIs(s.agent_steps_cache["n1"], cached["n1"])
+        self.assertIsNot(s.agent_steps_cache["p2"], cached["p2"])
+        self.agent("n1", None, assistant(15, "n1m2", [tool_use("n1t2", "Read", {"file_path": "/srv/a.py"})]))
+        s = self.step()
+        self.state.follow_tile(s, self.at(16))
+        self.assertIsNot(s.agent_steps_cache["p1"], cached["p1"])           # a nested agent's cost is its parent's too
+
+    def test_redacted_branches_leak_nothing(self):
+        self.state = st.LiveState(redact=True)
+        s = self.work()
+        t = self.state.follow_tile(s, self.at(12))
+        self.assertEqual([a["description"] for a in self.spawning(t)["agents"]], [None, None])
+        text = json.dumps(t)
+        # (step labels follow the labelling policy: masked paths, as on the canvas and the main thread)
+        for leak in ("cart.py", "tax.py", "/srv", "checkout-app", "cart_total", "pytest -q"):
+            self.assertNotIn(leak, text)
+
+    def test_api_follow_serves_the_branches(self):
+        live = server.Live(self.root, hooks=False, xhints=False)
+        live.state = self.state
+        live.tailer = self.tailer
+        self.work()
+        srv = server.make_server(live, "127.0.0.1", 0)
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        try:
+            with urllib.request.urlopen("http://127.0.0.1:%d/api/follow?s=%s" % (srv.server_address[1], SID[:8]),
+                                        timeout=5) as r:
+                d = json.loads(r.read())
+        finally:
+            srv.shutdown()
+            srv.server_close()
+        step = self.spawning(d["sessions"][0])
+        self.assertEqual([a["id"] for a in step["agents"]], ["p1", "p2"])
+
+
+class TestHookAgentIds(unittest.TestCase):
+    def test_event_line_keeps_the_agent(self):
+        from tokenscope.live import hook
+        ev = hook.event_line({"hook_event_name": "SubagentStart", "session_id": "s", "agent_id": "agent-abc",
+                              "agent_type": "Explore", "prompt": "secret"}, now=1.0)
+        self.assertEqual(ev, {"ts": 1.0, "event": "SubagentStart", "session_id": "s", "agent_id": "agent-abc",
+                              "agent_type": "Explore"})
+
+    def test_hook_agent_id(self):
+        self.assertEqual(st.hook_agent_id("agent-a4431591fe2397dde"), "a4431591fe2397dde")
+        self.assertEqual(st.hook_agent_id("a44"), "a44")
+        for bad in (None, "", "../x", "a b"):
+            self.assertIsNone(st.hook_agent_id(bad))
 
 
 class TestOddLabels(unittest.TestCase):
@@ -322,6 +562,11 @@ class TestFollowUi(unittest.TestCase):
         self.assertIn('el("button", "pin"', board)   # a pin button on each board card
         css = self.read("live.css")
         for sel in ('.tiles[data-n="1"]', '.tiles[data-n="2"]', '.tiles[data-n="3"]', ".fnode", ".scard .pin"):
+            self.assertIn(sel, css)
+        follow = js[js.index("// ---------- follow ----------"):js.index("// ---------- session ----------")]
+        for x in ("syncBranch", "agents_more", "agents_running", "w.agent"):   # subagent branches in a tile
+            self.assertIn(x, follow)
+        for sel in (".fbr", ".fag", ".fah", ".fasteps", ".fmore", ".fth .fagn"):
             self.assertIn(sel, css)
 
     @unittest.skipUnless(shutil.which("node"), "node not installed")

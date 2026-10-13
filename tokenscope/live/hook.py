@@ -1,8 +1,8 @@
 """Claude Code hook script: stdin JSON -> one line appended to the live events file.
 
 Run as `python3 -m tokenscope.live.hook` from the hooks printed by `tokenscope live hooks`. It never blocks and
-always exits 0. Only the event name, session id, tool name and (for Notification) a truncated message are written;
-tool inputs/outputs and prompts never are. File: $TOKENSCOPE_LIVE_EVENTS (default
+always exits 0. Only the event name, session id, tool name, subagent id / type and (for Notification) a truncated
+message are written; tool inputs/outputs and prompts never are. File: $TOKENSCOPE_LIVE_EVENTS (default
 ~/.cache/tokenscope-live/events.jsonl).
 """
 import json
@@ -27,6 +27,10 @@ def event_line(payload, now=None):
           "session_id": str(payload.get("session_id") or "")}
     if payload.get("tool_name"):
         ev["tool_name"] = str(payload["tool_name"])[:120]
+    if payload.get("agent_id"):   # a subagent's event (SubagentStart / SubagentStop, its tool calls)
+        ev["agent_id"] = str(payload["agent_id"])[:80]
+        if payload.get("agent_type"):
+            ev["agent_type"] = str(payload["agent_type"])[:60]
     if ev["event"] == "Notification":
         if payload.get("notification_type"):
             ev["notification_type"] = str(payload["notification_type"])[:60]

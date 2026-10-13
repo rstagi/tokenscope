@@ -12,8 +12,9 @@ subagent messages, into the agent's totals as well.
 Status heuristic (hooks make it exact):
   idle     SessionEnd hook, or no activity for > 30 min
   waiting  a Notification hook newer than the last tool/prompt event, or the last assistant message ended the turn
-           (stop_reason end_turn / Stop hook) and the session is < 30 min old -- unless a subagent wrote
-           within the last 90 s (background agents still working)
+           (stop_reason end_turn / Stop hook) and the session is < 30 min old -- unless a subagent is still
+           active (see agent_active: it wrote within the last 90 s, has a call running, or a SubagentStart hook
+           without its SubagentStop), or one was launched < 90 s ago and has not written yet
   working  the last event is a prompt / tool_result / tool_use (or a PreToolUse / UserPromptSubmit hook came after
            the last Stop) and it is < 90 s old; a PreToolUse hook without its PostToolUse keeps a long tool working
   idle     otherwise
@@ -43,6 +44,10 @@ BOARD_SPARK_N = 40   # points in a board card's cost sparkline
 FOLLOW_STEPS = 40    # steps in a follow-view tile (the latest ones)
 FOLLOW_MAX = 4       # sessions one follow view shows
 FOLLOW_STATUS = {"working": "running"}   # follow-view tile status: running / waiting / idle / ended
+FOLLOW_AGENTS = 12   # subagent branches one follow tile shows (active ones first; the rest counted per step)
+FOLLOW_AGENT_STEPS = 6   # latest steps shown in a subagent branch
+FOLLOW_DEPTH = 3     # nesting levels of subagent branches in a follow tile
+AGENT_CALL_S = 10 * 60   # a subagent call without its result keeps the subagent active this long (a long test run)
 
 
 def board_order(rows):
@@ -51,6 +56,13 @@ def board_order(rows):
     card: one moves only when its session ends (or resumes), and cards come and go as sessions do."""
     return sorted(rows, key=lambda r: (bool(r.get("ended")), r.get("started") is None, r.get("started") or 0.0,
                                        r["id"]))
+
+
+def hook_agent_id(v):
+    """The transcript agent id a hook event names ("agent-<id>" or "<id>"), or None."""
+    v = str(v or "").strip()
+    v = v[len("agent-"):] if v.startswith("agent-") else v
+    return v if re.fullmatch(r"[\w-]{1,64}", v) else None
 
 
 def parse_ts(s):
@@ -376,6 +388,11 @@ class Session:
         self.intents_cache = None  # (key, payload)
         self.agent_labellers = {}  # agent id -> Labeller (subagent steps: signal / rule labels, never the model)
         self.agent_steps_cache = {}   # agent id -> (key, (steps, groups))
+        self.branch_ids = {}      # id(Branch) -> agent id (which subagent a call was made in)
+        self.agent_rev = {}       # agent id -> seq of its (or a descendant's) last ingested record: agent_steps cache
+        self.agent_open = {}      # agent id -> tool_use ids of its calls without a result yet
+        self.tool_agent = {}      # tool_use_id of a subagent's call -> that agent id (until the result)
+        self.hook_agents = {}     # agent id -> {"start", "stop", "open", "ts"} from hooks that name the agent
         self.skills = Counter()   # skill name -> invocations (Skill tool in any thread + slash-command skills)
         self.skill_scan = SkillScanner()   # main thread: slash-command skills
         self.slash_skills = []    # {"at": main-thread turn count, "name", "user": typed} per slash-command skill
@@ -460,6 +477,12 @@ class LiveState:
             branch = s.main
         for r in records:
             self._record(s, branch, agent_id, r)
+        if agent_id:   # its steps (and its ancestors': their steps carry its cost) need a new segmentation
+            rev, seen, aid = s.next_seq(), set(), agent_id   # a fresh seq: records that emitted no step count too
+            while aid and aid not in seen and aid in s.agents:
+                seen.add(aid)
+                s.agent_rev[aid] = rev
+                aid = self._parent(s, s.agents[aid])
         self._warnings(s)
         self.version += 1
         return s
@@ -472,6 +495,7 @@ class LiveState:
                                      "last_ts": None}
             s.branches[agent_id] = Branch()
             s.branches[agent_id].steps = a["steps"]
+            s.branch_ids[id(s.branches[agent_id])] = agent_id
         if meta and a["tool_use_id"] is None:
             a["type"] = meta.get("agentType") or a["type"]
             if not self.redact:
@@ -634,6 +658,9 @@ class LiveState:
         step, tool, br, t0 = hit
         if tool.get("err") is not None:
             return
+        aid = s.tool_agent.pop(tool["id"], None)
+        if aid:
+            s.agent_open.get(aid, set()).discard(tool["id"])
         err = bool(b.get("is_error"))
         tool["err"] = err
         if ts and t0:
@@ -797,6 +824,9 @@ class LiveState:
             step["tools"].append(tool)
             s.tools[tid] = (step, tool, branch, ts)
             s.totals["tool_calls"] += 1
+            if agent_id:
+                s.agent_open.setdefault(agent_id, set()).add(tid)
+                s.tool_agent[tid] = agent_id
             f = rec.get("file")
             it = intents.tool_intent(rec)
             step.setdefault("_facts", []).append({   # private, for the idle recap (see recap.py)
@@ -870,6 +900,21 @@ class LiveState:
         name, ts = ev.get("event"), parse_ts(ev.get("ts")) or self.clock()
         h = s.hook
         h["last"] = (name, ts)
+        aid = hook_agent_id(ev.get("agent_id"))
+        if aid and name in ("SubagentStart", "SubagentStop", "PreToolUse", "PostToolUse", "PostToolUseFailure"):
+            # a subagent's own event (hooks name the agent): its activity, not the main thread's
+            a = s.hook_agents.setdefault(aid, {"start": 0, "stop": 0, "open": 0, "ts": 0})
+            a["ts"] = ts
+            if name == "SubagentStart":
+                a["start"] = ts
+            elif name == "SubagentStop":
+                a["stop"], a["open"] = ts, 0
+            elif name == "PreToolUse":
+                a["open"] += 1
+            else:
+                a["open"] = max(0, a["open"] - 1)
+            self.version += 1
+            return
         if name in ("UserPromptSubmit", "PreToolUse", "PostToolUse", "PostToolUseFailure", "SubagentStart",
                     "SessionStart"):
             h["active_ts"] = ts
@@ -886,12 +931,47 @@ class LiveState:
         self.version += 1
 
     # ------------------------------------------------------------ views
+    @staticmethod
+    def agent_active(s, a, now):
+        """A subagent still working: not finished (end_turn / result / task-notification) and not stopped by a
+        SubagentStop hook, and it wrote within WORKING_S, or a call of it has no result yet (< AGENT_CALL_S: a long
+        test run), or a SubagentStart / PreToolUse hook naming it has no SubagentStop / PostToolUse yet."""
+        if a["status"] not in ("running", "starting"):
+            return False
+        last = a.get("last_ts") or 0
+        hk = s.hook_agents.get(a["id"])
+        if hk:
+            if hk["stop"] and hk["stop"] >= max(hk["start"], last):
+                return False
+            if (hk["start"] or hk["open"]) and now - max(last, hk["ts"]) < AGENT_CALL_S:
+                return True
+        if s.agent_open.get(a["id"]) and now - last < AGENT_CALL_S:
+            return True
+        return bool(last) and now - last < WORKING_S
+
+    def _pending_launches(self, s, now):
+        """Agent/Task calls launched < WORKING_S ago whose subagent has not written yet (and did not fail)."""
+        linked = {a["tool_use_id"] for a in s.agents.values()}
+        out = []
+        for tid, f in s.fanouts.items():
+            if tid in linked or f.get("agent_id") or not f.get("ts") or now - f["ts"] >= WORKING_S:
+                continue
+            hit = s.tools.get(tid)
+            if hit and hit[1].get("err"):
+                continue
+            out.append(f)
+        return out
+
+    def agents_active(self, s, now):
+        """Number of subagents still working (agent_active), counting launches that have not written yet."""
+        return sum(1 for a in s.agents.values() if self.agent_active(s, a, now)) + \
+            (len(self._pending_launches(s, now)) if s.fanouts else 0)
+
     def status(self, s, now=None):
         now = self.clock() if now is None else now
         st = status_of(now, s.last_ts, s.last_kind, s.last_active_ts, s.hook)
-        if st != "working" and any(a["status"] == "running" and a.get("last_ts") and now - a["last_ts"] < 90
-                                   for a in s.agents.values()):
-            return "working"   # main turn ended but background subagents are still active
+        if st != "working" and (s.agents or s.fanouts) and self.agents_active(s, now):
+            return "working"   # the main turn ended (or waits on a foreground agent) but subagents still work
         return st
 
     @staticmethod
@@ -943,7 +1023,7 @@ class LiveState:
                 "flags": [{"flag": w["rule"], "count": w["count"]} for w in s.warnings.values()],
                 "warnings": self.warnings_list(s),
                 "intent_mix": sorted([[g, round(c, 1)] for g, c in mix.items()], key=lambda x: -x[1]),
-                "ended": self.ended(s),
+                "ended": self.ended(s, now),
                 "asked": self._asked(s), "now": self._now(s, now),
                 "cw_series": self.cw_series(turns), **self._board_intent(s, now)}
 
@@ -968,10 +1048,13 @@ class LiveState:
             cur = {"label": self._lab((g or x)["label"]), "cat": (g or x)["cat"], "open": not x["closed"]}
         return {"intent": cur, "skills": [n for n, _ in sorted(s.skills.items(), key=lambda kv: (-kv[1], kv[0]))]}
 
-    @staticmethod
-    def ended(s):
-        """A SessionEnd hook event after the session's last transcript event (a resumed session is not ended)."""
-        return bool(s.hook["end_ts"]) and s.hook["end_ts"] >= (s.last_ts or 0)
+    def ended(self, s, now=None):
+        """A SessionEnd hook event after the session's last transcript event (a resumed session is not ended), and
+        no subagent still active (agent_active): a SessionEnd while subagents work does not end the view."""
+        if not (s.hook["end_ts"] and s.hook["end_ts"] >= (s.last_ts or 0)):
+            return False
+        now = self.clock() if now is None else now
+        return not any(self.agent_active(s, a, now) for a in s.agents.values())
 
     def board(self, now=None, max_idle_s=6 * 3600):
         now = self.clock() if now is None else now
@@ -982,22 +1065,134 @@ class LiveState:
     def follow_tile(self, s, now=None, last_n=FOLLOW_STEPS):
         """One tile of the follow view (/api/follow): the session's latest main-thread steps (label, category, $,
         CW, wall time, open) with its running totals, status (running / waiting / idle / ended) and the call running
-        now. Steps come from the cached segmentation (steps()), so polling a few sessions stays cheap."""
+        now. A step that launched subagents carries them as branches ("agents", see _follow_agents): their latest
+        steps, nested subagents, status and cost; "agents_running" counts the active ones. Steps come from cached
+        segmentations (steps(), agent_steps() keyed on the agent's own records), so polling stays cheap."""
         now = self.clock() if now is None else now
         status = self.status(s, now)
         steps, _ = self.steps(s, now) if s.main.turn_steps else ([], [])
-        w = self._now(s, now) if status == "working" else None
+        ctx = self._follow_ctx(s, now) if s.agents or s.fanouts else None
+        w = self._follow_now(s, now, ctx) if status == "working" else None
+        shown = steps[-last_n:]
+        out = [self._follow_step(x, now, status == "working") for x in shown]
+        if ctx:
+            self._follow_agents(s, None, shown, out, now, ctx, 0)
         return {"id": s.id, "short": s.id[:8], "project": self._project(s.project_raw),
                 "goal": s.goal["name"] if s.goal else None, "goal_source": s.goal["source"] if s.goal else None,
-                "status": "ended" if self.ended(s) else FOLLOW_STATUS.get(status, status),
+                "status": "ended" if self.ended(s, now) else FOLLOW_STATUS.get(status, status),
                 "cw": round(s.totals["cw"], 1), "usd": round(s.totals["usd"], 6), "turns": s.totals["turns"],
                 "started": s.started, "last_ts": s.last_ts, "seq": s.seq, "steps_n": len(steps),
-                "now": {"tool": w["tool"], "target": w["target"], "since_s": w["since_s"]} if w else None,
-                "steps": [{"i": x["i"], "cat": x["cat"], "label": self._lab(x["label"]), "cw": x["cw"],
-                           "usd": x["usd"], "open": not x["closed"], "tested": x["tested"],
-                           "dur_s": stepsmod.duration(x["ts0"], now if not x["closed"] and status == "working"
-                                                      else x["ts1"])}
-                          for x in steps[-last_n:]]}
+                "agents_running": sum(ctx["active"].values()) + len(ctx["pending"]) if ctx else 0,
+                "now": w, "steps": out}
+
+    def _follow_step(self, x, now, ticking):
+        return {"i": x["i"], "cat": x["cat"], "label": self._lab(x["label"]), "cw": x["cw"], "usd": x["usd"],
+                "open": not x["closed"], "tested": x["tested"],
+                "dur_s": stepsmod.duration(x["ts0"], now if not x["closed"] and ticking else x["ts1"])}
+
+    def _follow_ctx(self, s, now):
+        """What one follow tile's subagent branches need, computed once per tile: who launched whom, which agents
+        are active, subtree costs, workflow runs and launches without a transcript yet."""
+        kids = {}
+        for a in s.agents.values():
+            kids.setdefault(self._parent(s, a), []).append(a)
+        pending = {}
+        for f in self._pending_launches(s, now):
+            hit = s.tools.get(f["tool_use_id"])
+            pending.setdefault(None if not hit or hit[2] is s.main else s.branch_ids.get(id(hit[2])), []).append(f)
+        wf = {a["id"]: tid for tid, ags in self.workflow_agents(s).items() for a in ags} if s.wf_calls else {}
+        return {"kids": kids, "pending": [f for fs in pending.values() for f in fs], "pending_by": pending, "wf": wf,
+                "active": {a["id"]: self.agent_active(s, a, now) for a in s.agents.values()},
+                "cost": self.tree_cost(s), "budget": FOLLOW_AGENTS}
+
+    def _follow_now(self, s, now, ctx):
+        """The call running now: the main thread's, or while it only waits on subagents (its turn ended, or its
+        latest call is an Agent call), the latest call of the most recently active subagent ({"agent": its type})."""
+        w = self._now(s, now)
+        main = {"tool": w["tool"], "target": w["target"], "since_s": w["since_s"]} if w else None
+        live = [a for a in s.agents.values() if ctx and ctx["active"].get(a["id"])]
+        tool = s.main.turn_steps[-1]["tools"][-1]["name"] if s.main.turn_steps and s.main.turn_steps[-1]["tools"] else None
+        if not live or (status_of(now, s.last_ts, s.last_kind, s.last_active_ts, s.hook) == "working"
+                        and tool not in ("Agent", "Task", "Workflow")):
+            return main
+        a = max(live, key=lambda a: (a.get("last_ts") or 0, a["id"]))
+        turns = s.branches[a["id"]].turn_steps
+        x = turns[-1]["tools"][-1] if turns and turns[-1]["tools"] else None
+        if x is None:
+            return main
+        return {"tool": x["label"], "target": x.get("target"), "agent": a["type"] or "agent",
+                "since_s": round(max(0.0, now - x["ts"]), 1) if x.get("ts") else None}
+
+    def _follow_agents(self, s, aid, steps, out, now, ctx, depth):
+        """Attach to each shown step of a branch (main: aid None) the subagents it launched ("agents": active ones
+        first within the tile's budget, shown in launch order; "agents_more": the rest). A subagent is matched to
+        a step by its Agent/Task call (workflow agents: the Workflow call), else to the last step started before
+        its first record."""
+        children = ctx["kids"].get(aid, ())
+        pend = ctx["pending_by"].get(aid, [])
+        if not steps or not (children or pend):
+            return
+        br = self._branch(s, aid)
+        at = {}
+        for x in steps:
+            for k in range(x["turn_first"], x["turn_last"] + 1):
+                for t in br.turn_steps[k]["tools"] if 0 <= k < len(br.turn_steps) else ():
+                    if t.get("id"):
+                        at.setdefault(t["id"], x["i"])
+        first_i = steps[0]["i"]
+        by_step = {}
+        for a in children:
+            i = at.get(a["tool_use_id"])
+            i = at.get(ctx["wf"].get(a["id"])) if i is None else i
+            if i is None:
+                t0 = a.get("first_ts") or 0
+                if t0 and steps[0]["ts0"] and t0 < steps[0]["ts0"]:
+                    continue   # launched by an earlier step than the ones shown
+                i = next((x["i"] for x in reversed(steps) if x["ts0"] and x["ts0"] <= t0), steps[-1]["i"])
+            by_step.setdefault(i, []).append(("a", a))
+        for f in pend:
+            i = at.get(f["tool_use_id"])
+            if i is not None and i >= first_i:
+                by_step.setdefault(i, []).append(("f", f))
+        rows = {x["i"]: r for x, r in zip(steps, out)}
+        for i in sorted(by_step, reverse=True):   # newest steps first: they get the budget
+            cands = by_step[i]
+            rank = sorted(cands, key=lambda c: (c[0] == "a" and not ctx["active"].get(c[1]["id"]),
+                                                -((c[1].get("first_ts") if c[0] == "a" else c[1].get("ts")) or 0)))
+            take = rank[:max(0, ctx["budget"])]
+            ctx["budget"] -= len(take)
+            take.sort(key=lambda c: ((c[1].get("first_ts") if c[0] == "a" else c[1].get("ts")) or 0,
+                                     str(c[1].get("id") or c[1].get("tool_use_id"))))
+            row = rows[i]
+            if take:
+                row["agents"] = [self._follow_agent(s, c[1], now, ctx, depth) if c[0] == "a" else self._follow_pending(c[1])
+                                 for c in take]
+            if len(cands) > len(take):
+                row["agents_more"] = len(cands) - len(take)
+
+    def _follow_agent(self, s, a, now, ctx, depth):
+        active = ctx["active"].get(a["id"], False)
+        steps, _ = self.agent_steps(s, a["id"], now)
+        shown = steps[-FOLLOW_AGENT_STEPS:]
+        out = [self._follow_step(x, now, active) for x in shown]
+        st = a["status"]
+        if st in ("running", "starting") and not active:
+            st = "idle"   # not finished, but quiet (no write, no open call) for a while
+        f = s.fanouts.get(a["tool_use_id"]) or {}
+        cw, usd = ctx["cost"].get(a["id"], (a["cw"], a["usd"]))
+        node = {"id": a["id"], "type": a["type"] or f.get("agent_type") or "agent",
+                "description": None if self.redact else (a.get("description") or f.get("description")),
+                "workflow": bool(a.get("workflow")), "status": "running" if active else st,
+                "cw": round(cw, 1), "usd": round(usd, 6), "turns": a["turns"], "steps_n": len(steps), "steps": out}
+        if depth + 1 < FOLLOW_DEPTH:
+            self._follow_agents(s, a["id"], shown, out, now, ctx, depth + 1)
+        return node
+
+    def _follow_pending(self, f):
+        """A launched subagent that has not written its transcript yet."""
+        return {"id": None, "type": f.get("agent_type") or "agent",
+                "description": None if self.redact else f.get("description"), "workflow": False,
+                "status": "starting", "cw": 0.0, "usd": 0.0, "turns": 0, "steps_n": 0, "steps": []}
 
     def follow(self, ids, now=None):
         """The follow view's payload for up to FOLLOW_MAX session ids (or unique prefixes): a tile each, in the
@@ -1076,7 +1271,7 @@ class LiveState:
         hit = s.tools.get(a.get("tool_use_id"))
         if not hit or hit[2] is s.main:
             return None
-        return next((k for k, b in s.branches.items() if b is hit[2]), None)
+        return s.branch_ids.get(id(hit[2]))
 
     def _children(self, s, a):
         if not a:
@@ -1146,7 +1341,7 @@ class LiveState:
         if not hit:
             return None
         turn, _, br = hit[0], hit[1], hit[2]
-        aid = None if br is s.main else next((k for k, b in s.branches.items() if b is br), None)
+        aid = None if br is s.main else s.branch_ids.get(id(br))
         try:
             k = br.turn_steps.index(turn)
         except ValueError:
@@ -1237,6 +1432,7 @@ class LiveState:
         """(turns, events) for steps.segment from the main thread, or the subagent `aid` (see steps.py)."""
         by_tool = {a["tool_use_id"]: a for a in s.agents.values() if a["tool_use_id"]}
         by_wf = self.workflow_agents(s) if s.wf_calls and aid is None else {}
+        tree = self.tree_cost(s) if s.agents else {}
         turns = []
         for t in self._branch(s, aid).turn_steps:
             seg = t.get("_seg")
@@ -1247,13 +1443,36 @@ class LiveState:
             wfs = [a for x in t["tools"] for a in by_wf.get(x.get("id"), ())]
             ends = [x["ts"] + x["dur_ms"] / 1000.0 for x in t["tools"] if x.get("ts") and x.get("dur_ms") is not None]
             seg.update(ts_end=max(ends) if ends else None, cw=t.get("cw") or 0, usd=t.get("usd") or 0, test=t.get("_test"),
-                       sub_cw=sum(a["cw"] for a in subs + wfs), sub_usd=sum(a["usd"] for a in subs + wfs),
+                       sub_cw=sum(tree[a["id"]][0] for a in subs + wfs),
+                       sub_usd=sum(tree[a["id"]][1] for a in subs + wfs),
                        wf_agents=len(wfs))
             turns.append(seg)
         if aid is not None:
             return turns, []
         events = [{"kind": "prompt", "at": k} for k in s.prompt_at]
         return turns, events + [dict(e, kind="skill") for e in s.slash_skills]
+
+    def tree_cost(self, s):
+        """agent id -> (cw, usd) of the agent and every subagent it launched (nested ones roll up into the step that
+        launched the outermost)."""
+        kids = {}
+        for a in s.agents.values():
+            kids.setdefault(self._parent(s, a), []).append(a)
+        out = {}
+
+        def walk(a, seen):
+            if a["id"] in out:
+                return out[a["id"]]
+            cw, usd = a["cw"], a["usd"]
+            for c in kids.get(a["id"], ()):
+                if c["id"] not in seen:
+                    x = walk(c, seen | {c["id"]})
+                    cw, usd = cw + x[0], usd + x[1]
+            out[a["id"]] = (cw, usd)
+            return out[a["id"]]
+        for a in s.agents.values():
+            walk(a, {a["id"]})
+        return out
 
     @staticmethod
     def _branch(s, aid):
@@ -1268,7 +1487,7 @@ class LiveState:
             lab = s.agent_labellers[aid] = stepsmod.Labeller()
             lab.no_model = True
         open_last = a["status"] in ("running", "starting")
-        key = (s.seq, open_last, len(lab.locked))
+        key = (s.agent_rev.get(aid), open_last, len(lab.locked))   # its own records only: cheap to poll
         hit = s.agent_steps_cache.get(aid)
         if hit and hit[0] == key:
             return hit[1]

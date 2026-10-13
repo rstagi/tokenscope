@@ -502,7 +502,7 @@
     }
     function buildTile(id) {
       var tile = el("div", "ftile");
-      tile.innerHTML = '<div class="fth"><span class="proj"></span><span class="pillw"></span>' +
+      tile.innerHTML = '<div class="fth"><span class="proj"></span><span class="fagn"></span><span class="pillw"></span>' +
         '<span class="ftot"><b class="usd"></b> <span class="mut small cw"></span></span><button class="unpin" title="stop following">×</button></div>' +
         '<a class="fgoal"></a><div class="fnow"></div><div class="fflow"><div class="fsteps"></div></div>' +
         '<button class="fjump" style="display:none">↓ latest</button>';
@@ -555,6 +555,65 @@
       $(".fc", nd).textContent = (x.usd > 0 && x.usd < 0.005 ? "<$0.01" : fmtUsd(x.usd)) + (num(x.dur_s) != null ? " · " + fmtWall(x.dur_s) : "");
       $(".fc", nd).title = fmtK(x.cw) + " CW";
     }
+    // a step's subagents: one branch per subagent (parallel ones as siblings), each with its latest steps and, under
+    // the step that launched them, its own subagents; reconciled by id so a poll only updates what changed
+    function place(box, node, n) { if (box.children[n] !== node) box.insertBefore(node, box.children[n] || null); }
+    function drop(node) { if (node && node.parentNode) node.parentNode.removeChild(node); }
+    function syncSteps(box, steps, store) {
+      var n = 0, seen = {}, added = false;
+      steps.forEach(function (x) {
+        seen[x.i] = 1;
+        var e = store[x.i];
+        if (!e) { e = store[x.i] = {nd: stepNode(x)}; added = true; }
+        updStep(e.nd, x);
+        place(box, e.nd, n++);
+        if ((x.agents && x.agents.length) || x.agents_more) {
+          if (!e.br) e.br = {el: el("div", "fbr"), ags: {}};
+          added = syncBranch(e.br, x.agents || [], x.agents_more) || added;
+          place(box, e.br.el, n++);
+        } else if (e.br) { drop(e.br.el); e.br = null; }
+      });
+      Object.keys(store).forEach(function (i) {
+        if (seen[i]) return;
+        drop(store[i].nd);
+        if (store[i].br) drop(store[i].br.el);
+        delete store[i];
+      });
+      return added;
+    }
+    var AG_ST = {running: "▶ running", starting: "starting…", idle: "quiet", done: "done", error: "failed"};
+    function syncBranch(br, agents, more) {
+      var seen = {}, added = false, n = 0;
+      agents.forEach(function (a, k) {
+        var key = a.id || "pending:" + k + ":" + a.type;
+        seen[key] = 1;
+        var e = br.ags[key];
+        if (!e) {
+          e = br.ags[key] = {el: el("div", "fag"), store: {}};
+          e.el.innerHTML = '<div class="fah"><span class="fat"></span><span class="fad"></span><span class="fas"></span>' +
+            '<span class="fc"></span></div><div class="fasteps"></div>';
+          added = true;
+        }
+        e.el.className = "fag " + (a.status || "idle");
+        $(".fat", e.el).textContent = "↳ " + (a.workflow ? "workflow · " : "") + (a.type || "agent");
+        $(".fad", e.el).textContent = a.description || "";
+        $(".fad", e.el).title = a.description || "";
+        $(".fas", e.el).textContent = AG_ST[a.status] || a.status || "";
+        $(".fc", e.el).textContent = fmtUsd(a.usd) + (a.steps_n ? " · " + a.steps_n + " step" + (a.steps_n > 1 ? "s" : "") : "");
+        $(".fc", e.el).title = fmtK(a.cw) + " CW (its own subagents included)";
+        var box = $(".fasteps", e.el), steps = Array.isArray(a.steps) ? a.steps : [];
+        box.setAttribute("data-more", a.steps_n > steps.length ? "+" + (a.steps_n - steps.length) + " earlier" : "");
+        added = syncSteps(box, steps, e.store) || added;
+        place(br.el, e.el, n++);
+      });
+      Object.keys(br.ags).forEach(function (key) { if (!seen[key]) { drop(br.ags[key].el); delete br.ags[key]; } });
+      if (more) {
+        if (!br.more) br.more = el("div", "fmore");
+        br.more.textContent = "+" + more + " more subagent" + (more > 1 ? "s" : "");
+        place(br.el, br.more, n++);
+      } else if (br.more) { drop(br.more); br.more = null; }
+      return added;
+    }
     function updTile(tile, s) {
       tile._s = s;
       if (s.missing) {
@@ -571,31 +630,21 @@
       goalNode($(".fgoal", tile), s.goal_source ? {name: s.goal, source: s.goal_source} : s.goal);
       tile._usd.set(s.usd);
       $(".cw", tile).textContent = fmtK(s.cw) + " CW";
-      var flow = $(".fsteps", tile), seen = {}, steps = Array.isArray(s.steps) ? s.steps : [], added = false;
-      steps.forEach(function (x, n) {
-        seen[x.i] = 1;
-        var nd = tile._nodes[x.i];
-        if (!nd) { nd = tile._nodes[x.i] = stepNode(x); added = true; }
-        updStep(nd, x);
-        if (flow.children[n] !== nd) flow.insertBefore(nd, flow.children[n] || null);
-      });
-      Object.keys(tile._nodes).forEach(function (i) {
-        if (seen[i]) return;
-        var nd = tile._nodes[i];
-        if (nd.parentNode) nd.parentNode.removeChild(nd);
-        delete tile._nodes[i];
-      });
+      var flow = $(".fsteps", tile), steps = Array.isArray(s.steps) ? s.steps : [];
+      var added = syncSteps(flow, steps, tile._nodes);
+      var ar = $(".fagn", tile);
+      ar.textContent = s.agents_running ? s.agents_running + " subagent" + (s.agents_running > 1 ? "s" : "") + " running" : "";
       var more = s.steps_n > steps.length ? s.steps_n - steps.length : 0;
       flow.setAttribute("data-more", more ? "+" + more + " earlier steps" : "");
       if (!steps.length) flow.setAttribute("data-more", "no steps yet");
       if (tile._follow && (added || tile._seq !== s.seq)) scrollEnd(tile);
       tile._seq = s.seq;
-      tile._now = s.now ? {tool: s.now.tool, target: s.now.target, since: s.now.since_s, at: nowS()} : null;
+      tile._now = s.now ? {tool: s.now.tool, target: s.now.target, agent: s.now.agent, since: s.now.since_s, at: nowS()} : null;
       tickTile(tile);
     }
     function tickTile(tile) {
       var w = tile._now, n = $(".fnow", tile);
-      n.textContent = w && w.tool ? "▶ " + w.tool + (w.target ? " · " + w.target : "") + (w.since != null ? " · " + fmtWall(w.since + nowS() - w.at) : "") : "";
+      n.textContent = w && w.tool ? "▶ " + (w.agent ? w.agent + " › " : "") + w.tool + (w.target ? " · " + w.target : "") + (w.since != null ? " · " + fmtWall(w.since + nowS() - w.at) : "") : "";
     }
     function render(d) {
       if (d.now != null) clockOff = ts(d.now) - Date.now() / 1000;
