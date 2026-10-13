@@ -16,10 +16,10 @@ machine where Claude Code writes transcripts.
     tokenscope/live/hookevents.py  reads hook events written by the hook script (optional source)
     tokenscope/live/hook.py        the hook script: stdin JSON -> one line appended to the events file
     tokenscope/live/server.py      ThreadingHTTPServer: static pages, JSON API, Server-Sent Events
-    tokenscope/live/static/board.html, session.html, live.css, live.js, demo.html (offline UI preview)
+    tokenscope/live/static/board.html, session.html, follow.html, live.css, live.js, demo.html (offline UI preview)
     tokenscope/live/statusline.py  Claude Code status line helper
     tokenscope/live/__main__.py    `python -m tokenscope.live`
-    CLI: `tokenscope live [--root DIR] [--port 8765] [--host 127.0.0.1] [--no-redact] [--haiku] [--since-minutes 120]`
+    CLI: `tokenscope live [--root DIR] [--port 8765] [--host 127.0.0.1] [--no-redact] [--haiku] [--haiku-odd] [--since-minutes 120]`
          (add a `live` subcommand to tokenscope/cli.py that calls tokenscope.live.server.main(args))
 
 ## Ingestion
@@ -123,12 +123,19 @@ tokenscope.redact helpers if suitable). `--haiku` (off by default): after the he
 `claude -p --model haiku --tools "" --output-format json` with ONLY the masked first 240 chars, asking for a 3-7
 word goal name; cached per session in memory (later prompts: per (session, prompt n), keyword name until it
 arrives); 30 s timeout; never blocks the tailer (background thread);
-failures keep the heuristic name.
+failures keep the heuristic name. A prompt that reads oddly as a label (goalname.reads_oddly: multi-line, markup, code,
+paths / URLs, leading filler, > 80 chars) is named from its cleaned text (goalname.goal_label: fences, tags, URLs
+dropped, paths cut to their file name, filler stripped; deterministic). `--haiku-odd` sends only those prompts to
+Haiku as above. Haiku names are also cached on disk by a hash of the masked model input
+($TOKENSCOPE_CACHE_DIR/goal-names.json); without --haiku / --haiku-odd the server only reads that cache (no model
+call).
 
 ## Server (server.py)
 
 ThreadingHTTPServer bound to 127.0.0.1 by default. Background thread runs the tailer loop. Endpoints:
-- `GET /` -> static/board.html; `GET /s/<session_id>` -> static/session.html; `GET /static/<file>`.
+- `GET /` -> static/board.html; `GET /s/<session_id>` -> static/session.html; `GET /follow` -> static/follow.html
+  (pinned sessions: `?s=<id>,...`, else the browser's localStorage pins; the URL wins when it names any; at most 4);
+  `GET /static/<file>`.
 - `GET /api/board` -> {"now", "redacted": bool, "sessions":[{"id","short","project","goal","status",
   "current_intent","current_group","last_step":{"label","ts","err"},"started","last_ts","elapsed_s","cw","usd",
   "turns","tool_calls","errors","agents_running","agents_total","context_tokens","flags":[{"flag","count"}],"warnings":[...],
@@ -136,7 +143,14 @@ ThreadingHTTPServer bound to 127.0.0.1 by default. Background thread runs the ta
   step, labelled as in the pane),"skills":[names],"asked" (as in the compact payload: goal, latest follow-up name,
   prompt_n),"now" (as in the compact payload: the latest main-thread call, tool / target / since_s),"cw_series" (CW
   per turn, main + subagents, at most 40 points: long sessions summed into buckets),"ended" (a SessionEnd hook
-  newer than the last transcript event)}]} sorted by last_ts desc; sessions idle for more than 6 h dropped.
+  newer than the last transcript event)}]} in a stable order (state.board_order: sessions not ended by start time,
+  then id; ended ones after them in the same order), so a card moves only when its session ends or resumes; sessions
+  idle for more than 6 h dropped.
+- `GET /api/follow?s=<id>,<id>,...` (comma-separated and / or repeated; ids or unique prefixes; at most 4) ->
+  {"now", "redacted", "sessions": [{"id","short","project","goal","goal_source","status": running|waiting|idle|ended,
+  "cw","usd" (session totals, subagents included),"turns","started","last_ts","seq","steps_n","now": {"tool","target",
+  "since_s"} while running else null,"steps": [the latest 40 main-thread steps: {"i","cat","label","cw","usd","open",
+  "tested","dur_s"}]}]} in the order asked; an unknown id -> {"id", "missing": true}.
 - `GET /api/session/<id>` -> full session model (as above, steps of main + agents), plus "seq" (max).
 - `GET /api/session/<id>?since=<seq>` -> only steps with seq > since (+ totals, status, flags, agents summary).
 - `GET /api/session/<id>/flow` -> the session canvas payload (static/session.html, built from web/canvas): the

@@ -4,7 +4,13 @@ Keyword heuristic (default): verb class ("Fix", "Build", ...) + up to 4 salient 
 "Fix: checkout total tax" (<= 48 chars). In redact mode paths, emails, URLs, long numbers, hex ids and capitalised
 proper-noun-looking words are masked first. Optional Haiku naming (`--haiku`) runs `claude -p` in a background
 thread with only the masked first 240 chars; failures keep the heuristic name.
+
+A prompt that reads oddly as a label (reads_oddly: long, multi-line, opens with filler, carries paths, URLs, code or
+markup) is named from its cleaned text (goal_label: deterministic, no network); the live server also hands only those
+prompts to Haiku (HaikuNamer(only_odd=True)), its names cached on disk by a hash of the masked model input
+($TOKENSCOPE_CACHE_DIR/goal-names.json, default ~/.cache/tokenscope/goal-names.json).
 """
+import hashlib
 import json
 import os
 import tempfile
@@ -113,6 +119,117 @@ def keyword_name(text, redact=False):
     return name
 
 
+# ---------------------------------------------------------------- labels that read oddly
+LONG_CHARS = 80   # longer than a top-spenders turn label (top.TURN_CHARS): too long to read as a goal
+LEAD_FILLER = re.compile(r"^\W*(?:(?:ok(?:ay)?|so|hey|hi|hello|hmm+|um+|uh+|well|alright|right|now|also|and|but|great|"
+                         r"thanks|thank you|cool|yes|yeah|yep|sure|please|pls|can you|could you|would you|will you|"
+                         r"i want(?: you)? to|i'd like(?: you)? to|i need(?: you)? to|let's|lets|we need to|"
+                         r"help me(?: to)?|go ahead and|just)\b[\s,.!:;-]*)+", re.I)
+FENCE_RE = re.compile(r"```.*?(?:```|$)", re.S)
+TAG_RE = re.compile(r"</?[A-Za-z][\w-]*(?:\s[^<>]*)?/?>")
+URL_RE = MASKS[0]
+PATH_RE = MASKS[2]
+CODE_RE = re.compile(r"`|[{};]|=>|::|==|\b(?:def|class|function|import|return|const|var|let)\s+\w|\w\(.*\)|"
+                     r"^\s*(?:\$|>>>|#!)|Traceback \(most recent|\b\w+(?:Error|Exception):")
+
+
+def reads_oddly(text):
+    """Why a prompt's raw text reads oddly as a goal label ("multi-line", "long", "filler", "path", "code",
+    "markup"), else None."""
+    t = str(text or "").strip()
+    if not t:
+        return None
+    if "\n" in t:
+        return "multi-line"
+    if TAG_RE.search(t):
+        return "markup"
+    if CODE_RE.search(t):
+        return "code"
+    if URL_RE.search(t) or PATH_RE.search(t):
+        return "path"
+    if LEAD_FILLER.match(t):
+        return "filler"
+    if len(t) > LONG_CHARS:
+        return "long"
+    return None
+
+
+def clean_prompt(text):
+    """The prose of a prompt: code fences and markup dropped, inline code unquoted, URLs dropped, paths cut to their
+    last part, leading filler stripped, whitespace collapsed (deterministic, no network)."""
+    s = FENCE_RE.sub(" ", str(text or ""))
+    s = TAG_RE.sub(" ", s)
+    s = s.replace("`", "")
+    s = URL_RE.sub(" ", s)
+    s = PATH_RE.sub(lambda m: m.group(0).rstrip("/").rsplit("/", 1)[-1], s)
+    lines = [x.strip() for x in s.splitlines() if x.strip()]
+    s = " ".join(x if x[-1] in ".!?:" else x + "." for x in lines)   # one sentence per line (main_clause splits)
+    return " ".join(LEAD_FILLER.sub("", s).split())
+
+
+def goal_label(text, redact=False):
+    """The goal name of a prompt: keyword_name of its text, of its cleaned text (clean_prompt) when the raw text
+    reads oddly; a cleaned prompt without keywords is named by its first words."""
+    if not reads_oddly(text):
+        return keyword_name(text, redact=redact)
+    clean = clean_prompt(text)
+    name = keyword_name(clean, redact=redact)
+    if ":" not in name:   # no keywords ("Work on"): its first few words, if any are left
+        words = []
+        for w in WORD_RE.findall(mask(clean) if redact else clean):
+            if w.lower() not in (x.lower() for x in words):
+                words.append(w)
+        words = words[:6]
+        if words:
+            name = _clip(" ".join(words), MAX_LEN)
+            name = name[0].upper() + name[1:]
+    return name
+
+
+# ---------------------------------------------------------------- the Haiku name cache
+_CACHE_LOCK = threading.Lock()
+
+
+def cache_path():
+    d = os.environ.get("TOKENSCOPE_CACHE_DIR") or os.path.join(os.path.expanduser("~"), ".cache", "tokenscope")
+    return os.path.join(d, "goal-names.json")
+
+
+def cache_key(text):
+    """Hash of exactly what Haiku sees (the masked first 240 chars): the same prompt gets the same cached name."""
+    return hashlib.sha1(mask(text)[:240].encode("utf-8")).hexdigest()[:20]
+
+
+def _load_cache(path):
+    try:
+        with open(path, encoding="utf-8") as f:
+            c = json.load(f)
+        return c if isinstance(c, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def cached_name(text, path=None):
+    """The cached Haiku name of a prompt, else None."""
+    name = _load_cache(path or cache_path()).get(cache_key(text))
+    return name if isinstance(name, str) and name else None
+
+
+def store_name(text, name, path=None):
+    path = path or cache_path()
+    with _CACHE_LOCK:
+        c = _load_cache(path)
+        c[cache_key(text)] = name
+        try:
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            tmp = path + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(c, f)
+            os.replace(tmp, path)
+        except OSError:
+            pass
+
+
 HAIKU_MAX_LEN = 60
 
 
@@ -149,13 +266,17 @@ def haiku_name(text, timeout=30, runner=subprocess.run):
 
 
 class HaikuNamer:
-    """Background Haiku naming: cached per key (session id, or (session id, prompt n)); calls `done(key, name)`."""
+    """Background Haiku naming: cached per key (session id, or (session id, prompt n)); calls `done(key, name)`.
+    `only_odd`: only prompts that read oddly as labels (reads_oddly); `cache_path`: names also cached on disk by
+    prompt (cache_key), a cached name needs no model call."""
 
-    def __init__(self, done, namer=haiku_name):
-        self.done, self.namer = done, namer
+    def __init__(self, done, namer=haiku_name, only_odd=False, cache_path=None):
+        self.done, self.namer, self.only_odd, self.cache_path = done, namer, only_odd, cache_path
         self.cache, self.lock = {}, threading.Lock()
 
     def request(self, key, text):
+        if self.only_odd and not reads_oddly(text):
+            return
         with self.lock:
             if key in self.cache:
                 return
@@ -163,7 +284,11 @@ class HaikuNamer:
         threading.Thread(target=self._run, args=(key, text), daemon=True).start()
 
     def _run(self, session_id, text):
-        name = self.namer(text)
+        name = cached_name(text, self.cache_path) if self.cache_path else None
+        if not name:
+            name = self.namer(text)
+            if name and self.cache_path:
+                store_name(text, name, self.cache_path)
         if name:
             with self.lock:
                 self.cache[session_id] = name

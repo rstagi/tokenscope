@@ -162,13 +162,19 @@ def goal_of_prompts(sessions):
             if p[4] and cur is None:
                 cur = latest.get(project)                     # a resumed task
             if not (p[4] and cur is not None):
-                name = p[3] or p[2] or "(prompt)"
+                name = p[3] or _raw_goal(p[2]) or "(prompt)"
                 key = (project, name.strip().lower())
                 cur = (key, name, ids.setdefault(key, p[0] or "%s:%d" % (sid, n + 1)))
             out[(sid, n)] = cur
         if cur is not None:
             latest[project] = cur
     return out
+
+
+def _raw_goal(text):
+    """A goal named by its prompt text (an entry without a name): cleaned up when that text reads oddly."""
+    from .live.goalname import goal_label, reads_oddly
+    return goal_label(text) if text and reads_oddly(text) else text
 
 
 def turn_label(text):

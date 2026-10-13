@@ -40,6 +40,17 @@ WAITING_S = 30 * 60
 REASON_TEXT_CHARS = 160
 LABEL_BATCH = 12   # steps per model labelling call
 BOARD_SPARK_N = 40   # points in a board card's cost sparkline
+FOLLOW_STEPS = 40    # steps in a follow-view tile (the latest ones)
+FOLLOW_MAX = 4       # sessions one follow view shows
+FOLLOW_STATUS = {"working": "running"}   # follow-view tile status: running / waiting / idle / ended
+
+
+def board_order(rows):
+    """Stable board card order: sessions that have not ended in order of first appearance (start time, then id; a
+    session without a timestamp yet last), then the ended ones in the same order. Cost and activity never move a
+    card: one moves only when its session ends (or resumes), and cards come and go as sessions do."""
+    return sorted(rows, key=lambda r: (bool(r.get("ended")), r.get("started") is None, r.get("started") or 0.0,
+                                       r["id"]))
 
 
 def parse_ts(s):
@@ -584,7 +595,7 @@ class LiveState:
     def _new_prompt(self, s, branch, text, ts, queued=False, src="human", uuid=None):
         s.headless = s.headless or src == "headless"
         n = len(s.prompts) + 1
-        p = {"ts": ts, "chars": len(text), "name": goalname.keyword_name(text, redact=self.redact), "source": "keyword"}
+        p = {"ts": ts, "chars": len(text), "name": goalname.goal_label(text, redact=self.redact), "source": "keyword"}
         step = {"k": "prompt", "ts": ts, "chars": len(text), "n": n}
         if queued:
             step["queued"] = True   # typed while the agent was working, absorbed mid-turn
@@ -597,7 +608,7 @@ class LiveState:
         s.ctx_at_prompt.append(s.context_tokens)
         self._emit(s, branch, step)
         if s.goal is None:
-            s.goal = {"name": goalname.keyword_name(text, redact=self.redact), "source": "keyword",
+            s.goal = {"name": p["name"], "source": "keyword",
                       "prompt_chars": len(text)}
             if self.on_goal:
                 self.on_goal(s.id, text)
@@ -932,7 +943,7 @@ class LiveState:
                 "flags": [{"flag": w["rule"], "count": w["count"]} for w in s.warnings.values()],
                 "warnings": self.warnings_list(s),
                 "intent_mix": sorted([[g, round(c, 1)] for g, c in mix.items()], key=lambda x: -x[1]),
-                "ended": bool(s.hook["end_ts"]) and s.hook["end_ts"] >= (s.last_ts or 0),
+                "ended": self.ended(s),
                 "asked": self._asked(s), "now": self._now(s, now),
                 "cw_series": self.cw_series(turns), **self._board_intent(s, now)}
 
@@ -957,12 +968,52 @@ class LiveState:
             cur = {"label": self._lab((g or x)["label"]), "cat": (g or x)["cat"], "open": not x["closed"]}
         return {"intent": cur, "skills": [n for n, _ in sorted(s.skills.items(), key=lambda kv: (-kv[1], kv[0]))]}
 
+    @staticmethod
+    def ended(s):
+        """A SessionEnd hook event after the session's last transcript event (a resumed session is not ended)."""
+        return bool(s.hook["end_ts"]) and s.hook["end_ts"] >= (s.last_ts or 0)
+
     def board(self, now=None, max_idle_s=6 * 3600):
         now = self.clock() if now is None else now
         rows = [self.board_row(s, now) for s in self.sessions.values()
                 if s.last_ts is None or now - s.last_ts <= max_idle_s]
-        rows.sort(key=lambda r: r["last_ts"] or 0, reverse=True)
-        return {"now": now, "redacted": self.redact, "sessions": rows}
+        return {"now": now, "redacted": self.redact, "sessions": board_order(rows)}
+
+    def follow_tile(self, s, now=None, last_n=FOLLOW_STEPS):
+        """One tile of the follow view (/api/follow): the session's latest main-thread steps (label, category, $,
+        CW, wall time, open) with its running totals, status (running / waiting / idle / ended) and the call running
+        now. Steps come from the cached segmentation (steps()), so polling a few sessions stays cheap."""
+        now = self.clock() if now is None else now
+        status = self.status(s, now)
+        steps, _ = self.steps(s, now) if s.main.turn_steps else ([], [])
+        w = self._now(s, now) if status == "working" else None
+        return {"id": s.id, "short": s.id[:8], "project": self._project(s.project_raw),
+                "goal": s.goal["name"] if s.goal else None, "goal_source": s.goal["source"] if s.goal else None,
+                "status": "ended" if self.ended(s) else FOLLOW_STATUS.get(status, status),
+                "cw": round(s.totals["cw"], 1), "usd": round(s.totals["usd"], 6), "turns": s.totals["turns"],
+                "started": s.started, "last_ts": s.last_ts, "seq": s.seq, "steps_n": len(steps),
+                "now": {"tool": w["tool"], "target": w["target"], "since_s": w["since_s"]} if w else None,
+                "steps": [{"i": x["i"], "cat": x["cat"], "label": self._lab(x["label"]), "cw": x["cw"],
+                           "usd": x["usd"], "open": not x["closed"], "tested": x["tested"],
+                           "dur_s": stepsmod.duration(x["ts0"], now if not x["closed"] and status == "working"
+                                                      else x["ts1"])}
+                          for x in steps[-last_n:]]}
+
+    def follow(self, ids, now=None):
+        """The follow view's payload for up to FOLLOW_MAX session ids (or unique prefixes): a tile each, in the
+        order asked; an unknown id gets {"id", "missing": true}."""
+        now = self.clock() if now is None else now
+        out, seen = [], set()
+        for q in ids:
+            q = str(q or "").strip()
+            if not q or q in seen:
+                continue
+            seen.add(q)
+            s = self.find(q)
+            out.append(self.follow_tile(s, now) if s is not None else {"id": q, "missing": True})
+            if len(out) >= FOLLOW_MAX:
+                break
+        return {"now": now, "redacted": self.redact, "sessions": out}
 
     def find(self, sid):
         s = self.sessions.get(sid)

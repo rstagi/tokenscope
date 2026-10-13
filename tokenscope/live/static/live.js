@@ -130,7 +130,10 @@
       },
       // the pane's payload; ops=all: every intent step with its calls
       compact: function (id) { return getJSON("/api/session/" + encodeURIComponent(id) + "/compact?ops=all"); },
+      // the follow view's tiles: up to 4 sessions in one request
+      follow: function (ids) { return getJSON("/api/follow?s=" + ids.map(encodeURIComponent).join(",")); },
       sessionHref: function (id) { return "/s/" + encodeURIComponent(id); },
+      followHref: followHref,
       boardHref: "/",
       // handlers: {board(data), step(msg), up(), down()}; returns false if SSE unsupported
       subscribe: function (h) {
@@ -197,7 +200,35 @@
         '<div class="stack"></div><div class="r1" style="margin-top:6px"><span class="ag"></span><span class="tc"></span></div><div class="flags"></div>';
       a._cw = new Counter($(".cw", a), fmtK);
       a._usd = new Counter($(".usd", a), fmtUsd);
+      if (SRC.followHref) {   // pin to the follow view (not on the demo page)
+        var pb = el("button", "pin", "☆");
+        pb.onclick = function (e) {
+          e.preventDefault(); e.stopPropagation();
+          if (!pb.disabled) { pins.set(togglePin(pins.get(), s.id)); pinState(); }
+        };
+        $(".r1", a).insertBefore(pb, $(".pillw", a));
+      }
       return a;
+    }
+    // every card's pin button and the header's follow link from the stored pins: at most PIN_MAX; a session that
+    // ended can be unpinned but not pinned
+    function pinState() {
+      var list = pins.get(), link = $("#follow-link", root);
+      Object.keys(cards).forEach(function (id) {
+        var pb = cards[id].querySelector(".pin"), s = cards[id]._s || {};
+        if (!pb) return;
+        var on = list.indexOf(id) >= 0;
+        pb.textContent = on ? "★" : "☆";
+        pb.classList.toggle("on", on);
+        pb.disabled = !on && (list.length >= PIN_MAX || !!s.ended);
+        pb.title = on ? "following: click to unpin" : s.ended ? "this session ended" :
+          list.length >= PIN_MAX ? "already following " + PIN_MAX + " sessions" : "pin to the follow view";
+      });
+      if (link && SRC.followHref) {
+        link.style.display = "";
+        link.href = SRC.followHref(list);
+        link.textContent = "follow" + (list.length ? " (" + list.length + ")" : "") + " →";
+      }
     }
     // the session's own live warnings (the same rules as the pane / canvas) as one dot next to the project
     function warnDot(node, s) {
@@ -317,6 +348,7 @@
         }, 320);
       });
       flip(first);
+      pinState();
       tickElapsed();
     }
     function flip(first) {
@@ -334,6 +366,7 @@
     }
 
     setInterval(tickElapsed, 1000);
+    window.addEventListener("storage", function (e) { if (e.key === PIN_KEY) pinState(); });
     initTop(root);
     SRC.board().then(render, function () { $("#empty", root).textContent = "Cannot reach the tokenscope server."; $("#empty", root).style.display = ""; });
     liveLink({
@@ -405,6 +438,226 @@
     }
     sel();
     load();
+  }
+
+  // ---------- follow ----------
+  // Up to PIN_MAX pinned sessions side by side (/follow?s=a,b,c,d): pinned from a board card or the view's own
+  // "add session" picker; the pins live in localStorage and in the URL, and a URL that names sessions wins.
+  var PIN_KEY = "tokenscope.follow", PIN_MAX = 4;
+  // "a, b,,a" -> ["a", "b"]: unique, non-empty, at most PIN_MAX
+  function parsePins(v) {
+    var out = [];
+    (Array.isArray(v) ? v : String(v || "").split(",")).forEach(function (x) {
+      x = String(x || "").trim();
+      if (x && out.indexOf(x) < 0 && out.length < PIN_MAX) out.push(x);
+    });
+    return out;
+  }
+  // the pins of a page: the URL's ?s= when it names any, else the stored ones
+  function resolvePins(search, stored) {
+    var m = /[?&]s=([^&#]*)/.exec(search || ""), url = [];
+    if (m) { try { url = parsePins(decodeURIComponent(m[1].replace(/\+/g, " "))); } catch (e) { url = []; } }
+    return url.length ? url : parsePins(stored);
+  }
+  // pin / unpin `id`: a new list (unchanged when full)
+  function togglePin(list, id) {
+    list = parsePins(list);
+    var i = list.indexOf(id);
+    if (i >= 0) return list.slice(0, i).concat(list.slice(i + 1));
+    return list.length < PIN_MAX ? list.concat([id]) : list;
+  }
+  function followHref(list) { return "/follow" + (list.length ? "?s=" + list.map(encodeURIComponent).join(",") : ""); }
+  var pins = {
+    get: function () { try { return parsePins(window.localStorage.getItem(PIN_KEY)); } catch (e) { return []; } },
+    set: function (list) { try { window.localStorage.setItem(PIN_KEY, parsePins(list).join(",")); } catch (e) { /* private mode */ } }
+  };
+  // follow-view tile status -> pill
+  var FSTATUS = {running: "working", ended: "done"};
+  function fpill(status) {
+    var p = el("span", "pill " + (FSTATUS[status] || status || "idle"));
+    p.appendChild(el("span", "dot"));
+    p.appendChild(document.createTextNode(status || "idle"));
+    return p;
+  }
+
+  function initFollow(root) {
+    root = root || document;
+    var box = $("#tiles", root), tiles = {}, list = resolvePins(location.search, pins.get()), clockOff = 0;
+    var busy = false, again = false, timer = 0;
+    function nowS() { return Date.now() / 1000 + clockOff; }
+    function save() {
+      pins.set(list);
+      if (window.history && history.replaceState) history.replaceState(null, "", followHref(list));
+      box.setAttribute("data-n", String(list.length));
+      $("#fempty", root).style.display = list.length ? "none" : "";
+      $("#add", root).disabled = list.length >= PIN_MAX;
+      $("#add", root).title = list.length >= PIN_MAX ? "already following " + PIN_MAX + " sessions: remove one first" : "follow another running session";
+    }
+    function unpin(id) {
+      list = togglePin(list, id);
+      var tile = tiles[id];
+      if (tile && tile.parentNode) tile.parentNode.removeChild(tile);
+      delete tiles[id];
+      save();
+    }
+    function buildTile(id) {
+      var tile = el("div", "ftile");
+      tile.innerHTML = '<div class="fth"><span class="proj"></span><span class="pillw"></span>' +
+        '<span class="ftot"><b class="usd"></b> <span class="mut small cw"></span></span><button class="unpin" title="stop following">×</button></div>' +
+        '<a class="fgoal"></a><div class="fnow"></div><div class="fflow"><div class="fsteps"></div></div>' +
+        '<button class="fjump" style="display:none">↓ latest</button>';
+      tile._usd = new Counter($(".usd", tile), fmtUsd);
+      tile._follow = true;
+      tile._nodes = {};
+      $(".fgoal", tile).href = SRC.sessionHref(id);
+      var flow = $(".fflow", tile);
+      // auto-follow: stick to the newest step until the user scrolls up; scrolling back down (or ↓) resumes it
+      flow.addEventListener("scroll", function () {
+        if (tile._auto) return;
+        tile._follow = flow.scrollHeight - flow.scrollTop - flow.clientHeight < 24;
+        $(".fjump", tile).style.display = tile._follow ? "none" : "";
+      });
+      // a tile that changes size (one added or removed) stays on its newest step
+      if (window.ResizeObserver) new ResizeObserver(function () { if (tile._follow) scrollEnd(tile); }).observe(flow);
+      $(".fjump", tile).onclick = function (e) { e.stopPropagation(); tile._follow = true; this.style.display = "none"; scrollEnd(tile); };
+      $(".unpin", tile).onclick = function (e) { e.stopPropagation(); unpin(id); };
+      // the whole tile opens the session canvas (not its buttons, not a text selection)
+      tile.addEventListener("click", function (e) {
+        if (e.target.closest("button") || String(window.getSelection ? window.getSelection() : "")) return;
+        if (e.target.closest("a")) return;
+        location.href = SRC.sessionHref(id);
+      });
+      return tile;
+    }
+    function scrollEnd(tile) {
+      var flow = $(".fflow", tile);
+      tile._auto = true;
+      flow.scrollTop = flow.scrollHeight;
+      setTimeout(function () { tile._auto = false; }, 50);
+    }
+    function stepNode(x) {
+      var nd = el("div", "fnode");
+      nd.innerHTML = '<span class="cat"></span><span class="fl"></span><span class="fc"></span>';
+      return nd;
+    }
+    function updStep(nd, x) {
+      var key = JSON.stringify([x.cat, x.label, x.usd, x.cw, x.open, x.tested, x.dur_s]);
+      if (nd._k === key) return;
+      nd._k = key;
+      nd.className = "fnode" + (x.open ? " open" : "");
+      nd.style.borderLeftColor = gcol(x.cat);
+      var c = $(".cat", nd);
+      c.textContent = "[" + String(x.cat || "other").toUpperCase() + "]";
+      c.style.color = tcol(x.cat);
+      var lb = $(".fl", nd);
+      lb.textContent = (x.open ? "▶ " : "") + (x.label || "—") + (x.tested === "pass" ? " ✓" : x.tested === "fail" ? " ✗" : "");
+      lb.title = x.label || "";
+      $(".fc", nd).textContent = (x.usd > 0 && x.usd < 0.005 ? "<$0.01" : fmtUsd(x.usd)) + (num(x.dur_s) != null ? " · " + fmtWall(x.dur_s) : "");
+      $(".fc", nd).title = fmtK(x.cw) + " CW";
+    }
+    function updTile(tile, s) {
+      tile._s = s;
+      if (s.missing) {
+        $(".proj", tile).textContent = s.id.slice(0, 8);
+        $(".fgoal", tile).textContent = "not on this server (yet): it shows up once the session writes";
+        tile.classList.add("missing");
+        return;
+      }
+      tile.classList.remove("missing");
+      $(".proj", tile).textContent = (s.project || "—") + " · " + s.short;
+      var pw = $(".pillw", tile);
+      if (tile._st !== s.status) { pw.innerHTML = ""; pw.appendChild(fpill(s.status)); tile._st = s.status; }
+      tile.classList.toggle("ended", s.status === "ended");
+      goalNode($(".fgoal", tile), s.goal_source ? {name: s.goal, source: s.goal_source} : s.goal);
+      tile._usd.set(s.usd);
+      $(".cw", tile).textContent = fmtK(s.cw) + " CW";
+      var flow = $(".fsteps", tile), seen = {}, steps = Array.isArray(s.steps) ? s.steps : [], added = false;
+      steps.forEach(function (x, n) {
+        seen[x.i] = 1;
+        var nd = tile._nodes[x.i];
+        if (!nd) { nd = tile._nodes[x.i] = stepNode(x); added = true; }
+        updStep(nd, x);
+        if (flow.children[n] !== nd) flow.insertBefore(nd, flow.children[n] || null);
+      });
+      Object.keys(tile._nodes).forEach(function (i) {
+        if (seen[i]) return;
+        var nd = tile._nodes[i];
+        if (nd.parentNode) nd.parentNode.removeChild(nd);
+        delete tile._nodes[i];
+      });
+      var more = s.steps_n > steps.length ? s.steps_n - steps.length : 0;
+      flow.setAttribute("data-more", more ? "+" + more + " earlier steps" : "");
+      if (!steps.length) flow.setAttribute("data-more", "no steps yet");
+      if (tile._follow && (added || tile._seq !== s.seq)) scrollEnd(tile);
+      tile._seq = s.seq;
+      tile._now = s.now ? {tool: s.now.tool, target: s.now.target, since: s.now.since_s, at: nowS()} : null;
+      tickTile(tile);
+    }
+    function tickTile(tile) {
+      var w = tile._now, n = $(".fnow", tile);
+      n.textContent = w && w.tool ? "▶ " + w.tool + (w.target ? " · " + w.target : "") + (w.since != null ? " · " + fmtWall(w.since + nowS() - w.at) : "") : "";
+    }
+    function render(d) {
+      if (d.now != null) clockOff = ts(d.now) - Date.now() / 1000;
+      $("#redacted", root).style.display = d.redacted ? "" : "none";
+      var by = {};
+      (d.sessions || []).forEach(function (s) { by[s.id] = s; });
+      list.forEach(function (id, n) {
+        var s = by[id] || (d.sessions || []).filter(function (x) { return x.id.indexOf(id) === 0; })[0];
+        if (!s) return;
+        var tile = tiles[id] || (tiles[id] = buildTile(s.id));
+        if (box.children[n] !== tile) box.insertBefore(tile, box.children[n] || null);
+        updTile(tile, s);
+      });
+    }
+    function load() {
+      if (!list.length) return Promise.resolve();
+      if (busy) { again = true; return Promise.resolve(); }
+      busy = true;
+      return SRC.follow(list.slice()).then(render).then(function () {
+        busy = false;
+        if (again) { again = false; load(); }
+      }, function (e) { busy = false; throw e; });
+    }
+    function soon() { clearTimeout(timer); timer = setTimeout(load, 250); }
+
+    // the "add session" picker: the board's sessions that have not ended and are not followed yet
+    var picker = $("#picker", root);
+    function closePicker() { picker.style.display = "none"; }
+    $("#add", root).onclick = function (e) {
+      e.stopPropagation();
+      if (picker.style.display !== "none") return closePicker();
+      picker.innerHTML = "";
+      picker.appendChild(el("div", "mut small", "loading…"));
+      picker.style.display = "";
+      SRC.board().then(function (b) {
+        picker.innerHTML = "";
+        var rows = (b.sessions || []).filter(function (s) { return !s.ended && list.indexOf(s.id) < 0; });
+        if (!rows.length) { picker.appendChild(el("div", "mut small", "no other running sessions")); return; }
+        rows.forEach(function (s) {
+          var r = el("button", "prow");
+          r.appendChild(el("span", "pg", goalName(s.goal) || "(no prompt yet)"));
+          r.appendChild(el("span", "mut small", (s.project || "—") + " · " + s.short + " · " + (STATUS_TXT[s.status] || s.status) + " · " + fmtUsd(s.usd)));
+          r.onclick = function (ev) { ev.stopPropagation(); list = togglePin(list, s.id); save(); closePicker(); load(); };
+          picker.appendChild(r);
+        });
+      }, function () { picker.innerHTML = ""; picker.appendChild(el("div", "mut small", "cannot reach the server")); });
+    };
+    picker.addEventListener("click", function (e) { e.stopPropagation(); });
+    document.addEventListener("click", closePicker);
+
+    save();
+    setInterval(function () { Object.keys(tiles).forEach(function (id) { tickTile(tiles[id]); }); }, 1000);
+    load();
+    liveLink({
+      connEl: $("#conn", root), every: 2000,
+      poll: load,
+      resync: load,
+      // a new step of a followed session: refresh soon; the board event (1 s, when anything changed) keeps
+      // totals and status current
+      step: function (m) { if (m && list.some(function (id) { return String(m.session).indexOf(id) === 0; })) soon(); },
+      board: soon
+    });
   }
 
   // ---------- session ----------
@@ -952,10 +1205,12 @@
     }
     start(); // a session that has not written anything yet 404s: keep retrying until it shows up
   }
-  window.TSLive = {initBoard: initBoard, initSession: initSession, GCOL: GCOL, fmtK: fmtK, fmtDur: fmtDur};
+  window.TSLive = {initBoard: initBoard, initSession: initSession, initFollow: initFollow, GCOL: GCOL, fmtK: fmtK, fmtDur: fmtDur,
+    pins: {parse: parsePins, resolve: resolvePins, toggle: togglePin, href: followHref, MAX: PIN_MAX}};
   document.addEventListener("DOMContentLoaded", function () {
     var page = document.body.getAttribute("data-page");
     if (page === "board") initBoard();
     else if (page === "session") initSession();
+    else if (page === "follow") initFollow();
   });
 })();

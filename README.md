@@ -32,14 +32,21 @@ main flow when they return.*
 `tokenscope live` tails `~/.claude/projects/**/*.jsonl` incrementally (byte offsets, partial lines buffered,
 truncation handled) and shows:
 
-- **Board** (`/`, the landing page): every live or recent session (last 6 h) as a card, most recent first, next to the
+- **Board** (`/`, the landing page): every live or recent session (last 6 h) as a card in a stable order (by start;
+  cards never jump as costs change, one moves to the end only when its session ends), next to the
   top-spenders panel: project (masked as `project-A` … unless `--no-redact`), what was asked (the goal, plus `↳` the
   latest follow-up), status (working / waiting for you / idle, `done` once a SessionEnd hook fired), current intent,
   what it is doing now (`▶` the running call and its target, extension only when redacted, with a ticking timer; else
   the last step), elapsed time, cost-weighted tokens and API-equivalent $ so far with a cost-per-turn sparkline, intent
   mix bar, subagents running, the skills used and the live warnings (an amber dot by the project, hover for the
   text, plus the chips). Updates over SSE (polling fallback). Click a card to open its canvas; `← all sessions` on the
-  canvas comes back.
+  canvas comes back. ☆ on a card pins it to the follow view (up to 4).
+- **Follow view** (`/follow?s=<id>,<id>,...`): up to 4 pinned sessions side by side (a 2x2 grid that adapts to 1-3),
+  each a compact live flow of its latest steps ([CATEGORY] label, $ and wall time per step) with the running total $,
+  status (running / waiting / idle / ended) and the call running now, auto-scrolling to the newest step (scroll up to
+  stop, `↓ latest` resumes). Pins are kept in the browser (localStorage) and in the URL, which wins when it names
+  sessions, so a follow view can be bookmarked. `+ add session` picks another running session; a tile opens the
+  canvas. One `/api/follow` request feeds all tiles.
 - **Session view** (`/s/<id>`): the session as an infinite canvas (pan, zoom, minimap, fit view). One node per
   intent group or step ([CATEGORY] label, CW, $, wall time, a one-line summary, ✦ skills, ✎ declared), top-down in
   time order; each subagent branches off the step that launched it as its own flow of intents (parallel fan-outs side
@@ -59,9 +66,11 @@ truncation handled) and shows:
 Options: `--root DIR`, `--project GLOB` (only matching project dirs, e.g. `'*myrepo*'`), `--since-minutes N` (which
 existing transcripts to pick up at start, default 120), `--port`, `--host` (default 127.0.0.1), `--no-redact`,
 `--haiku` (name goals with `claude -p --model haiku` from the *masked* first 240 prompt characters; off by default,
-the default namer is a local keyword heuristic).
+the default namer is a local keyword heuristic), `--haiku-odd` (the same, only for prompts that read oddly as a label:
+long, multi-line, opening with filler, carrying paths, URLs, code or markup). Without either, such prompts are named
+from their cleaned-up text, or by a Haiku name an earlier run cached (`~/.cache/tokenscope/goal-names.json`).
 
-API: `GET /api/board`, `GET /api/top?window=5h|24h|7d|30d&by=session|goal|turn|intent`,
+API: `GET /api/board`, `GET /api/top?window=5h|24h|7d|30d&by=session|goal|turn|intent`, `GET /api/follow?s=<id>,...`,
 `GET /api/session/<id>[?since=<seq>]`, `GET /api/session/<id>/compact`, `GET /events` (Server-Sent Events: `board`
 and `step`). See `docs/live-spec.md`.
 
@@ -410,7 +419,7 @@ output: don't share them blindly.
 `tokenscope live` binds to 127.0.0.1 by default and redacts by default (prompts are not kept, projects / files / subagent
 descriptions are masked, goal names come from masked text). Cross-session hints read your other local transcripts
 and SKILL.md files and write only to `~/.cache/tokenscope/` (index cache, skill drafts). `--haiku` sends only the masked first 240 characters of a
-session's first prompt through your own `claude` CLI. The mod only fetches from the local server.
+session's prompts through your own `claude` CLI (`--haiku-odd`: only of prompts that read oddly as a label). The mod only fetches from the local server.
 
 ## Known limitations
 

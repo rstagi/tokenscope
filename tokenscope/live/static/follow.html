@@ -1,0 +1,18 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>tokenscope · follow</title><link rel="stylesheet" href="/static/live.css"></head>
+<body data-page="follow" class="followpage">
+<!-- Up to 4 pinned sessions side by side (?s=<id>,<id>,...; else the pins stored in this browser), each a compact,
+     auto-following flow of its steps from /api/follow; a tile opens the session canvas /s/<id>. -->
+<header>
+  <div class="topbar">
+    <div><a class="back" href="/" title="back to the list of sessions">← all sessions</a>
+      <h1>follow <span id="redacted" class="badge" style="display:none" title="prompts, paths and project names are masked">redacted</span></h1>
+      <div class="sub">pinned sessions, live · $ = API list-price equivalent · <span id="conn" class="conn"></span></div></div>
+    <div class="addw"><button id="add" class="addbtn">+ add session</button><div id="picker" class="picker" style="display:none"></div></div>
+  </div>
+</header>
+<main id="tiles" class="tiles" data-n="0"></main>
+<div id="fempty" class="empty" style="display:none">No sessions followed yet. Pin up to 4 running sessions with ☆ on the <a href="/">board</a>, or use “+ add session”.</div>
+<script src="/static/live.js"></script>
+</body></html>

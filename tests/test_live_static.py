@@ -62,8 +62,10 @@ class TestLiveStatic(unittest.TestCase):
             board = f.read()
         with open(os.path.join(STATIC, "demo.html"), encoding="utf-8") as f:
             demo = f.read()
+        with open(os.path.join(STATIC, "follow.html"), encoding="utf-8") as f:
+            follow = f.read()
         # the card-list session view in live.js now runs only on the demo page; /s/<id> is the canvas (canvas.js)
-        have = set(re.findall(r'id="([\w-]+)"', demo + board))
+        have = set(re.findall(r'id="([\w-]+)"', demo + board + follow))
         self.assertEqual(sorted(ids - have), [])
         self.assertNotIn("fmap", session)   # the phase flow map is gone: the intents replace it
 

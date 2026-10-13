@@ -3,8 +3,12 @@
 Endpoints (see docs/live-spec.md):
   GET /                          static/board.html
   GET /s/<session_id>            static/session.html
+  GET /follow                    static/follow.html: up to 4 pinned sessions side by side (?s=<id>,<id>,...)
   GET /static/<file>             files from tokenscope/live/static/
-  GET /api/board                 all sessions (sorted by last activity; idle > 6 h dropped)
+  GET /api/board                 all sessions in a stable order (state.board_order: by start, ended ones last;
+                                 idle > 6 h dropped)
+  GET /api/follow?s=<id>,...     the follow view's tiles (state.follow): up to 4 sessions' latest steps with $,
+                                 totals and status in one request
   GET /api/session/<id>          full session model (+ "seq"); ?since=<seq> -> only new / updated steps
   GET /api/session/<id>/compact  small payload for a Claude Code mod (and the session page: ?ops=all -> every
                                  intent step with its calls)
@@ -30,6 +34,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
 from ..parse import resolve_root
+from . import goalname
 from .goalname import HaikuNamer, mask
 from .hookevents import HookEvents
 from .state import LiveState
@@ -42,14 +47,25 @@ HEARTBEAT_S = 15
 TOP_REFRESH_S = 60   # /api/top rebuilds the cross-session index (incrementally) at most this often
 
 
+def _no_model(text):
+    return None
+
+
 class Live:
     """Tailer + hook events + state behind one lock, plus SSE subscriber queues."""
 
     def __init__(self, root, redact=True, since_minutes=120, haiku=False,
                  events_path=None, hooks=True, project="*", xhints=False, index_root=None, skills_dirs=(),
-                 cached_labels=False):
+                 cached_labels=False, odd_goals=False, cached_goals=False, goal_namer=None):
         self.lock = threading.Lock()
-        self.namer = HaikuNamer(self._named) if haiku else None
+        # goal names from Haiku (disk-cached by prompt): every goal with --haiku; with --haiku-odd (odd_goals) only
+        # those whose prompt reads oddly as a label (goalname.reads_oddly), goalname.goal_label until it arrives;
+        # else (cached_goals) no model call: an odd prompt only gets the name an earlier run cached for it
+        self.namer = None
+        if haiku or odd_goals or cached_goals:
+            namer = goal_namer or goalname.haiku_name
+            self.namer = HaikuNamer(self._named, namer=namer if haiku or odd_goals else _no_model,
+                                    only_odd=not haiku, cache_path=goalname.cache_path())
         # step labels (docs/intents-spec.md): the model with --haiku; else (cached_labels) only the labels another
         # server's model calls left in the step-label cache, so this page shows what the live pane showed
         self.step_namer = None
@@ -212,11 +228,17 @@ class Handler(BaseHTTPRequestHandler):
             return self._static("board.html")
         if parts[0] == "s" and len(parts) == 2:
             return self._static("session.html")
+        if parts == ["follow"]:
+            return self._static("follow.html")
         if parts[0] == "static" and len(parts) == 2:
             return self._static(parts[1])
         if parts == ["api", "board"]:
             with live.lock:
                 return self._json(st.board())
+        if parts == ["api", "follow"]:
+            ids = [x for v in parse_qs(u.query).get("s", []) for x in v.split(",") if x.strip()]
+            with live.lock:
+                return self._json(st.follow(ids))
         if parts[:2] == ["api", "session"] and len(parts) == 4 and parts[3] == "flow" and \
                 parse_qs(u.query).get("replay") in (["1"], ["true"]):
             return self._replay(parts[2], parse_qs(u.query))
@@ -349,6 +371,10 @@ def add_arguments(p):
                    help="show prompts, project names, file names and descriptions (default: redacted)")
     p.add_argument("--haiku", action="store_true",
                    help="name goals with `claude -p --model haiku` (sends the masked first 240 prompt chars)")
+    p.add_argument("--haiku-odd", action="store_true",
+                   help="name with Haiku only the goals whose prompt reads oddly as a label (long, multi-line, "
+                        "filler, paths, code; masked first 240 chars, names cached on disk); without it they get a "
+                        "cleaned-up keyword name, or a name an earlier run cached")
     p.add_argument("--project", default="*", metavar="GLOB",
                    help="only watch project dirs matching this glob, e.g. '*myrepo*' (default: all)")
     p.add_argument("--since-minutes", type=int, default=120,
@@ -371,7 +397,7 @@ def main(args=None):
     live = Live(resolve_root(getattr(args, "root", None)), redact=not args.no_redact,
                 since_minutes=args.since_minutes, project=args.project, haiku=args.haiku,
                 xhints=not args.no_xhints, index_root=args.index_root, skills_dirs=args.skills_dir,
-                cached_labels=True)
+                cached_labels=True, odd_goals=getattr(args, "haiku_odd", False), cached_goals=True)
     srv = make_server(live, args.host, args.port)
     threading.Thread(target=live.run, daemon=True).start()
     print("tokenscope live: http://%s:%d/  (redaction %s; Ctrl-C to stop)" % (
