@@ -134,7 +134,10 @@
       turns: s.totals.turns, tool_calls: s.totals.tool_calls, errors: s.totals.errors,
       agents_running: ag.filter(function (a) { return a.status === "running"; }).length, agents_total: ag.length,
       context_tokens: s.context_tokens, flags: s.flags.map(function (f) { return {flag: f.flag, count: f.count}; }),
-      intent_mix: Object.keys(mix).map(function (g) { return [g, mix[g]]; })};
+      intent_mix: Object.keys(mix).map(function (g) { return [g, mix[g]]; }),
+      warnings: s.flags.map(function (f) { return {rule: f.flag, text: f.flag.replace(/_/g, " "), hint: "", count: f.count}; }),
+      now: l ? {tool: l.tools[l.tools.length - 1].label, target: l.tools[l.tools.length - 1].target, since_s: Math.max(0, Date.now() / 1000 - l.ts)} : null,
+      cw_series: s.steps.filter(function (x) { return x.k === "turn"; }).slice(-40).map(function (x) { return Math.round(x.cw); })};
   }
   var visible = ["demo-a", "demo-b", "demo-c", "demo-long"], extra = 0;
   function board() {

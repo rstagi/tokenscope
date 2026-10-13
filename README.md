@@ -32,10 +32,14 @@ main flow when they return.*
 `tokenscope live` tails `~/.claude/projects/**/*.jsonl` incrementally (byte offsets, partial lines buffered,
 truncation handled) and shows:
 
-- **Board** (`/`): one card per active session, most recent first: project (masked as `project-A` … unless
-  `--no-redact`), goal, status (working / waiting for you / idle), current intent, last step, elapsed time, cost-weighted
-  tokens and API-equivalent $ so far, intent mix bar, subagents running, live warnings, the current intent label and
-  the skills used. Click a card to open it.
+- **Board** (`/`, the landing page): every live or recent session (last 6 h) as a card, most recent first, next to the
+  top-spenders panel: project (masked as `project-A` … unless `--no-redact`), what was asked (the goal, plus `↳` the
+  latest follow-up), status (working / waiting for you / idle, `done` once a SessionEnd hook fired), current intent,
+  what it is doing now (`▶` the running call and its target, extension only when redacted, with a ticking timer; else
+  the last step), elapsed time, cost-weighted tokens and API-equivalent $ so far with a cost-per-turn sparkline, intent
+  mix bar, subagents running, the skills used and the live warnings (an amber dot by the project, hover for the
+  text, plus the chips). Updates over SSE (polling fallback). Click a card to open its canvas; `← all sessions` on the
+  canvas comes back.
 - **Session view** (`/s/<id>`): the session as an infinite canvas (pan, zoom, minimap, fit view). One node per
   intent group or step ([CATEGORY] label, CW, $, wall time, a one-line summary, ✦ skills, ✎ declared), top-down in
   time order; each subagent branches off the step that launched it as its own flow of intents (parallel fan-outs side

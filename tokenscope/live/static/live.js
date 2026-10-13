@@ -38,7 +38,7 @@
     var h = Math.floor(s / 3600), m = Math.floor(s % 3600 / 60), x = s % 60;
     return h ? h + ":" + (m < 10 ? "0" : "") + m + "h" : m + ":" + (x < 10 ? "0" : "") + x;
   }
-  var STATUS_TXT = {working: "working", waiting: "waiting for you", idle: "idle"};
+  var STATUS_TXT = {working: "working", waiting: "waiting for you", idle: "idle", done: "done"};
   function pill(status) {
     var p = el("span", "pill " + (status || "idle"));
     p.appendChild(el("span", "dot"));
@@ -192,18 +192,46 @@
       var a = el("a", "scard enter");
       a.href = SRC.sessionHref(s.id);
       a.innerHTML = '<div class="r1"><span class="proj"></span><span class="pillw"></span></div>' +
-        '<div class="goal"></div><div class="r2 ic"></div><div class="r2"><span class="last"></span></div>' +
-        '<div class="r3"><span><b class="el"></b> <span class="mut small elx"></span></span><span><b class="cw"></b> CW · <b class="usd"></b></span></div>' +
+        '<div class="goal"></div><div class="latest"></div><div class="r2 ic"></div><div class="r2"><span class="last"></span><span class="since"></span></div>' +
+        '<div class="r3"><span><b class="el"></b> <span class="mut small elx"></span></span><svg class="spark" viewBox="0 0 60 16" preserveAspectRatio="none"></svg><span><b class="cw"></b> CW · <b class="usd"></b></span></div>' +
         '<div class="stack"></div><div class="r1" style="margin-top:6px"><span class="ag"></span><span class="tc"></span></div><div class="flags"></div>';
       a._cw = new Counter($(".cw", a), fmtK);
       a._usd = new Counter($(".usd", a), fmtUsd);
       return a;
     }
+    // the session's own live warnings (the same rules as the pane / canvas) as one dot next to the project
+    function warnDot(node, s) {
+      var ws = Array.isArray(s.warnings) ? s.warnings : [];
+      var d = node.querySelector(".wdot");
+      if (!ws.length) { if (d) node.removeChild(d); return; }
+      if (!d) d = node.insertBefore(el("span", "wdot"), node.firstChild);
+      d.title = ws.map(function (w) { return w.text + (w.hint ? " — " + w.hint : ""); }).join("\n");
+    }
+    // cost per turn, oldest -> newest (the server buckets long sessions to a few dozen points)
+    function sparkline(svg, series) {
+      var v = Array.isArray(series) ? series : [], key = v.join(",");
+      if (svg._k === key) return;
+      svg._k = key;
+      while (svg.firstChild) svg.removeChild(svg.firstChild);
+      if (v.length < 2) return;
+      var max = Math.max.apply(null, v) || 1, pts = v.map(function (x, i) {
+        return (i * 60 / (v.length - 1)).toFixed(1) + "," + (15 - 14 * x / max).toFixed(1);
+      });
+      var pl = document.createElementNS("http://www.w3.org/2000/svg", "polyline");
+      pl.setAttribute("points", pts.join(" "));
+      svg.appendChild(pl);
+    }
     function updCard(a, s) {
+      var r1 = $(".r1", a);
       $(".proj", a).textContent = s.project || "—";
+      warnDot(r1, s);
       goalNode($(".goal", a), s.goal);
-      var pw = $(".pillw", a);
-      if (a._st !== s.status) { pw.innerHTML = ""; pw.appendChild(pill(s.status)); }
+      // ASKED: the goal is the first prompt; a later follow-up shows under it
+      var lt = $(".latest", a), q = s.asked || {};
+      lt.textContent = q.latest ? "↳ " + q.latest + (q.prompt_n > 1 ? " · prompt " + q.prompt_n : "") : "";
+      lt.title = q.latest || "";
+      var pw = $(".pillw", a), st = s.ended ? "done" : s.status;
+      if (a._st !== st) { pw.innerHTML = ""; pw.appendChild(pill(st)); }
       // the current intent as the pane names it ([CAT] label, ▶ while its step is open) and the session's skills
       var ic = $(".ic", a), cur = s.intent && typeof s.intent === "object" ? s.intent : null, sk = Array.isArray(s.skills) ? s.skills : [];
       var key = JSON.stringify([cur, s.current_intent, s.current_group, sk]);
@@ -220,9 +248,12 @@
         if (sk.length) { var m = el("span", "skm", "✦ " + sk.slice(0, 2).join(" · ") + (sk.length > 2 ? " +" + (sk.length - 2) : "")); m.title = "skills: " + sk.join(", "); ic.appendChild(m); }
         a._ic = key;
       }
-      var ls = s.last_step || {}, last = $(".last", a);
-      last.textContent = ls.label ? (ls.err ? "✗ " : "") + ls.label : "";
-      last.className = "last" + (ls.err ? " err" : "");
+      // NOW: the latest call (▶ while working) and its target; else the last step
+      var ls = s.last_step || {}, last = $(".last", a), w = s.now || {}, on = st === "working" && w.tool;
+      last.textContent = on ? "▶ " + w.tool + (w.target ? " · " + w.target : "") : ls.label ? (ls.err ? "✗ " : "") + ls.label : "";
+      last.className = "last" + (on ? " on" : ls.err ? " err" : "");
+      a._now = on && w.since_s != null ? {since: w.since_s, at: data && data.now != null ? ts(data.now) : nowS()} : null;
+      sparkline($(".spark", a), s.cw_series);
       a._cw.set(s.cw); a._usd.set(s.usd);
       fillStack($(".stack", a), s.intent_mix);
       $(".ag", a).textContent = s.agents_total ? "agents " + (s.agents_running || 0) + "/" + s.agents_total + (s.agents_running ? " running" : "") : "no subagents";
@@ -230,7 +261,7 @@
       var fl = $(".flags", a); fl.innerHTML = "";
       (s.flags || []).forEach(function (f) { fl.appendChild(flagChip(f, s.context_tokens)); });
       a._s = s;
-      a._st = s.status;
+      a._st = st;
     }
     function tickElapsed() {
       Object.keys(cards).forEach(function (id) {
@@ -241,6 +272,7 @@
         else e = s.elapsed_s;
         $(".el", a).textContent = fmtDur(e);
         $(".elx", a).textContent = s.status === "idle" && lt ? "· " + fmtDur(nowS() - lt) + " ago" : "";
+        $(".since", a).textContent = a._now ? fmtDur(a._now.since + nowS() - a._now.at) : "";
       });
     }
 

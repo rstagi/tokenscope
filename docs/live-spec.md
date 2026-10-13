@@ -133,7 +133,10 @@ ThreadingHTTPServer bound to 127.0.0.1 by default. Background thread runs the ta
   "current_intent","current_group","last_step":{"label","ts","err"},"started","last_ts","elapsed_s","cw","usd",
   "turns","tool_calls","errors","agents_running","agents_total","context_tokens","flags":[{"flag","count"}],"warnings":[...],
   "intent_mix":[[group,cw],...],"intent":{"label","cat","open"} or null (the last intent step's group, else the
-  step, labelled as in the pane),"skills":[names]}]} sorted by last_ts desc; sessions idle for more than 6 h dropped.
+  step, labelled as in the pane),"skills":[names],"asked" (as in the compact payload: goal, latest follow-up name,
+  prompt_n),"now" (as in the compact payload: the latest main-thread call, tool / target / since_s),"cw_series" (CW
+  per turn, main + subagents, at most 40 points: long sessions summed into buckets),"ended" (a SessionEnd hook
+  newer than the last transcript event)}]} sorted by last_ts desc; sessions idle for more than 6 h dropped.
 - `GET /api/session/<id>` -> full session model (as above, steps of main + agents), plus "seq" (max).
 - `GET /api/session/<id>?since=<seq>` -> only steps with seq > since (+ totals, status, flags, agents summary).
 - `GET /api/session/<id>/flow` -> the session canvas payload (static/session.html, built from web/canvas): the

@@ -18,7 +18,7 @@ PAYLOAD_VARS = ("C", "rc", "it", "cur", "o", "w", "t", "a", "x", "s", "g", "h", 
 NOT_FIELDS = {"appendChild", "style", "className", "classList", "textContent", "title", "onclick", "innerHTML",
               "lastChild", "firstChild", "children", "length", "slice", "map", "filter", "forEach", "indexOf",
               "join", "push", "replace", "split", "concat", "sort", "some", "toFixed", "set", "node", "head",
-              "lastElementChild", "_g", "_cw", "_k", "_st", "_s", "_ic", "_cw", "_usd", "up", "down", "board", "step",
+              "lastElementChild", "_g", "_cw", "_k", "_st", "_s", "_ic", "_cw", "_usd", "_now", "up", "down", "board", "step",
               "parentNode", "getBoundingClientRect", "remove", "display", "flexGrow", "background", "width",
               "animation", "href", "borderLeftColor", "boxShadow", "paddingLeft", "color", "data", "test", "matches"}
 

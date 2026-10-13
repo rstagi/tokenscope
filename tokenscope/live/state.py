@@ -39,6 +39,7 @@ WORKING_S = 90
 WAITING_S = 30 * 60
 REASON_TEXT_CHARS = 160
 LABEL_BATCH = 12   # steps per model labelling call
+BOARD_SPARK_N = 40   # points in a board card's cost sparkline
 
 
 def parse_ts(s):
@@ -931,7 +932,19 @@ class LiveState:
                 "flags": [{"flag": w["rule"], "count": w["count"]} for w in s.warnings.values()],
                 "warnings": self.warnings_list(s),
                 "intent_mix": sorted([[g, round(c, 1)] for g, c in mix.items()], key=lambda x: -x[1]),
-                **self._board_intent(s, now)}
+                "ended": bool(s.hook["end_ts"]) and s.hook["end_ts"] >= (s.last_ts or 0),
+                "asked": self._asked(s), "now": self._now(s, now),
+                "cw_series": self.cw_series(turns), **self._board_intent(s, now)}
+
+    @staticmethod
+    def cw_series(turns, n=BOARD_SPARK_N):
+        """CW per turn (main + subagents, time order) for a board sparkline: at most `n` points, older turns summed
+        into buckets so the shape covers the whole session."""
+        cw = [t.get("cw") or 0 for t in turns]
+        if len(cw) > n:
+            k = -(-len(cw) // n)
+            cw = [sum(cw[i:i + k]) for i in range(0, len(cw), k)]
+        return [round(x) for x in cw]
 
     def _board_intent(self, s, now):
         """The current intent as the pane names it (the last step's group, else the step: label + category) and

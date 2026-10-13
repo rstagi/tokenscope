@@ -292,7 +292,7 @@ function Head({C, elapsed, open, setOpen, conn, replay, onRestart}) {
   const st = C.status || "idle";
   return <div className="ov head">
     <div className="hbar">
-      <a className="back" href="/">← board</a>
+      <a className="back" href="/" title="back to the list of sessions">← all sessions</a>
       <span className={"pill " + st}><span className="dot" />{st === "waiting" ? "waiting for you" : st}</span>
       <b className="hgoal" title={goal || ""}>{goal || "(no prompt yet)"}</b>
       <button className="tgl" onClick={() => setOpen(!open)} title={open ? "collapse" : "expand"}>{open ? "▾" : "▸"}</button>
