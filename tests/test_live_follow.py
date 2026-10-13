@@ -317,6 +317,90 @@ class TestFollowSubagents(LiveFixture):
         self.assertEqual((t["status"], t["agents_running"]), ("waiting", 0))
         self.assertEqual(self.spawning(t)["agents"][1]["status"], "idle")
 
+    def move_on(self, n=8):
+        """The main thread keeps working past its background agents: a new prompt, then n steps (t=12..)."""
+        recs, t = [user_prompt(12, "now also update the docs")], 13
+        for k in range(n):
+            f = "/srv/checkout-app/docs/a%d.md" % k
+            call = [("Read", {"file_path": f}), ("Edit", {"file_path": f, "old_string": "a", "new_string": "b"}),
+                    ("Bash", {"command": "python3 -m pytest -q"})][k % 3]
+            recs += [assistant(t, "q%d" % k, [tool_use("q%dt" % k, *call)]), result(t + 1, "q%dt" % k)]
+            t += 2
+        self.write(self.main, lines(*recs))
+        return self.step(), t
+
+    def test_running_branch_stays_pinned_while_the_main_thread_moves_on(self):
+        self.work()
+        s, t = self.move_on()
+        tile = self.state.follow_tile(s, self.at(t))
+        rows = tile["steps"]
+        self.assertEqual(rows[0]["i"], 0)
+        self.assertEqual([a["id"] for a in rows[0]["agents"]], ["p1", "p2"])
+        self.assertTrue(all(a["live"] and not a["collapsed"] for a in rows[0]["agents"]))
+        last = rows[-1]["i"]
+        # the finished steps between the launching step and the latest one: one summary line
+        self.assertEqual(len(tile["folds"]), 1)
+        f = tile["folds"][0]
+        self.assertEqual((f["first"], f["last"], f["n"]), (1, last - 1, last - 1))
+        self.assertAlmostEqual(f["usd"], sum(x["usd"] for x in rows[1:-1]), places=5)
+        self.assertEqual([x.get("fold") for x in rows], [None] + [0] * (last - 1) + [None])
+        # the launching step is older than the tile's latest steps: still shown, the steps between counted
+        tile = self.state.follow_tile(s, self.at(t), last_n=3)
+        self.assertEqual([x["i"] for x in tile["steps"]], [0, last - 2, last - 1, last])
+        self.assertEqual([a["id"] for a in tile["steps"][0]["agents"]], ["p1", "p2"])
+        self.assertEqual(tile["folds"], [f])
+        json.dumps(tile)
+        # every agent finishes: nothing to pin, no folds, no early step
+        self.agent("p2", None, result(40, "p2t1"), assistant(41, "p2m2", [{"type": "text", "text": "ok"}], stop="end_turn"))
+        self.agent("n1", None, assistant(42, "n1m2", [{"type": "text", "text": "ok"}], stop="end_turn"))
+        self.agent("p1", None, result(43, "p1t2"), assistant(44, "p1m3", [{"type": "text", "text": "ok"}], stop="end_turn"))
+        s = self.step()
+        tile = self.state.follow_tile(s, self.at(50), last_n=3)
+        self.assertEqual(tile["folds"], [])
+        self.assertEqual([x["i"] for x in tile["steps"]], [last - 2, last - 1, last])
+
+    def test_finished_branches_collapse_unless_latest(self):
+        self.work()
+        self.agent("n1", None, assistant(12, "n1m2", [{"type": "text", "text": "ok"}], stop="end_turn"))
+        self.agent("p1", None, result(13, "p1t2"), assistant(14, "p1m3", [{"type": "text", "text": "ok"}], stop="end_turn"))
+        s = self.step()
+        p1, p2 = self.spawning(self.state.follow_tile(s, self.at(15)))["agents"]
+        self.assertEqual((p1["status"], p1["live"], p1["collapsed"]), ("done", False, True))   # one header line
+        self.assertEqual((p2["status"], p2["live"], p2["collapsed"]), ("running", True, False))
+        n1, = [n for x in p1["steps"] for n in x.get("agents", ())]
+        self.assertFalse(n1["collapsed"])                    # the latest of its own level
+        self.agent("p2", None, result(16, "p2t1"), assistant(17, "p2m2", [{"type": "text", "text": "ok"}], stop="end_turn"))
+        s = self.step()
+        t = self.state.follow_tile(s, self.at(18))
+        p1, p2 = self.spawning(t)["agents"]
+        self.assertEqual([(a["live"], a["collapsed"]) for a in (p1, p2)], [(False, True), (False, False)])   # p2: latest
+        self.assertEqual(t["folds"], [])
+
+    def test_fold_and_branch_rules(self):
+        def step(i, closed=True, agents=()):
+            return {"i": i, "usd": 0.5, "cw": 10.0, "closed": closed}, \
+                {"i": i, "open": not closed, "agents": [dict(a, steps=a.get("steps", [])) for a in agents]}
+        live = {"status": "running"}
+        done = {"status": "done"}
+        pairs = [step(0), step(1, agents=[live]), step(2), step(3, closed=False), step(4), step(5), step(6),
+                 step(7, agents=[done, done]), step(8), step(9)]
+        steps, rows = [p[0] for p in pairs], [p[1] for p in pairs]
+        self.assertTrue(st.follow_branches(rows))
+        self.assertEqual([(a["live"], a["collapsed"]) for a in rows[7]["agents"]], [(False, True), (False, False)])
+        folds = st.follow_folds(steps, rows)
+        # step 0 alone, 2 alone (open 3 between), 4-6, 8 alone (latest-branch step 7, latest step 9): only 4-6
+        self.assertEqual(folds, [{"first": 4, "last": 6, "n": 3, "usd": 1.5, "cw": 30.0}])
+        self.assertEqual([r.get("fold") for r in rows], [None] * 4 + [0, 0, 0] + [None] * 3)
+        # nested: a running agent under a finished one keeps it expanded and live
+        outer = {"status": "done", "steps": [{"i": 0, "open": False, "agents": [{"status": "running", "steps": []}]}]}
+        rows = [{"i": 0, "open": False, "agents": [outer, {"status": "done", "steps": []}]}]
+        self.assertTrue(st.follow_branches(rows))
+        self.assertEqual((outer["live"], outer["collapsed"]), (True, False))
+        # nothing live: nothing folds
+        rows = [step(i)[1] for i in range(5)]
+        self.assertFalse(st.follow_branches(rows))
+        self.assertEqual(st.follow_folds([step(i)[0] for i in range(5)], rows), [])
+
     def test_launched_subagent_without_a_transcript_yet(self):
         s = self.launch()
         t = self.state.follow_tile(s, self.at(10))
@@ -566,6 +650,10 @@ class TestFollowUi(unittest.TestCase):
         follow = js[js.index("// ---------- follow ----------"):js.index("// ---------- session ----------")]
         for x in ("syncBranch", "agents_more", "agents_running", "w.agent"):   # subagent branches in a tile
             self.assertIn(x, follow)
+        for x in ("s.folds", "a.collapsed", "a.live", "pinScrollTop", '"ffold"'):   # live branches stay pinned
+            self.assertIn(x, follow)
+        for sel in (".ffold", ".fag.collapsed>.fasteps", ".fag.foldable"):
+            self.assertIn(sel, css)
         for sel in (".fbr", ".fag", ".fah", ".fasteps", ".fmore", ".fth .fagn"):
             self.assertIn(sel, css)
 
@@ -588,6 +676,8 @@ out.full = p.toggle(["a", "b", "c", "d"], "e");
 out.href = p.href(["a", "b c"]);
 out.hrefNone = p.href([]);
 out.max = p.MAX;
+const pin = win.TSLive.pinScrollTop;
+out.scroll = [pin(300, 1000, null), pin(300, 1000, 800), pin(300, 1000, 500), pin(300, 200, 50)];
 console.log(JSON.stringify(out));
 """
         r = subprocess.run(["node", "-e", script, os.path.join(STATIC, "live.js")], capture_output=True, text=True,
@@ -596,7 +686,9 @@ console.log(JSON.stringify(out));
         out = json.loads(r.stdout)
         self.assertEqual(out, {"parse": ["a", "b", "c", "d"], "urlWins": ["x", "y"], "stored": ["a", "b"],
                                "emptyUrl": ["a"], "add": ["a", "b"], "remove": ["b"], "full": ["a", "b", "c", "d"],
-                               "href": "/follow?s=a,b%20c", "hrefNone": "/follow", "max": 4})
+                               "href": "/follow?s=a,b%20c", "hrefNone": "/follow", "max": 4,
+                               # end; end (the live region fits); its top (pinned); a short flow
+                               "scroll": [700, 700, 496, 0]})
 
 
 if __name__ == "__main__":

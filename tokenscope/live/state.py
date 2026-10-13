@@ -47,7 +47,58 @@ FOLLOW_STATUS = {"working": "running"}   # follow-view tile status: running / wa
 FOLLOW_AGENTS = 12   # subagent branches one follow tile shows (active ones first; the rest counted per step)
 FOLLOW_AGENT_STEPS = 6   # latest steps shown in a subagent branch
 FOLLOW_DEPTH = 3     # nesting levels of subagent branches in a follow tile
+FOLLOW_FOLD_MIN = 2  # fewest consecutive finished main-thread steps folded into one summary line
 AGENT_CALL_S = 10 * 60   # a subagent call without its result keeps the subagent active this long (a long test run)
+
+
+def follow_branches(rows):
+    """Mark the subagent branches of a follow tile's steps (recursively, nested ones too): "live" when it or one of
+    its subagents is running or starting; "collapsed" (header line only) when it finished (done / failed) and is
+    not the latest branch of its level, i.e. the last one launched by the newest step that launched any. Returns
+    whether any branch is live."""
+    live_any, latest = False, None
+    for r in rows:
+        for a in r.get("agents", ()):
+            a["live"] = follow_branches(a["steps"]) or a["status"] in ("running", "starting")
+            live_any = live_any or a["live"]
+            latest = a
+    for r in rows:
+        for a in r.get("agents", ()):
+            a["collapsed"] = a["status"] in ("done", "error") and not a["live"] and a is not latest
+    return live_any
+
+
+def follow_folds(steps, rows, min_run=FOLLOW_FOLD_MIN):
+    """While a subagent branch is live (follow_branches), fold the main-thread steps around it so it stays in view:
+    every run of >= min_run consecutive steps from the first shown one on that are finished and are not the
+    latest step, a step that launched a live branch, or the step that launched the latest branch becomes one
+    summary ({"first", "last": step i, "n", "usd", "cw"}; steps not shown, between an early launching step and
+    the latest ones, count too). Shown rows of a fold get "fold": its index. `steps` is the full list (i = index)."""
+    if not rows or not any(a.get("live") for r in rows for a in r.get("agents", ())):
+        return []
+    shown = {r["i"]: r for r in rows}
+    latest = next((r["i"] for r in reversed(rows) if r.get("agents")), None)
+    keep = {rows[-1]["i"], steps[-1]["i"], latest}
+    keep.update(r["i"] for r in rows if r["open"] or any(a.get("live") for a in r.get("agents", ())))
+    folds, run = [], []
+
+    def close():
+        if len(run) >= min_run:
+            for i in run:
+                if i in shown:
+                    shown[i]["fold"] = len(folds)
+            folds.append({"first": run[0], "last": run[-1], "n": len(run),
+                          "usd": round(sum(steps[i]["usd"] for i in run), 6),
+                          "cw": round(sum(steps[i]["cw"] for i in run), 1)})
+        run.clear()
+
+    for i in range(rows[0]["i"], steps[-1]["i"] + 1):
+        if i in keep or not steps[i]["closed"]:
+            close()
+        else:
+            run.append(i)
+    close()
+    return folds
 
 
 def board_order(rows):
@@ -1073,17 +1124,41 @@ class LiveState:
         steps, _ = self.steps(s, now) if s.main.turn_steps else ([], [])
         ctx = self._follow_ctx(s, now) if s.agents or s.fanouts else None
         w = self._follow_now(s, now, ctx) if status == "working" else None
-        shown = steps[-last_n:]
+        tail = steps[-last_n:]
+        shown = (self._follow_early(s, steps[:len(steps) - len(tail)], ctx) if ctx else []) + tail
         out = [self._follow_step(x, now, status == "working") for x in shown]
+        folds = []
         if ctx:
-            self._follow_agents(s, None, shown, out, now, ctx, 0)
+            self._follow_agents(s, None, shown, out, now, ctx, 0, tail[0]["ts0"])
+            if follow_branches(out):
+                folds = follow_folds(steps, out)
         return {"id": s.id, "short": s.id[:8], "project": self._project(s.project_raw),
                 "goal": s.goal["name"] if s.goal else None, "goal_source": s.goal["source"] if s.goal else None,
                 "status": "ended" if self.ended(s, now) else FOLLOW_STATUS.get(status, status),
                 "cw": round(s.totals["cw"], 1), "usd": round(s.totals["usd"], 6), "turns": s.totals["turns"],
                 "started": s.started, "last_ts": s.last_ts, "seq": s.seq, "steps_n": len(steps),
                 "agents_running": sum(ctx["active"].values()) + len(ctx["pending"]) if ctx else 0,
-                "now": w, "steps": out}
+                "now": w, "steps": out, "folds": folds}
+
+    def _follow_early(self, s, early, ctx):
+        """The steps before a tile's latest ones that launched a subagent still active (a background agent the main
+        thread kept working past): shown too, so its branch stays pinned in the tile."""
+        ids = {f["tool_use_id"] for f in ctx["pending_by"].get(None, ())}
+        for a in ctx["kids"].get(None, ()):
+            if ctx["active"].get(a["id"]):
+                ids.update(x for x in (a.get("tool_use_id"), ctx["wf"].get(a["id"])) if x)
+        if not early or not ids:
+            return []
+        hit = []
+        for x in reversed(early):
+            tids = {t.get("id") for k in range(x["turn_first"], x["turn_last"] + 1)
+                    for t in (s.main.turn_steps[k]["tools"] if 0 <= k < len(s.main.turn_steps) else ())}
+            if tids & ids:
+                hit.append(x)
+                ids -= tids
+                if not ids:
+                    break
+        return hit[::-1]
 
     def _follow_step(self, x, now, ticking):
         return {"i": x["i"], "cat": x["cat"], "label": self._lab(x["label"]), "cw": x["cw"], "usd": x["usd"],
@@ -1123,11 +1198,12 @@ class LiveState:
         return {"tool": x["label"], "target": x.get("target"), "agent": a["type"] or "agent",
                 "since_s": round(max(0.0, now - x["ts"]), 1) if x.get("ts") else None}
 
-    def _follow_agents(self, s, aid, steps, out, now, ctx, depth):
+    def _follow_agents(self, s, aid, steps, out, now, ctx, depth, since=None):
         """Attach to each shown step of a branch (main: aid None) the subagents it launched ("agents": active ones
-        first within the tile's budget, shown in launch order; "agents_more": the rest). A subagent is matched to
-        a step by its Agent/Task call (workflow agents: the Workflow call), else to the last step started before
-        its first record."""
+        first within the tile's budget, shown in launch order; "agents_more": the rest; steps launching active
+        ones get the budget first, then the newest). A subagent is matched to a step by its Agent/Task call
+        (workflow agents: the Workflow call), else to the last step started before its first record (not before
+        `since`, the first of the latest steps shown)."""
         children = ctx["kids"].get(aid, ())
         pend = ctx["pending_by"].get(aid, [])
         if not steps or not (children or pend):
@@ -1146,7 +1222,8 @@ class LiveState:
             i = at.get(ctx["wf"].get(a["id"])) if i is None else i
             if i is None:
                 t0 = a.get("first_ts") or 0
-                if t0 and steps[0]["ts0"] and t0 < steps[0]["ts0"]:
+                since = steps[0]["ts0"] if since is None else since
+                if t0 and since and t0 < since:
                     continue   # launched by an earlier step than the ones shown
                 i = next((x["i"] for x in reversed(steps) if x["ts0"] and x["ts0"] <= t0), steps[-1]["i"])
             by_step.setdefault(i, []).append(("a", a))
@@ -1155,7 +1232,9 @@ class LiveState:
             if i is not None and i >= first_i:
                 by_step.setdefault(i, []).append(("f", f))
         rows = {x["i"]: r for x, r in zip(steps, out)}
-        for i in sorted(by_step, reverse=True):   # newest steps first: they get the budget
+        def busy(i):
+            return any(c[0] == "f" or ctx["active"].get(c[1]["id"]) for c in by_step[i])
+        for i in sorted(by_step, key=lambda i: (busy(i), i), reverse=True):   # active, then newest: the budget
             cands = by_step[i]
             rank = sorted(cands, key=lambda c: (c[0] == "a" and not ctx["active"].get(c[1]["id"]),
                                                 -((c[1].get("first_ts") if c[0] == "a" else c[1].get("ts")) or 0)))

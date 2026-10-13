@@ -8,7 +8,8 @@ Endpoints (see docs/live-spec.md):
   GET /api/board                 all sessions in a stable order (state.board_order: by start, ended ones last;
                                  idle > 6 h dropped)
   GET /api/follow?s=<id>,...     the follow view's tiles (state.follow): up to 4 sessions' latest steps with $,
-                                 totals and status in one request
+                                 totals and status in one request; subagent branches, and while one runs "folds"
+                                 of finished main steps (state.follow_branches / follow_folds)
   GET /api/session/<id>          full session model (+ "seq"); ?since=<seq> -> only new / updated steps
   GET /api/session/<id>/compact  small payload for a Claude Code mod (and the session page: ?ops=all -> every
                                  intent step with its calls)

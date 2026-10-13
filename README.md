@@ -44,7 +44,9 @@ truncation handled) and shows:
 - **Follow view** (`/follow?s=<id>,<id>,...`): up to 4 pinned sessions side by side (a 2x2 grid that adapts to 1-3),
   each a compact live flow of its latest steps ([CATEGORY] label, $ and wall time per step) with the running total $,
   status (running / waiting / idle / ended) and the call running now, auto-scrolling to the newest step (scroll up to
-  stop, `↓ latest` resumes). Pins are kept in the browser (localStorage) and in the URL, which wins when it names
+  stop, `↓ latest` resumes). While a subagent runs, its branch stays pinned in view: the finished main-thread steps
+  around it fold into one `… N earlier steps · $X` line, finished older branches show as one header line (click
+  either to open it), and the tile scrolls so the running branches and the latest step both show. Pins are kept in the browser (localStorage) and in the URL, which wins when it names
   sessions, so a follow view can be bookmarked. `+ add session` picks another running session; a tile opens the
   canvas. One `/api/follow` request feeds all tiles.
 - **Session view** (`/s/<id>`): the session as an infinite canvas (pan, zoom, minimap, fit view). One node per

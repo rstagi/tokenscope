@@ -471,6 +471,13 @@
     get: function () { try { return parsePins(window.localStorage.getItem(PIN_KEY)); } catch (e) { return []; } },
     set: function (list) { try { window.localStorage.setItem(PIN_KEY, parsePins(list).join(",")); } catch (e) { /* private mode */ } }
   };
+  // Where an auto-following tile scrolls (flow height h, content height end): to the end, unless a subagent branch
+  // is live; then so the region from the first live branch (or the latest main step, if higher) to the end shows,
+  // and when that region is taller than the tile, from its top (the live branch stays pinned).
+  function pinScrollTop(h, end, top) {
+    if (top == null || end - top <= h) return Math.max(0, end - h);
+    return Math.max(0, top - 4);
+  }
   // follow-view tile status -> pill
   var FSTATUS = {running: "working", ended: "done"};
   function fpill(status) {
@@ -509,6 +516,7 @@
       tile._usd = new Counter($(".usd", tile), fmtUsd);
       tile._follow = true;
       tile._nodes = {};
+      tile._open = {};   // folds / collapsed branches the user opened ("f<first step>", "a<agent id>")
       $(".fgoal", tile).href = SRC.sessionHref(id);
       var flow = $(".fflow", tile);
       // auto-follow: stick to the newest step until the user scrolls up; scrolling back down (or ↓) resumes it
@@ -519,7 +527,21 @@
       });
       // a tile that changes size (one added or removed) stays on its newest step
       if (window.ResizeObserver) new ResizeObserver(function () { if (tile._follow) scrollEnd(tile); }).observe(flow);
-      $(".fjump", tile).onclick = function (e) { e.stopPropagation(); tile._follow = true; this.style.display = "none"; scrollEnd(tile); };
+      // ↓ latest: back to the auto view (what the user opened folds up again), following the newest step
+      $(".fjump", tile).onclick = function (e) {
+        e.stopPropagation();
+        tile._follow = true;
+        this.style.display = "none";
+        if (Object.keys(tile._open).length) { tile._open = {}; if (tile._s) updTile(tile, tile._s); }
+        scrollEnd(tile);
+      };
+      // opening / closing a fold or a collapsed branch: the user reads, so the tile stops following until ↓
+      tile._toggle = function (key) {
+        tile._open[key] = !tile._open[key];
+        tile._follow = false;
+        $(".fjump", tile).style.display = "";
+        if (tile._s) updTile(tile, tile._s);
+      };
       $(".unpin", tile).onclick = function (e) { e.stopPropagation(); unpin(id); };
       // the whole tile opens the session canvas (not its buttons, not a text selection)
       tile.addEventListener("click", function (e) {
@@ -529,10 +551,17 @@
       });
       return tile;
     }
+    // auto-follow: the newest step, keeping a live subagent branch in view (pinScrollTop)
     function scrollEnd(tile) {
-      var flow = $(".fflow", tile);
+      var flow = $(".fflow", tile), fr = flow.getBoundingClientRect(), top = null;
+      function y(e) { return e.getBoundingClientRect().top - fr.top + flow.scrollTop; }
+      var live = $(".fsteps > .fbr > .fag.live", tile);
+      if (live) {
+        var mains = flow.querySelectorAll(".fsteps > .fnode"), last = mains[mains.length - 1];
+        top = Math.min(y(live), last ? y(last) : Infinity);
+      }
       tile._auto = true;
-      flow.scrollTop = flow.scrollHeight;
+      flow.scrollTop = pinScrollTop(flow.clientHeight, flow.scrollHeight, top);
       setTimeout(function () { tile._auto = false; }, 50);
     }
     function stepNode(x) {
@@ -559,22 +588,43 @@
     // the step that launched them, its own subagents; reconciled by id so a poll only updates what changed
     function place(box, node, n) { if (box.children[n] !== node) box.insertBefore(node, box.children[n] || null); }
     function drop(node) { if (node && node.parentNode) node.parentNode.removeChild(node); }
-    function syncSteps(box, steps, store) {
-      var n = 0, seen = {}, added = false;
+    // folds (main thread, while a branch is live): each run of finished steps is one "… N earlier steps · $X" line
+    // placed where the run starts; a click opens it (its shown steps) or closes it again
+    function syncSteps(box, steps, store, tile, folds) {
+      var n = 0, seen = {}, added = false, fp = 0, fs = store._folds || (store._folds = {});
+      folds = folds || [];
+      function foldLine(f) {
+        var key = "f" + f.first, nd = fs[key], open = !!tile._open[key];
+        if (!nd) {
+          nd = fs[key] = el("div", "ffold");
+          nd.onclick = function (e) { e.stopPropagation(); tile._toggle(key); };
+        }
+        seen[key] = 1;
+        nd.textContent = (open ? "▾ " + f.n + " step" + (f.n > 1 ? "s" : "") : "… " + f.n + " earlier step" + (f.n > 1 ? "s" : "")) +
+          " · " + fmtUsd(f.usd);
+        nd.title = fmtK(f.cw) + " CW · " + (open ? "click to fold" : "click to show the steps shown here");
+        place(box, nd, n++);
+      }
       steps.forEach(function (x) {
+        while (fp < folds.length && folds[fp].first <= x.i) foldLine(folds[fp++]);
         seen[x.i] = 1;
         var e = store[x.i];
         if (!e) { e = store[x.i] = {nd: stepNode(x)}; added = true; }
+        var hide = x.fold != null && folds[x.fold] && !tile._open["f" + folds[x.fold].first];
         updStep(e.nd, x);
+        e.nd.style.display = hide ? "none" : "";
         place(box, e.nd, n++);
         if ((x.agents && x.agents.length) || x.agents_more) {
           if (!e.br) e.br = {el: el("div", "fbr"), ags: {}};
-          added = syncBranch(e.br, x.agents || [], x.agents_more) || added;
+          added = syncBranch(e.br, x.agents || [], x.agents_more, tile) || added;
+          e.br.el.style.display = hide ? "none" : "";
           place(box, e.br.el, n++);
         } else if (e.br) { drop(e.br.el); e.br = null; }
       });
+      while (fp < folds.length) foldLine(folds[fp++]);
+      Object.keys(fs).forEach(function (k) { if (!seen[k]) { drop(fs[k]); delete fs[k]; } });
       Object.keys(store).forEach(function (i) {
-        if (seen[i]) return;
+        if (seen[i] || i === "_folds") return;
         drop(store[i].nd);
         if (store[i].br) drop(store[i].br.el);
         delete store[i];
@@ -582,7 +632,8 @@
       return added;
     }
     var AG_ST = {running: "▶ running", starting: "starting…", idle: "quiet", done: "done", error: "failed"};
-    function syncBranch(br, agents, more) {
+    // a finished branch that is not the latest is one header line (collapsed); a click on it shows its steps
+    function syncBranch(br, agents, more, tile) {
       var seen = {}, added = false, n = 0;
       agents.forEach(function (a, k) {
         var key = a.id || "pending:" + k + ":" + a.type;
@@ -594,8 +645,11 @@
             '<span class="fc"></span></div><div class="fasteps"></div>';
           added = true;
         }
-        e.el.className = "fag " + (a.status || "idle");
-        $(".fat", e.el).textContent = "↳ " + (a.workflow ? "workflow · " : "") + (a.type || "agent");
+        var okey = "a" + key, shut = a.collapsed && !tile._open[okey];
+        e.el.className = "fag " + (a.status || "idle") + (a.live ? " live" : "") + (a.collapsed ? " foldable" : "") + (shut ? " collapsed" : "");
+        $(".fah", e.el).onclick = a.collapsed ? function (ev) { ev.stopPropagation(); tile._toggle(okey); } : null;
+        $(".fah", e.el).title = a.collapsed ? (shut ? "click to show its steps" : "click to collapse") : "";
+        $(".fat", e.el).textContent = (a.collapsed ? (shut ? "▸ " : "▾ ") : "↳ ") + (a.workflow ? "workflow · " : "") + (a.type || "agent");
         $(".fad", e.el).textContent = a.description || "";
         $(".fad", e.el).title = a.description || "";
         $(".fas", e.el).textContent = AG_ST[a.status] || a.status || "";
@@ -603,7 +657,7 @@
         $(".fc", e.el).title = fmtK(a.cw) + " CW (its own subagents included)";
         var box = $(".fasteps", e.el), steps = Array.isArray(a.steps) ? a.steps : [];
         box.setAttribute("data-more", a.steps_n > steps.length ? "+" + (a.steps_n - steps.length) + " earlier" : "");
-        added = syncSteps(box, steps, e.store) || added;
+        added = syncSteps(box, steps, e.store, tile) || added;
         place(br.el, e.el, n++);
       });
       Object.keys(br.ags).forEach(function (key) { if (!seen[key]) { drop(br.ags[key].el); delete br.ags[key]; } });
@@ -631,7 +685,7 @@
       tile._usd.set(s.usd);
       $(".cw", tile).textContent = fmtK(s.cw) + " CW";
       var flow = $(".fsteps", tile), steps = Array.isArray(s.steps) ? s.steps : [];
-      var added = syncSteps(flow, steps, tile._nodes);
+      var added = syncSteps(flow, steps, tile._nodes, tile, s.folds);
       var ar = $(".fagn", tile);
       ar.textContent = s.agents_running ? s.agents_running + " subagent" + (s.agents_running > 1 ? "s" : "") + " running" : "";
       var more = s.steps_n > steps.length ? s.steps_n - steps.length : 0;
@@ -1255,6 +1309,7 @@
     start(); // a session that has not written anything yet 404s: keep retrying until it shows up
   }
   window.TSLive = {initBoard: initBoard, initSession: initSession, initFollow: initFollow, GCOL: GCOL, fmtK: fmtK, fmtDur: fmtDur,
+    pinScrollTop: pinScrollTop,
     pins: {parse: parsePins, resolve: resolvePins, toggle: togglePin, href: followHref, MAX: PIN_MAX}};
   document.addEventListener("DOMContentLoaded", function () {
     var page = document.body.getAttribute("data-page");
