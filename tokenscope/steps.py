@@ -194,7 +194,7 @@ def _parts(turn):
     text go to the first part that is not ToolSearch, the test outcome and subagent / workflow cost to the last."""
     tools = turn.get("tools") or []
     idx = call_parts([t.get("name") for t in tools])
-    if idx[0] is None:
+    if not idx or idx[0] is None:
         return [(None, turn)]
     hit = turn.get("_p")
     if not hit or hit[0] != len(tools):

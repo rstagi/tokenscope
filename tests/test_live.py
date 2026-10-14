@@ -413,7 +413,7 @@ class TestServer(LiveFixture):
         self.assertEqual("recap" in c, c["status"] in ("waiting", "idle"))   # the idle recap, see recap.py
         self.assertEqual(set(c) - {"recap"}, {"goal", "status", "cw", "usd", "context_tokens", "current_intent", "flags",
                                   "recent", "agents", "elapsed_s", "turns", "tool_calls", "errors", "cw_series", "main_tool_calls",
-                                  "warnings", "asked", "now", "tests", "files_edited_n", "intents", "skills"})
+                                  "warnings", "asked", "now", "tests", "files_edited_n", "intents", "skills", "alerts"})
         self.assertEqual(set(c["warnings"][0]), {"rule", "text", "hint", "count", "ts"})
         self.assertEqual(c["tests"]["runs"], 3)
         self.assertFalse(c["tests"]["ok"])

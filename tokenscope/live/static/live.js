@@ -67,6 +67,25 @@
     if (f.detail != null) c.title = String(f.flag) + " · count " + (f.count || 0);
     return c;
   }
+  // alerts (tokenscope/alerts.py): a chip per active one (▲ + its name, the message on hover), then how many more
+  var ALERT_NAMES = {session_usd: "session $", intent_usd: "intent $", jump: "cost jump", unrelated: "off-task",
+    repeat_read: "read loop", repeat_search: "search loop", repeat_command: "command loop", repeat_call: "call loop",
+    retry: "retry loop", edit_revert: "edit revert"};
+  function alertName(x) { return ALERT_NAMES[x.rule] || String(x.rule || x.kind || "alert").replace(/_/g, " "); }
+  function alertChips(node, al) {
+    if (!al || !al.n) return;
+    var top = Array.isArray(al.top) ? al.top : [];
+    top.forEach(function (x) {
+      var c = el("span", "chip alert " + (x.severity || "warning"), "▲ " + alertName(x));
+      c.title = x.message || "";
+      node.appendChild(c);
+    });
+    if (al.n > top.length) {
+      var m = el("span", "chip", (top.length ? "+" : "") + (al.n - top.length) + " alert" + (al.n - top.length === 1 ? "" : "s"));
+      m.title = Object.keys(al.by_kind || {}).map(function (k) { return k.replace(/_/g, "-") + " ×" + al.by_kind[k]; }).join(" · ");
+      node.appendChild(m);
+    }
+  }
   function goalName(g) { return g && typeof g === "object" ? g.name : g; }
   function goalNode(node, g) {
     var n = goalName(g);
@@ -291,6 +310,7 @@
       $(".tc", a).textContent = (s.turns || 0) + " turns · " + (s.tool_calls || 0) + " tools" + (s.errors ? " · " + s.errors + " err" : "");
       var fl = $(".flags", a); fl.innerHTML = "";
       (s.flags || []).forEach(function (f) { fl.appendChild(flagChip(f, s.context_tokens)); });
+      alertChips(fl, s.alerts);
       a._s = s;
       a._st = st;
     }

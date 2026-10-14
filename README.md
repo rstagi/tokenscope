@@ -44,6 +44,8 @@ truncation handled) and shows:
   context gauge, and the idle recap (costliest and slowest intent, up to 3 hints, cross-session ones marked) while the
   session waits for you. `?replay=1` replays a recorded session server-side as if it were live (about 90 s;
   `&duration=<s>`). The canvas is a vendored React Flow build (`web/canvas/`, licences in THIRD_PARTY_NOTICES.md).
+- **Alerts** (cost, off-task, looping): a banner in the pane, markers on the canvas, chips on the board. See
+  [Alerts](#alerts-cost-off-task-looping) below.
 - **Live warnings** (rare by design; a normal fail -> edit -> fail -> edit -> green session shows none; each comes
   with a short hint): `stuck_error` (the same normalised error 3+ times with no edit in between, per thread),
   `reread_loop` (the same file read in full 4+ times with no edit to it and no compaction in between),
@@ -58,8 +60,10 @@ the default namer is a local keyword heuristic), `--haiku-odd` (the same, only f
 long, multi-line, opening with filler, carrying paths, URLs, code or markup). Without either, such prompts are named
 from their cleaned-up text, or by a Haiku name an earlier run cached (`~/.cache/tokenscope/goal-names.json`).
 
+Alert flags: `--off-task`, `--alert KEY=VALUE`, `--alerts-config FILE`, `--no-alerts` (see [Alerts](#alerts-cost-off-task-looping)).
+
 API: `GET /api/board`, `GET /api/top?window=5h|24h|7d|30d&by=session|goal|turn|intent`, `GET /api/follow?s=<id>,...`,
-`GET /api/session/<id>[?since=<seq>]`, `GET /api/session/<id>/compact`, `GET /events` (Server-Sent Events: `board`
+`GET /api/session/<id>[?since=<seq>]`, `GET /api/session/<id>/compact`, `GET /api/session/<id>/alerts`, `GET /events` (Server-Sent Events: `board`
 and `step`). See `docs/live-spec.md`.
 
 **Status heuristic.** From transcripts alone: *working* while the last event is a prompt / tool call / tool result
@@ -74,6 +78,101 @@ exact status (permission prompts, long-running tools, session end), add the opti
 The hook script is standard-library only, async, always exits 0, and writes only `{ts, event, session_id,
 tool_name, notification_type, message (Notification only, 200 chars), agent_id, agent_type (subagent events only)}`
 to `~/.cache/tokenscope-live/events.jsonl` (`$TOKENSCOPE_LIVE_EVENTS`). It never records prompts, tool inputs or tool outputs.
+
+### Alerts: cost, off-task, looping
+
+![pane: alert banner under the header](docs/media/pane-alerts.png)
+
+![canvas: alert markers on the affected steps, tooltip on hover](docs/media/canvas-alerts.png)
+
+Three kinds of alerts, computed from the same live model as the views (`tokenscope/alerts.py`), each pointing at the
+step (or step range) it is about:
+
+- **cost**: `session_usd` (the session passed `cost.session_usd`), `intent_usd` (one intent, i.e. a canvas node: an
+  intent group, else a step, passed `cost.intent_usd`) and `jump` (one step cost far more than the session's own
+  recent steps). A jump is judged against a rolling baseline of the previous `cost.jump_window` steps, after
+  `cost.jump_warmup` of them: the step must cost at least `cost.jump_ratio` x their median, have a robust z-score of
+  at least `cost.jump_z` on log costs (median / MAD of ln cost; step costs are heavy-tailed), be at least
+  `cost.jump_max_ratio` x the largest of them (a new high, not a spike size the session already had) and cost at
+  least `cost.jump_floor_usd` (tiny steps never fire). It fires while the step is still open, so you see it live.
+  Unpriced models fall back to cost-weighted tokens (`cost.jump_floor_cw`).
+- **off-task** (opt-in: `--off-task` or `off_task.enabled = true`): recent steps touch only files whose path words
+  share nothing with the active intent (the declared intent, else the in-progress todo item; with
+  `off_task.use_prompt` also the request's prompt words), that no related step of the request touched or found
+  (files a related search showed count as related). Heuristic by design; detectors are pluggable (a `Detector` is
+  anything with `name` and `detect(ctx) -> [Alert]`, added with `alerts.register(name, factory)`), and
+  `HaikuOffTaskDetector` marks where a model-based check would go.
+- **looping**: `repeat_read` / `repeat_search` / `repeat_command` / `repeat_call` (the same call with the same result
+  again and again, no edit in between; polling such as `sleep` / `until` loops, status / wait tools and reads of a
+  background task's output is ignored), `retry` (the same call failing again and again with no edit in between)
+  and `edit_revert` (edits undone: A->B then B->A, or a file written back to an earlier content). Counted per thread
+  (main and each subagent) within `looping.window` calls.
+
+Messages are privacy-safe in every mode: no paths, file names, commands, patterns, prompt text, user names, e-mails
+or keys; files and commands are named by kind and a per-session ordinal (`same .py file read 6× (file #2)`,
+`same failing command retried 3× (command #1)`), and a last scrub removes anything path-, e-mail- or key-like.
+
+Where they show: the **pane** draws a banner under its header with the active alerts (worst first; an alert is
+active while it is within `active_steps` steps of the newest step, a subagent's while that subagent works, a session
+threshold always) and toasts each new one; the **session canvas** marks the node holding each alert's step (▲,
+coloured by severity; hover for the alerts, click for the side panel) and lists them in an ALERTS row; **board**
+cards show a chip per active alert. API: `"alerts"` in `/api/session/<id>/compact` and `/flow`
+(`[{id, kind, rule, severity, message, step, first, agent, details, active}]`), counts in `/api/board` and
+`/api/follow`, and `GET /api/session/<id>/alerts` (the list plus the config in use).
+
+Offline: `tokenscope alerts SESSION [--json]` replays one transcript and prints its alerts;
+`python3 tools/alerts_eval.py --root DIR [--events FILE] [--off-task] [--per-trace] [--sample N]` runs the detectors
+over a whole tree and prints counts per kind and rule (traces named by ordinal and session id prefix only).
+`tests/alerts_synth.py` writes synthetic sessions that trigger each alert (committed under `tests/fixtures/alerts/`).
+
+**Config**: `~/.config/tokenscope/alerts.toml` (or `$TOKENSCOPE_ALERTS_CONFIG`, or `--alerts-config FILE`; TOML or
+`.json`), nested tables or dotted keys, optionally under `[alerts]`:
+
+```toml
+[cost]
+session_usd = 10
+jump_ratio = 5
+
+[off_task]
+enabled = true
+```
+
+Flags on `tokenscope live` and `tokenscope alerts`: `--alert KEY=VALUE` (repeatable, wins over the file),
+`--off-task`, `--no-alerts`, `--alerts-config FILE`. `tokenscope live alerts-config` prints every key with its
+default (valid TOML). Unknown keys and wrong types are errors.
+
+| key | default | meaning |
+|---|---|---|
+| `enabled` | `true` | master switch for all alerts |
+| `active_steps` | `3` | an alert stays active (pane banner) while its last step is within this many main-thread steps of the newest one |
+| `max` | `50` | most alerts kept per session (newest first) |
+| `cost.enabled` | `true` | cost alerts on/off |
+| `cost.session_usd` | `25.0` | session spend (API-equivalent $) that fires `session_usd`; 0 disables |
+| `cost.intent_usd` | `5.0` | spend of one intent (an intent group, else a step) that fires `intent_usd`; 0 disables |
+| `cost.jump` | `true` | per-step spend jump detection on/off |
+| `cost.jump_metric` | `"usd"` | "usd" or "cw" (cost-weighted tokens); usd falls back to cw for unpriced models |
+| `cost.jump_window` | `20` | previous steps in the rolling baseline |
+| `cost.jump_warmup` | `6` | steps with a cost needed before a jump can fire |
+| `cost.jump_ratio` | `4.0` | a jump costs at least this many times the baseline median |
+| `cost.jump_z` | `3.5` | and has a robust z-score of at least this, on log costs: (ln x - median ln) / (1.4826 * MAD of ln), the MAD floored at ln 1.25 |
+| `cost.jump_max_ratio` | `1.5` | and costs at least this many times the largest step in the baseline (a new high, not a spike size the session already had); 0 turns this check off |
+| `cost.jump_floor_usd` | `0.75` | and costs at least this much $ (metric usd) |
+| `cost.jump_floor_cw` | `250000` | and at least this many cost-weighted tokens (metric cw) |
+| `cost.jump_subagents` | `true` | count the cost of the subagents a step launched as the step's cost |
+| `off_task.enabled` | `false` | off-task alerts on/off (off by default; also --off-task) |
+| `off_task.window` | `4` | recent steps with files looked at |
+| `off_task.min_unrelated` | `3` | of which at least this many touch only files unrelated to the active intent |
+| `off_task.min_keywords` | `2` | the active intent needs at least this many keywords to be judged |
+| `off_task.use_prompt` | `false` | without a declared intent or in-progress todo item, judge against the request's prompt words (noisier: prompts describe behaviour more often than files) |
+| `looping.enabled` | `true` | looping alerts on/off |
+| `looping.window` | `30` | calls of one thread (main or one subagent) a repeat is counted in |
+| `looping.read_n` | `4` | same file region read with the same result this many times, no edit to it in between |
+| `looping.search_n` | `4` | same search (Grep / Glob) with the same result this many times |
+| `looping.command_n` | `4` | same command (or other call) with the same result this many times, no edit in between |
+| `looping.retry_n` | `3` | same call failing this many times with no edit in between |
+| `looping.edit_revert_n` | `2` | edits undone (A->B then B->A, or a file written back to an earlier content) on one file before it fires |
+| `looping.ignore_polling` | `true` | ignore polling (sleep, waiting on a background task, reading its output) |
+| `looping.subagents` | `true` | also look for loops inside subagents |
 
 ### Many sessions at once: the board and the follow view
 
@@ -466,6 +565,7 @@ session's prompts through your own `claude` CLI (`--haiku-odd`: only of prompts 
     tokenscope/                 parser, analysis, goals, fixes, HTML reports, CLI
     tokenscope/intents.py       intent rules: tool call -> intent (locate, read_code, edit, test, ...) -> group
     tokenscope/xindex.py        cross-session index of past requests, matching, skill hints and drafts
+    tokenscope/alerts.py        cost / off-task / looping alert detectors, their config and registry
     tokenscope/live/            live tailer, state + flags, goal namer, hook script, HTTP/SSE server, static UI
     mod/tokenscope-live/        Claude Code mod (in-terminal pane)
     docs/                       live design spec, notes on Claude Code extension points

@@ -55,6 +55,41 @@ function stepsDetail(steps) {
   return parts.map((p) => p.label + (p.n > 1 ? " ×" + p.n : "") + p.mark).join(" · ");
 }
 
+// ---------- alerts (tokenscope/alerts.py; payload key "alerts") ----------
+// An alert points at a step of a lane (agent null: the main thread) and the range it covers (first..step). Its marker
+// sits on the node holding that step; the node's tooltip lists every alert whose step it holds.
+const ALERT_NAMES = {session_usd: "session $", intent_usd: "intent $", jump: "cost jump", unrelated: "off-task",
+  repeat_read: "read loop", repeat_search: "search loop", repeat_command: "command loop", repeat_call: "call loop",
+  retry: "retry loop", edit_revert: "edit revert"};
+const SEV = {info: 0, warning: 1, critical: 2};
+const alertName = (a) => ALERT_NAMES[a.rule] || String(a.rule || a.kind || "alert").replace(/_/g, " ");
+const worst = (as) => as.reduce((w, a) => (SEV[a.severity] || 0) > (SEV[w] || 0) ? a.severity : w, "info");
+const alertTip = (as) => as.map((a) => "▲ " + alertName(a) + (a.step != null ? " · step " + (a.first != null && a.first !== a.step ? a.first + "–" : "") + a.step : "") + "\n" + a.message).join("\n\n");
+function alertsByLane(C) {
+  const out = {};
+  (Array.isArray(C.alerts) ? C.alerts : []).forEach((a) => {
+    if (!a || a.step == null) return;
+    const lane = a.agent ? "a:" + a.agent : "m";
+    (out[lane] = out[lane] || []).push(a);
+  });
+  return out;
+}
+// hovering a marker shows its alerts in a tooltip drawn over the canvas (a node clips its own content); the canvas
+// sets the setter
+let showTip = () => {};
+function AlertMark({as}) {
+  if (!as || !as.length) return null;
+  const tip = alertTip(as);
+  return <span className={"amark " + worst(as)} aria-label={tip} data-tip={tip}
+    onMouseEnter={(e) => showTip({text: tip, sev: worst(as), x: e.clientX, y: e.clientY})} onMouseLeave={() => showTip(null)}>
+    ▲{as.length > 1 ? " " + as.length : ""}</span>;
+}
+function Tip({tip}) {
+  if (!tip) return null;
+  const left = Math.min(tip.x + 14, window.innerWidth - 380), top = Math.min(tip.y + 14, window.innerHeight - 160);
+  return <div className={"atip " + tip.sev} style={{left, top}}>{tip.text}</div>;
+}
+
 // ---------- graph model: lanes of slots ----------
 // A slot is one node of a lane: an intent group, or a step outside any group, keyed by its first step index (a step
 // that later joins a group keeps the group's slot: the node stays where it is and grows).
@@ -179,26 +214,28 @@ const HANDLES = <>
 </>;
 
 function IntentNode({data}) {
-  const {sl, live, selected, n} = data, g = sl.group, x = sl.steps[0];
+  const {sl, live, selected, n, alerts} = data, g = sl.group, x = sl.steps[0];
   const cat = g ? g.cat : x.cat, provisional = !g && x.open && !x.locked;
   const label = g ? g.label : x.label + (provisional ? "…" : "");
   const meta = g ? (g.steps + (g.steps === 1 ? " step · " : " steps · ")) + costText(g.cw, g.usd, g.dur_s) : costText(x.cw, x.usd, x.dur_s);
   const detail = g ? stepsDetail(sl.steps) : stepSummary(x);
-  return <div className={"inode" + (live ? " live" : "") + (selected ? " sel" : "")} style={{borderLeftColor: gcol(cat), height: data.h}}>
+  const al = alerts || [];
+  return <div className={"inode" + (live ? " live" : "") + (selected ? " sel" : "") + (al.length ? " alerted " + worst(al) : "")} style={{borderLeftColor: gcol(cat), height: data.h}}>
     {HANDLES}
     <div className="ihd">
       {n != null ? <span className="gn">{n}</span> : null}
       <CatTag cat={cat} />
       <span className={"sl" + (provisional ? " prov" : "")} title={label + ((g || x).source ? "  (" + (g || x).source + " label)" : "")}>{live ? "▶ " : ""}{label}</span>
       <Marks x={g || x} />
+      <AlertMark as={al} />
     </div>
     <div className="imeta">{meta}</div>
     {detail ? <div className="idet" title={detail}>↳ {detail}</div> : <div className="idet mut"> </div>}
     {g ? <div className="irows">
       {sl.steps.slice(0, MAX_ROWS).map((s) => <div key={s.i} className={"irow" + (s.open ? " open" : "")}>
-        <CatTag cat={s.cat} /><span className="rl" title={s.label}>{s.label}</span><Marks x={s} /><span className="rn">{costText(s.cw, null, s.dur_s)}</span>
+        <CatTag cat={s.cat} /><span className="rl" title={s.label}>{s.label}</span><Marks x={s} /><AlertMark as={al.filter((a) => a.step === s.i)} /><span className="rn">{costText(s.cw, null, s.dur_s)}</span>
       </div>)}
-      {sl.steps.length > MAX_ROWS ? <div className="irow mut">+{sl.steps.length - MAX_ROWS} more steps</div> : null}
+      {sl.steps.length > MAX_ROWS ? <div className="irow mut">+{sl.steps.length - MAX_ROWS} more steps<AlertMark as={al.filter((a) => sl.steps.slice(MAX_ROWS).some((s) => s.i === a.step))} /></div> : null}
     </div> : null}
   </div>;
 }
@@ -241,6 +278,12 @@ function StepBlock({x, live}) {
     <div className="ops">{ops.length ? ops.map((o, k) => <OpRow key={k} o={o} live={live} />) : <div className="op mut">no tool calls (thinking / text only)</div>}</div>
   </div>;
 }
+function AlertList({as}) {
+  if (!as || !as.length) return null;
+  return <div className="palerts">{as.map((x) => <div key={x.id} className={"palert " + x.severity}>
+    <b>▲ {alertName(x)}</b> <span className="mut">{x.step != null ? "step " + (x.first != null && x.first !== x.step ? x.first + "–" : "") + x.step : ""}</span>
+    <div>{x.message}</div></div>)}</div>;
+}
 function Panel({sel, onClose}) {
   if (!sel) return null;
   const {sl, a, live} = sel;
@@ -257,6 +300,7 @@ function Panel({sel, onClose}) {
     {a ? <div className="pmeta">in subagent <b>{a.type}</b>{a.description ? " · " + a.description : ""}</div> : null}
     <div className="ptitle"><CatTag cat={g ? g.cat : x.cat} /> <b>{g ? g.label : x.label}</b> <Marks x={g || x} /></div>
     <div className="pmeta">{g ? g.steps + (g.steps === 1 ? " step · " : " steps · ") + costText(g.cw, g.usd, g.dur_s) : costText(x.cw, x.usd, x.dur_s)}</div>
+    <AlertList as={sel.alerts} />
     {sl.steps.map((s) => <StepBlock key={s.i} x={s} live={live && s === last} />)}
   </aside>;
 }
@@ -313,6 +357,10 @@ function Head({C, elapsed, open, setOpen, conn, replay, onRestart}) {
       {C.tests ? <><span className="hl">TESTS</span><span className="hv"><TestsNode t={C.tests} /></span></> : null}
       {fn ? <><span className="hl">FILES</span><span className="hv" title={files.join("\n")}>{files.length ? "edited " + fn + ": " + files.slice(-6).join(", ") + (files.length > 6 ? ", …" : "") : "edited " + fn + (fn === 1 ? " file" : " files")}</span></> : null}
       {sk.length ? <><span className="hl">SKILLS</span><span className="hv skm">✦ {sk.map((s) => s.name + " ×" + (s.count || 1)).join(" · ")}</span></> : null}
+      {(C.alerts || []).length ? <><span className="hl">ALERTS</span><span className="hv hvw">{C.alerts.slice(0, 6).map((a) =>
+        <span key={a.id} className={"chip alert " + a.severity + (a.active ? " on" : "")} title={alertTip([a])}
+          onMouseEnter={(e) => showTip({text: alertTip([a]), sev: a.severity, x: e.clientX, y: e.clientY})} onMouseLeave={() => showTip(null)}>▲ {alertName(a)}{a.step != null ? " · " + a.step : ""}</span>)}
+        {C.alerts.length > 6 ? <span className="mut"> +{C.alerts.length - 6}</span> : null}</span></> : null}
       {(H.flags || []).length ? <><span className="hl">FLAGS</span><span className="hv">{H.flags.map((f, k) => <span key={k} className="chip warn">{String(f.flag).replace(/_/g, " ")}{f.count > 1 ? " ×" + f.count : ""}</span>)}</span></> : null}
     </div> : null}
   </div>;
@@ -389,6 +437,8 @@ function Canvas() {
   const P = useRef({pos: {}, col: {m: 0}, colOwner: [], gen: 0});
   const [follow, setFollow] = useState(true), [selKey, setSelKey] = useState(null);
   const [headOpen, setHeadOpen] = useState(true), [recapOpen, setRecapOpen] = useState(true);
+  const [tip, setTip] = useState(null);
+  showTip = setTip;
   const [, tick] = useState(0);
   useEffect(() => { const t = setInterval(() => tick((n) => n + 1), 1000); return () => clearInterval(t); }, []);
   const lastReplayFed = useRef(null);
@@ -404,6 +454,7 @@ function Canvas() {
     M.agents.forEach((a) => { byId["a:" + a.id] = a; });
     const heights = place(P.current, M, (laneId) => !running(byId[laneId]));
     const working = C.status === "working";
+    const byLane = alertsByLane(C);
     const nodes = [], edges = [], liveKeys = [];
     let groupN = 0;
     Object.values(M.lanes).forEach((L) => {
@@ -420,8 +471,10 @@ function Canvas() {
         const last = k === L.slots.length - 1;
         const live = laneLive && last;
         if (live) liveKeys.push({key: sl.key, t: sl.ts0 || 0});
+        const idx = new Set(sl.steps.map((s) => s.i));
+        const alerts = (byLane[L.id] || []).filter((x) => idx.has(x.step));
         nodes.push({id: sl.key, type: "intent", position: pos, draggable: false, width: NODE_W, height: heights[sl.key],
-          data: {sl, live, selected: selKey === sl.key, h: heights[sl.key], n: L.id === "m" && sl.group ? ++groupN : null}});
+          data: {sl, live, selected: selKey === sl.key, h: heights[sl.key], n: L.id === "m" && sl.group ? ++groupN : null, alerts}});
         if (prev) edges.push({id: "e:" + prev + ">" + sl.key, source: prev, target: sl.key, sourceHandle: "b", targetHandle: "t",
           type: "smoothstep", style: {stroke: a ? gcol("delegate") : "#c3cad6", strokeWidth: 1.5}});
         prev = sl.key;
@@ -482,7 +535,7 @@ function Canvas() {
   let sel = null;
   if (selKey && view) {
     const n = view.nodes.find((x) => x.id === selKey);
-    if (n) sel = n.type === "agent" ? {a: n.data.a} : {sl: n.data.sl, live: n.data.live, a: view.byId[n.data.sl.lane] || null};
+    if (n) sel = n.type === "agent" ? {a: n.data.a} : {sl: n.data.sl, live: n.data.live, a: view.byId[n.data.sl.lane] || null, alerts: n.data.alerts};
   }
   const H = C.header || {};
   const st = (window.performance && fetchedAt.current) ? (Date.now() - fetchedAt.current) / 1000 : 0;
@@ -495,13 +548,15 @@ function Canvas() {
       <Background gap={22} size={1} color="#dde2ea" />
       <Controls position="bottom-left" showInteractive={false} onFitView={() => setFollow(false)} onZoomIn={() => setFollow(false)} onZoomOut={() => setFollow(false)} />
       <MiniMap position="bottom-right" pannable zoomable nodeColor={(n) => n.type === "agent" ? gcol("delegate") :
-        gcol(n.data.sl.group ? n.data.sl.group.cat : n.data.sl.steps[0].cat)} nodeStrokeWidth={2} maskColor="rgba(240,242,246,.7)" />
+        gcol(n.data.sl.group ? n.data.sl.group.cat : n.data.sl.steps[0].cat)} nodeStrokeColor={(n) => n.data && n.data.alerts && n.data.alerts.length ? "#e03131" : "transparent"}
+        nodeStrokeWidth={6} maskColor="rgba(240,242,246,.7)" />
     </ReactFlow>
     <Head C={C} elapsed={elapsed} open={headOpen} setOpen={setHeadOpen} conn={err ? "○ offline" : conn} replay={C.replay} onRestart={() => { setFollow(true); restartReplay(); }} />
     {showRecap ? <Recap rc={C.recap} open={recapOpen} setOpen={setRecapOpen} /> : null}
     {!view.nodes.length ? <div className="ov emptyov">No intents yet.</div> : null}
     {!follow ? <button className="follow" onClick={() => setFollow(true)}>⦿ follow live</button> : null}
     <Panel sel={sel} onClose={() => setSelKey(null)} />
+    <Tip tip={tip} />
   </div>;
 }
 

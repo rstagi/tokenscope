@@ -11,6 +11,7 @@ Endpoints (see docs/live-spec.md):
                                  totals and status in one request; subagent branches, and while one runs "folds"
                                  of finished main steps (state.follow_branches / follow_folds)
   GET /api/session/<id>          full session model (+ "seq"); ?since=<seq> -> only new / updated steps
+  GET /api/session/<id>/alerts   the session's alerts (tokenscope/alerts.py) with "active", plus the config in use
   GET /api/session/<id>/compact  small payload for a Claude Code mod (and the session page: ?ops=all -> every
                                  intent step with its calls)
   GET /api/session/<id>/flow     the session canvas payload: compact + every call + header + subagent sub-flows;
@@ -34,6 +35,7 @@ import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
+from .. import alerts as alertsmod
 from ..parse import resolve_root
 from . import goalname
 from .goalname import HaikuNamer, mask
@@ -57,7 +59,7 @@ class Live:
 
     def __init__(self, root, redact=True, since_minutes=120, haiku=False,
                  events_path=None, hooks=True, project="*", xhints=False, index_root=None, skills_dirs=(),
-                 cached_labels=False, odd_goals=False, cached_goals=False, goal_namer=None):
+                 cached_labels=False, odd_goals=False, cached_goals=False, goal_namer=None, alerts_config=None):
         self.lock = threading.Lock()
         # goal names from Haiku (disk-cached by prompt): every goal with --haiku; with --haiku-odd (odd_goals) only
         # those whose prompt reads oddly as a label (goalname.reads_oddly), goalname.goal_label until it arrives;
@@ -76,7 +78,7 @@ class Live:
             self.step_namer = StepNamer(self._steps_named, labeller=functools.partial(label_batch, cache_only=True))
         self.state = LiveState(redact=redact, on_goal=self.namer.request if self.namer else None,
                                on_prompt=self._name_prompt if self.namer else None,
-                               model_labels=self.step_namer is not None)
+                               model_labels=self.step_namer is not None, alerts_config=alerts_config)
         self.suggester = None
         if xhints:   # cross-session recap hints (tokenscope/xindex.py): the index builds in the background
             from ..xindex import Suggester
@@ -153,7 +155,7 @@ class Live:
             if rp is None or restart:
                 rp = self.replays[sid] = LiveReplay(
                     path, redact=self.state.redact, duration=duration, xhints=self.suggester,
-                    labeller=functools.partial(label_batch, cache_only=True))
+                    labeller=functools.partial(label_batch, cache_only=True), alerts_config=self.state.alerts_config)
             return rp.flow()
 
     def _build_top(self):
@@ -250,6 +252,8 @@ class Handler(BaseHTTPRequestHandler):
                     return self._json({"error": "unknown session"}, 404)
                 if len(parts) == 4 and parts[3] == "flow":
                     return self._json(st.session_flow(s))
+                if len(parts) == 4 and parts[3] == "alerts":
+                    return self._json({"alerts": st.alerts_public(s), "config": st.alerts_config})
                 if len(parts) == 4:
                     if parts[3] != "compact":
                         return self._json({"error": "not found"}, 404)
@@ -387,6 +391,7 @@ def add_arguments(p):
                    help="extra skills dir for 'use skill' hints, besides ~/.claude/skills and <project>/.claude/skills "
                         "(repeatable)")
     p.add_argument("--no-xhints", action="store_true", help="no cross-session recap hints (no index is built)")
+    alertsmod.add_arguments(p)
     return p
 
 
@@ -395,10 +400,16 @@ def main(args=None):
     if args is None or isinstance(args, list):
         args = add_arguments(argparse.ArgumentParser(prog="tokenscope live")).parse_args(args)
     ensure_static()
+    try:
+        alerts_config = alertsmod.from_args(args)
+    except (OSError, ValueError) as e:
+        print("tokenscope live: %s" % (e,), file=sys.stderr)
+        return 2
     live = Live(resolve_root(getattr(args, "root", None)), redact=not args.no_redact,
                 since_minutes=args.since_minutes, project=args.project, haiku=args.haiku,
                 xhints=not args.no_xhints, index_root=args.index_root, skills_dirs=args.skills_dir,
-                cached_labels=True, odd_goals=getattr(args, "haiku_odd", False), cached_goals=True)
+                cached_labels=True, odd_goals=getattr(args, "haiku_odd", False), cached_goals=True,
+                alerts_config=alerts_config)
     srv = make_server(live, args.host, args.port)
     threading.Thread(target=live.run, daemon=True).start()
     print("tokenscope live: http://%s:%d/  (redaction %s; Ctrl-C to stop)" % (

@@ -206,6 +206,42 @@ describe('tokenscope-live', () => {
     expect(await ui.findAll({ type: 'Text', text: /⚠/ })).toHaveLength(1)
   })
 
+  test('active alerts show as a banner under the header, worst first; a new alert toasts once', async ($: any, on: any) => {
+    const clock = base(on)
+    let payload: any = COMPACT
+    const toasts: string[] = []
+    on('http.fetch', () => ({ value: { status: 200, ok: true, headers: {}, text: JSON.stringify(payload) } }))
+    on('ui.toast', (_$: any, e: any) => { toasts.push(e.text); return { value: undefined } })
+    await $.session.start(SESSION)
+    await clock.advance(1000)
+    payload = { ...COMPACT, alerts: [
+      { id: 'a1', kind: 'looping', rule: 'retry', severity: 'warning', message: 'same failing command retried 3× with no edit in between (command #1)', step: 7, first: 6, agent: null, active: true },
+      { id: 'a2', kind: 'cost', rule: 'jump', severity: 'critical', message: 'step cost $1.80, 56.1× the session median $0.03', step: 5, first: 5, agent: null, active: true },
+      { id: 'a3', kind: 'looping', rule: 'repeat_read', severity: 'warning', message: 'same .py file read 4× with the same result (file #1)', step: 1, first: 0, agent: null, active: false },
+    ] }
+    await clock.advance(1000)
+    expect(toasts).toEqual(['▲ cost jump: step cost $1.80, 56.1× the session median $0.03  ▲ retry loop: same failing command retried 3× with no edit in between (command #1)'])
+    payload = { ...payload }
+    await clock.advance(1000)
+    expect(toasts).toHaveLength(1) // same ids: no second toast
+    const ui = await $.ui.mount({ plugin: 'tokenscope-live', surface: 'terminal', component: 'Pane', requestId: 'tokenscope-live', props: { ...PANE_PROPS, bodyColumns: 120 } })
+    expect(await ui.find({ type: 'Text', text: /^▲ ALERTS · 2 active · 3 total ━+$/ })).toBeDefined()
+    const names = await ui.findAll({ type: 'Text', text: /^(cost jump|retry loop|read loop)$/ })
+    expect(names.map((n: any) => n.text)).toEqual(['cost jump', 'retry loop'])   // worst first; the inactive one not shown
+    expect(await ui.find({ type: 'Text', text: /^ {2}step 5 · $/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: 'step cost $1.80, 56.1× the session median $0.03' })).toBeDefined()
+  })
+
+  test('no active alert, no banner', async ($: any, on: any) => {
+    const clock = base(on)
+    const payload = { ...COMPACT, alerts: [{ id: 'a3', kind: 'looping', rule: 'repeat_read', severity: 'warning', message: 'same .py file read 4×', step: 1, active: false }] }
+    on('http.fetch', () => ({ value: { status: 200, ok: true, headers: {}, text: JSON.stringify(payload) } }))
+    await $.session.start(SESSION)
+    await clock.advance(1000)
+    const ui = await $.ui.mount({ plugin: 'tokenscope-live', surface: 'terminal', component: 'Pane', requestId: 'tokenscope-live', props: { ...PANE_PROPS, bodyColumns: 120 } })
+    expect(await ui.find({ type: 'Text', text: /ALERTS/ })).toBeUndefined()
+  })
+
   test('subagents hang under the phase that launched them', async ($: any, on: any) => {
     const clock = base(on)
     const payload = {

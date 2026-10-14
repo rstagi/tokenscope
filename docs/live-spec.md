@@ -104,6 +104,16 @@ A compaction is a timeline / tree event, not a warning. `tools/eval_warnings.py 
 replays a transcripts tree offline through the same code and prints how often each rule fires.
 Keep each rule a small pure function with unit tests.
 
+Alerts (tokenscope/alerts.py; README "Alerts") sit next to the warnings: cost (`session_usd`, `intent_usd`, `jump`),
+off-task (opt-in, `unrelated`) and looping (`repeat_*`, `retry`, `edit_revert`). At ingest each call gets private
+facts (`_facts[k]`: kind, hashed identity, hashed result, failure, polling, edit / write hashes; never emitted).
+`LiveState.alerts(s)` builds an `alerts.Context` (main-thread steps with cost, todo / declared intent and request;
+every thread's calls; subagents are segmented only when they have an alert) and runs the registered detectors,
+cached on (seq, open step). Payload: `alerts: [{"id","kind","rule","severity","message","step","first","agent",
+"details","active"}]` in compact / flow, `alerts: {"n","active","worst","by_kind","top"}` on board rows,
+`{"n","active","worst","by_kind"}` on follow tiles, and `GET /api/session/<id>/alerts`. Messages never name files,
+commands or prompts (ordinal labels such as "file #2"). `tools/alerts_eval.py` replays trees offline.
+
 Status (per session): `working` if the last event is a user prompt / tool_result / assistant tool_use, or a hook
 says PreToolUse/UserPromptSubmit after the last Stop, and the last event is < 90 s old; `waiting` (for the user)
 if a Notification hook (permission prompt / idle prompt) is newer than the last tool/prompt event, or the last

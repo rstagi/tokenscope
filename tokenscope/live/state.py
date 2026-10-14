@@ -19,6 +19,8 @@ Status heuristic (hooks make it exact):
            the last Stop) and it is < 90 s old; a PreToolUse hook without its PostToolUse keeps a long tool working
   idle     otherwise
 """
+import bisect
+import copy
 import os
 import re
 import sys
@@ -27,7 +29,7 @@ from collections import Counter
 from datetime import datetime
 from urllib.parse import urlparse
 
-from .. import intents, pricing, steps as stepsmod
+from .. import alerts as alertsmod, intents, pricing, steps as stepsmod
 from ..xindex import named_files, prompt_words
 from ..analyze import est_tokens
 from ..parse import prompt_source, real_prompt_text
@@ -376,6 +378,16 @@ def _result_chars(b):
     return len(c) if isinstance(c, str) else 0
 
 
+def _media_key(b):
+    """Hash of the images / documents in a tool result (their text is empty: two screenshots must not look alike)."""
+    c = b.get("content")
+    if not isinstance(c, list):
+        return ""
+    data = [str((x.get("source") or {}).get("data") or "") for x in c
+            if isinstance(x, dict) and x.get("type") in ("image", "document") and isinstance(x.get("source"), dict)]
+    return alertsmod.h(*data) if data else ""
+
+
 def _result_text(b, n=200):
     c = b.get("content")
     if isinstance(c, list):
@@ -447,6 +459,8 @@ class Session:
         self.skills = Counter()   # skill name -> invocations (Skill tool in any thread + slash-command skills)
         self.skill_scan = SkillScanner()   # main thread: slash-command skills
         self.slash_skills = []    # {"at": main-thread turn count, "name", "user": typed} per slash-command skill
+        self.alerts_cache = None  # (steps key, [alerts.Alert]) (see LiveState.alerts)
+        self.alert_names = {}     # (kind, private file / call key) -> ordinal: "file #2" in alert messages
 
     def next_seq(self):
         self.seq += 1
@@ -454,8 +468,10 @@ class Session:
 
 
 class LiveState:
-    def __init__(self, redact=True, on_goal=None, on_prompt=None, clock=time.time, model_labels=False):
+    def __init__(self, redact=True, on_goal=None, on_prompt=None, clock=time.time, model_labels=False,
+                 alerts_config=None):
         self.redact = redact
+        self.alerts_config = alerts_config or copy.deepcopy(alertsmod.DEFAULTS)   # alerts.load_config()
         self.model_labels = model_labels   # True: closed steps wait for a model label (see label_requests)
         self.on_prompt = on_prompt   # callback(session_id, prompt n, text) for later prompts (Haiku naming)
         self.clock = clock
@@ -732,6 +748,9 @@ class LiveState:
             facts[k]["names"] = named_files(_result_text(b, NAMES_CHARS))   # xindex: which files a search led to
         if err:
             br.err_events.append(("err", error_signature(text)))
+        fact = facts[k] if k is not None and k < len(facts) else None
+        if fact is not None:   # alerts: same call + same result = a repeat; a failure = a retry
+            fact["res"], fact["fail"] = alertsmod.h(_result_chars(b), text, _media_key(b)), err
         rec = s.recs.pop(tool["id"], None) or {}
         if rec.get("cmd") and test_runner(rec["cmd"]):
             tr = r.get("toolUseResult") if isinstance(r, dict) and isinstance(r.get("toolUseResult"), dict) else {}
@@ -750,6 +769,8 @@ class LiveState:
                     "sig": None if s.tests[-1]["ok"] else error_signature(out or text)})
                 t = s.tests[-1]
                 tool["test"] = {"ok": t["ok"], "passed": t["passed"], "failed": t["failed"]}
+            if fact is not None and s.tests and (got or err):
+                fact["fail"] = not s.tests[-1]["ok"]
         if tool["name"] == "Workflow" and br is s.main and isinstance(r, dict) \
                 and isinstance(r.get("toolUseResult"), dict) and r["toolUseResult"].get("runId"):
             s.wf_runs[str(r["toolUseResult"]["runId"])] = tool["id"]
@@ -880,12 +901,14 @@ class LiveState:
                 s.tool_agent[tid] = agent_id
             f = rec.get("file")
             it = intents.tool_intent(rec)
+            af = alertsmod.call_facts(name, inp, rec, it)   # hashes: looping / off-task alerts
             step.setdefault("_facts", []).append({   # private, for the idle recap (see recap.py)
                 "tool": name, "file": f or None, "full": bool(f) and it != "edit" and _full_read(name, inp, rec),
                 "edit": it == "edit" and name in EDIT_TOOLS and bool(f), "search": it == "locate",
                 # waiting, or reading a background task's output file (<id>.output): polling
                 "poll": it == "wait" or (name == "Bash" and stepsmod.program(rec.get("cmd") or "") == "sleep")
-                or (bool(f) and it != "edit" and str(f).endswith(".output"))})
+                or (bool(f) and it != "edit" and str(f).endswith(".output")),
+                "apoll": af.pop("poll", False), **af})
             if intents.tool_intent(rec) == "edit":
                 branch.err_events.append(("edit", None))
                 if name in EDIT_TOOLS and f:
@@ -1076,7 +1099,13 @@ class LiveState:
                 "intent_mix": sorted([[g, round(c, 1)] for g, c in mix.items()], key=lambda x: -x[1]),
                 "ended": self.ended(s, now),
                 "asked": self._asked(s), "now": self._now(s, now),
-                "cw_series": self.cw_series(turns), **self._board_intent(s, now)}
+                "cw_series": self.cw_series(turns), **self._board_intent(s, now), **self._board_alerts(s, now)}
+
+    def _board_alerts(self, s, now):
+        """A board card's alerts: counts ("alerts": alerts.counts) and the active ones' messages (at most 3)."""
+        al = self.alerts_public(s, now)
+        return {"alerts": dict(alertsmod.counts(al), top=[{k: a[k] for k in ("kind", "rule", "severity", "message")}
+                                                          for a in al if a["active"]][:3])}
 
     @staticmethod
     def cw_series(turns, n=BOARD_SPARK_N):
@@ -1138,7 +1167,7 @@ class LiveState:
                 "cw": round(s.totals["cw"], 1), "usd": round(s.totals["usd"], 6), "turns": s.totals["turns"],
                 "started": s.started, "last_ts": s.last_ts, "seq": s.seq, "steps_n": len(steps),
                 "agents_running": sum(ctx["active"].values()) + len(ctx["pending"]) if ctx else 0,
-                "now": w, "steps": out, "folds": folds}
+                "now": w, "steps": out, "folds": folds, "alerts": alertsmod.counts(self.alerts_public(s, now))}
 
     def _follow_early(self, s, early, ctx):
         """The steps before a tile's latest ones that launched a subagent still active (a background agent the main
@@ -1384,6 +1413,7 @@ class LiveState:
                 "main_tool_calls": sum(len(t["tools"]) for t in s.main.turn_steps),
                 "intents": self.intents(s, now, all_ops=all_ops),
                 "skills": [{"name": n, "count": c} for n, c in sorted(s.skills.items(), key=lambda kv: (-kv[1], kv[0]))],
+                "alerts": self.alerts_public(s, now),
                 **self._edited(s), **self._recap_key(s, now)}
 
     def session_flow(self, s, now=None):
@@ -1428,6 +1458,92 @@ class LiveState:
         steps, _ = self.steps(s, now) if aid is None else self.agent_steps(s, aid, now)
         st = next((x for x in steps if x["turn_first"] <= k <= x["turn_last"]), None)
         return {"agent": aid, "step": st["i"] if st else None}
+
+    # ------------------------------------------------------------ alerts (tokenscope/alerts.py)
+    @staticmethod
+    def _thread_calls(branch, steps=None):
+        """[alerts.Call] of one thread in order, each mapped to the step (of `steps`) it belongs to (step None
+        without `steps`; .turn keeps (turn index, part) so the step can be found later, see _call_steps)."""
+        at = {}
+        for x in steps or ():
+            for k in range(x["turn_first"], x["turn_last"] + 1):
+                at.setdefault(k, []).append((x["i"], x.get("part_first") if k == x["turn_first"] else None,
+                                             x.get("part_last") if k == x["turn_last"] else None))
+        out = []
+        for k, t in enumerate(branch.turn_steps):
+            facts = t.get("_facts") or []
+            parts = stepsmod.call_parts([x["name"] for x in t["tools"]])
+            for f, j in zip(facts, parts):
+                if f.get("kind", "skip") == "skip":
+                    continue
+                i = next((i for i, lo, hi in at.get(k, ()) if j is None or ((lo is None or j >= lo)
+                                                                             and (hi is None or j <= hi))), None)
+                out.append(alertsmod.Call(
+                    n=len(out), step=i, tool=f["tool"], kind=f["kind"], key=f["key"], file=f.get("file"),
+                    res=f.get("res"), err=f.get("fail"), poll=bool(f.get("poll") or f.get("apoll")), edits=f.get("edits") or (),
+                    write=f.get("write"), words=f.get("words") or (), found=tuple(f.get("names") or ())))
+        return out
+
+    def _agent_alert_steps(self, s, got, now):
+        """Subagent alerts point at call positions (their threads are not segmented for detection): segment only
+        the subagents that have an alert and set first / step from the alert's call span."""
+        for aid in {a.agent for a in got if a.agent is not None and a.span}:
+            if aid not in s.branches:
+                continue
+            ast, _ = self.agent_steps(s, aid, now)
+            calls = self._thread_calls(s.branches[aid], ast)
+            for a in got:
+                if a.agent == aid and a.span:
+                    a.first = calls[a.span[0]].step if a.span[0] < len(calls) else None
+                    a.step = calls[a.span[1]].step if a.span[1] < len(calls) else None
+
+    def alert_context(self, s, now=None):
+        """The alerts.Context of a session: main-thread steps (cost, todo / declared intent, request) and calls, the
+        intent groups, and with looping.subagents each subagent's steps and calls."""
+        now = self.clock() if now is None else now
+        cfg = self.alerts_config
+        steps, gs = self.steps(s, now) if s.main.turn_steps else ([], [])
+        facts = []
+        for x in steps:
+            facts.append(alertsmod.StepFacts(
+                i=x["i"], usd=x["usd"] or 0.0, cw=x["cw"] or 0.0, closed=x["closed"], cat=x["cat"] or "other",
+                group=next((n for n, g in enumerate(gs) if g["first"] <= x["i"] <= g["last"]), None),
+                delegated=bool(x.get("agents") or x.get("wf_agents")), todo=x.get("todo"), declared=x.get("declared"),
+                prompt=bisect.bisect_right(s.prompt_at, x["turn_first"])))
+        ctx = alertsmod.Context(config=cfg, steps=facts, calls=self._thread_calls(s.main, steps),
+                                groups=[{k: g[k] for k in ("first", "last", "usd", "cw", "cat")} for g in gs],
+                                session_usd=s.totals["usd"], session_cw=s.totals["cw"],
+                                prompt_words=list(s.prompt_words), names=s.alert_names)
+        if cfg["looping"]["enabled"] and cfg["looping"]["subagents"]:
+            for aid in s.agents:
+                if s.branches[aid].turn_steps:
+                    ctx.agents[aid] = (None, self._thread_calls(s.branches[aid]))
+        return ctx
+
+    def alerts(self, s, now=None):
+        """[alerts.Alert] of a session, cached until its steps change."""
+        now = self.clock() if now is None else now
+        if s.main.turn_steps:
+            self.steps(s, now)
+        key = (s.seq, s.intents_cache[0][1] if s.intents_cache else None)   # new records, the open step closing
+        if s.alerts_cache and s.alerts_cache[0] == key:
+            return s.alerts_cache[1]
+        got = alertsmod.run(self.alert_context(s, now)) if self.alerts_config.get("enabled", True) else []
+        if s.agents:
+            self._agent_alert_steps(s, got, now)
+        s.alerts_cache = (key, got)
+        return got
+
+    def alerts_public(self, s, now=None):
+        """The "alerts" payload key: alert dicts (alerts.Alert.to_dict + "active"), newest first."""
+        now = self.clock() if now is None else now
+        got = self.alerts(s, now)
+        if not got:
+            return []
+        steps, _ = self.steps(s, now) if s.main.turn_steps else ([], [])
+        live = {a["id"] for a in s.agents.values() if self.agent_active(s, a, now)}
+        return alertsmod.public(got, steps[-1]["i"] if steps else None, live,
+                                self.alerts_config.get("active_steps", 3))
 
     # ------------------------------------------------------------ idle recap (recap.py)
     def _recap_key(self, s, now):

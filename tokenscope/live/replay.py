@@ -19,10 +19,10 @@ def find_transcript(arg, root):
     return hits[0]
 
 
-def replay(path, redact=False, model_labels=False):
+def replay(path, redact=False, model_labels=False, alerts_config=None):
     """(LiveState, Session) after ingesting the transcript at `path` and its subagent transcripts."""
     files, root = transcript_files(path)
-    state = LiveState(redact=redact, model_labels=model_labels)
+    state = LiveState(redact=redact, model_labels=model_labels, alerts_config=alerts_config)
     tailer = Tailer(root)
     s = None
     for tf in files:
@@ -78,7 +78,7 @@ class LiveReplay:
     Step labels: only cached model labels (stepnames cache) -- a replay never calls the model."""
 
     def __init__(self, path, redact=True, duration=90.0, max_gap=3.0, clock=time.time, xhints=None,
-                 labeller=None):
+                 labeller=None, alerts_config=None):
         self.wall = clock
         files, self.root = transcript_files(path)
         tailer = Tailer(self.root)
@@ -97,7 +97,8 @@ class LiveReplay:
         self.items = items
         self.times = [x[0] for x in items]
         self.offsets, self.speed = schedule(self.times, duration, max_gap)
-        self.state = LiveState(redact=redact, clock=self.now, model_labels=labeller is not None)
+        self.state = LiveState(redact=redact, clock=self.now, model_labels=labeller is not None,
+                               alerts_config=alerts_config)
         self.state.xhints = xhints
         self.labeller = labeller
         self.k = 0               # records fed so far

@@ -32,6 +32,8 @@ let dirty = false
 let timers = []
 // Warning rules already seen (null until the first payload, which only seeds it)
 let seenRules = null
+// Alert ids already seen (same: the first payload only seeds it, so opening the pane does not replay old alerts)
+let seenAlerts = null
 
 // The intent list's view state, kept across redraws: 'intents' or 'phases'; group.first -> expanded, as the
 // person set it with /tokenscope expand|collapse or a press; and 'expanded' / 'collapsed' after "all"
@@ -154,9 +156,26 @@ function normalize(d) {
     subagents: Array.isArray(d.agents) ? d.agents : Array.isArray(d.subagents) ? d.subagents : [],
     intents: normalizeIntents(d.intents),
     recap: normalizeRecap(d.recap),
+    alerts: normalizeAlerts(d.alerts),
     skills: (Array.isArray(d.skills) ? d.skills : []).filter((x) => x && typeof x === 'object' && x.name)
       .map((x) => ({ name: String(x.name), count: Number(x.count) || 1 })),
   }
+}
+
+// payload.alerts (tokenscope/alerts.py: [{id, kind, rule, severity, message, step, first, agent, active}]) -> the
+// fields the banner draws; anything malformed is dropped
+const ALERT_SEVERITIES = ['info', 'warning', 'critical']
+function normalizeAlerts(v) {
+  return (Array.isArray(v) ? v : []).filter((a) => a && typeof a === 'object' && a.message).map((a) => ({
+    id: String(a.id || a.kind + ':' + a.rule + ':' + a.step),
+    kind: String(a.kind || ''),
+    rule: String(a.rule || ''),
+    severity: ALERT_SEVERITIES.includes(a.severity) ? a.severity : 'warning',
+    message: String(a.message),
+    step: numOrNull(a.step),
+    agent: a.agent ? String(a.agent) : null,
+    active: a.active !== false,
+  }))
 }
 
 // payload.recap (sent only while the session waits for you / is idle) -> { cw, usd, costliest, slowest, hints },
@@ -988,6 +1007,42 @@ function recapRows(Box, Text, width, r) {
   return rows
 }
 
+// The alert banner, right under the header (above the recap): a bar "▲ ALERTS · 2 active" in the worst severity's
+// colour, then one line per active alert, worst first ("▲ cost jump  step 9 · step cost $1.80, 56.1× the session
+// median $0.03"), at most MAX_ALERTS of them and "+N more"; nothing when no alert is active.
+const MAX_ALERTS = 3
+const ALERT_COLORS = { critical: 'redBright', warning: 'yellowBright', info: 'cyan' }
+const ALERT_NAMES = {
+  session_usd: 'session $', intent_usd: 'intent $', jump: 'cost jump', unrelated: 'off-task',
+  repeat_read: 'read loop', repeat_search: 'search loop', repeat_command: 'command loop', repeat_call: 'call loop',
+  retry: 'retry loop', edit_revert: 'edit revert',
+}
+export const alertName = (a) => ALERT_NAMES[a.rule] || (a.rule || a.kind || 'alert').replace(/_/g, ' ')
+
+export function activeAlerts(alerts) {
+  const rank = (a) => ALERT_SEVERITIES.indexOf(a.severity)
+  return alerts.filter((a) => a.active).slice().sort((a, b) => rank(b) - rank(a))
+}
+
+function alertRows(Box, Text, width, r) {
+  const act = activeAlerts(r.alerts)
+  if (!act.length) return []
+  const color = ALERT_COLORS[act[0].severity]
+  const head = '▲ ALERTS · ' + act.length + ' active' + (r.alerts.length > act.length ? ' · ' + r.alerts.length + ' total' : '') + ' '
+  const rows = [line(Box, Text, 'alerts', [{ text: head + '━'.repeat(Math.max(0, width - head.length)), color, bold: true }], width)]
+  act.slice(0, MAX_ALERTS).forEach((a, i) => {
+    const where = a.step != null ? (a.agent ? 'subagent step ' : 'step ') + a.step + ' · ' : ''
+    rows.push(line(Box, Text, 'alert-' + i, [
+      { text: ' ▲ ', color: ALERT_COLORS[a.severity], bold: true },
+      { text: alertName(a), color: ALERT_COLORS[a.severity], bold: true },
+      { text: '  ' + where, dimColor: true },
+      { text: a.message },
+    ], width))
+  })
+  if (act.length > MAX_ALERTS) rows.push(line(Box, Text, 'alert-more', [{ text: '   +' + (act.length - MAX_ALERTS) + ' more', dimColor: true }], width))
+  return rows
+}
+
 // "SKILLS ✦ pr-review ×2 · tdd": skills used in the session (Skill tool and slash-command skills)
 function skillsSegs(skills) {
   return [{ text: '✦ ', color: SKILL_COLOR }, { text: skills.map((x) => x.name + (x.count > 1 ? ' ×' + x.count : '')).join(' · ') }]
@@ -997,7 +1052,9 @@ function drawRemote(Box, Text, width, Button, $) {
   const pending = pendingTurns(remote)
   const r = pending.length ? { ...remote, turns: [...remote.turns, ...pending] } : remote
   const top = [header(Box, Text, width, 'tokenscope', r.status, r.elapsed_s != null ? fmtDur(r.elapsed_s) : '')]
-  // the recap goes right under the header, where it is seen without scrolling; the intent list yields rows first
+  // alerts, then the recap, right under the header, where they are seen without scrolling; the intent list yields
+  // rows first
+  top.push(...alertRows(Box, Text, width, r))
   const recap = recapRows(Box, Text, width, r)
   top.push(...recap)
   top.push(row(Box, Text, 'asked', 'ASKED', [
@@ -1059,6 +1116,8 @@ function bandText() {
   const now = r.status === 'waiting' ? '◼ waiting for you' : nowSegs(r)[0].text
   const parts = ['◆ ' + (r.goal || 'session'), now, fmtTokens(r.cw) + ' CW']
   if (typeof r.cost_usd === 'number') parts.push('$' + r.cost_usd.toFixed(2))
+  const act = activeAlerts(r.alerts)
+  if (act.length) parts.push('▲ ' + alertName(act[0]) + (act.length > 1 ? ' +' + (act.length - 1) : ''))
   return parts.join(' · ') + (r.warnings.length ? ' · ⚠' : '')
 }
 
@@ -1069,6 +1128,13 @@ function toastNewWarnings($, warnings) {
   if (!seenRules) seenRules = new Set()
   for (const w of warnings) seenRules.add(w.rule)
   if (fresh.length) $.ui.toast(fresh.map((w) => '⚠ ' + w.text).join('  '))
+}
+
+function toastNewAlerts($, alerts) {
+  const fresh = seenAlerts ? activeAlerts(alerts).filter((a) => !seenAlerts.has(a.id)) : []
+  if (!seenAlerts) seenAlerts = new Set()
+  for (const a of alerts) seenAlerts.add(a.id)
+  if (fresh.length) $.ui.toast(fresh.slice(0, 2).map((a) => '▲ ' + alertName(a) + ': ' + a.message).join('  '))
 }
 
 async function poll($) {
@@ -1099,6 +1165,7 @@ async function poll($) {
     remote = next ? normalize(next) : null
     remoteText = text
     if (remote) toastNewWarnings($, remote.warnings)
+    if (remote) toastNewAlerts($, remote.alerts)
     dirty = true
   }
   local.nowMs = await $.clock.now()   // also ages the in-process live calls (fresh())
@@ -1198,6 +1265,7 @@ export function register(onEvent) {
     remote = null
     remoteText = ''
     seenRules = null
+    seenAlerts = null
     local.calls = 0
     local.live = null
     local.sub = null

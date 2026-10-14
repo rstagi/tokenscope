@@ -604,6 +604,11 @@ def cmd_live(args):
             intent_mcp.write_claude_md(args.write_claude_md)
             print("appended the snippet to %s" % args.write_claude_md)
         return 0
+    if args.action == "alerts-config":
+        from . import alerts
+        print("# tokenscope alerts config: ~/.config/tokenscope/alerts.toml (or --alerts-config FILE); "
+              "every key with its default\n" + "\n".join(alerts.keys_doc()))
+        return 0
     if args.action == "hooks":
         from .live.hook import settings_snippet
         print(json.dumps(settings_snippet(), indent=2))
@@ -637,6 +642,30 @@ def intents_view(path, haiku=False, label_batch=None):
     gs = lab.finalize(steps)   # whatever the model did not label keeps its rule label
     return steps, gs, dict(lab.stats, declared_calls=sum(
         1 for t in s.main.turn_steps for x in t.get("_raw") or () if x["name"].endswith("declare_intent")))
+
+
+def cmd_alerts(args):
+    """Replay one session through the live model and print its alerts (privacy-safe messages)."""
+    from . import alerts
+    from .parse import resolve_root
+    from .live.replay import find_transcript, replay
+    try:
+        cfg = alerts.from_args(args)
+        path = find_transcript(args.session, resolve_root(getattr(args, "root", None)))
+    except (LookupError, OSError, ValueError) as e:
+        print(str(e), file=sys.stderr)
+        return 1
+    state, s = replay(path, redact=True, alerts_config=cfg)
+    got = state.alerts_public(s) if s is not None else []
+    if args.json:
+        print(json.dumps({"session": s.id if s else None, "alerts": got}, indent=2))
+        return 0
+    print("%s: %d alert%s" % (s.id[:8] if s else "?", len(got), "" if len(got) == 1 else "s"))
+    for a in got:
+        where = "" if a["step"] is None else " step %s%s" % (
+            "%s-%s" % (a["first"], a["step"]) if a["first"] != a["step"] else a["step"], " (subagent)" if a["agent"] else "")
+        print("  [%s] %s/%s%s: %s" % (a["severity"], a["kind"], a["rule"], where, a["message"]))
+    return 0
 
 
 def cmd_intents(args):
@@ -851,15 +880,25 @@ def main(argv=None):
 
     lp = sub.add_parser("live", help="watch sessions as they happen (local web board); "
                                      "`tokenscope live hooks` prints the optional hooks settings snippet")
-    lp.add_argument("action", nargs="?", choices=["serve", "hooks", "intents-mcp", "intents-install"],
+    lp.add_argument("action", nargs="?", choices=["serve", "hooks", "intents-mcp", "intents-install", "alerts-config"],
                     default="serve",
                     help="serve (default); hooks: print a settings.json snippet for precise status; intents-mcp: "
-                         "run the declare_intent MCP server (stdio); intents-install: print how to register it")
+                         "run the declare_intent MCP server (stdio); intents-install: print how to register it; "
+                         "alerts-config: list every alerts config key with its default")
     lp.add_argument("--write-claude-md", metavar="PATH",
                     help="with intents-install: append the declare_intent snippet to this CLAUDE.md")
     from .live.server import add_arguments as live_arguments
     live_arguments(lp)
     lp.set_defaults(func=cmd_live)
+
+    ap = sub.add_parser("alerts", help="cost / off-task / looping alerts of one session (replays its transcript)")
+    ap.add_argument("session", help="transcript path (.jsonl) or session id / unique prefix")
+    ap.add_argument("--root", default=argparse.SUPPRESS,
+                    help="transcripts root (default ~/.claude/projects or $TOKENSCOPE_ROOT)")
+    ap.add_argument("--json", action="store_true")
+    from .alerts import add_arguments as alert_arguments
+    alert_arguments(ap)
+    ap.set_defaults(func=cmd_alerts)
 
     ip = sub.add_parser("intents", help="steps and intent groups of one session (replays its transcript)")
     ip.add_argument("session", help="transcript path (.jsonl) or session id / unique prefix")

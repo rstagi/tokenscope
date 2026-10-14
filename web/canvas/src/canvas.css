@@ -33,6 +33,21 @@ html,body{height:100%;margin:0}
 .apill{margin-left:auto;font-size:10.5px;font-weight:700;padding:0 7px;border-radius:8px;background:#eef1f6;color:#6b7280}
 .apill.run{background:#e9f7ec;color:#2b8a3e}.apill.err{background:#fff0e6;color:#d9480f}
 .adesc{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:#1c2230}
+/* alerts: a marker on the node holding an alert's step, the node outlined by the worst severity */
+.amark{flex:none;font-size:11px;font-weight:800;padding:0 6px;border-radius:8px;cursor:help;margin-left:auto}
+.ihd .amark{margin-left:auto}
+.amark.critical{background:#ffe3e3;color:#c92a2a}.amark.warning{background:#fff4d6;color:#8a5a00}.amark.info{background:#e7f5ff;color:#1864ab}
+.inode.alerted.critical{border-color:#ff8787;border-left-width:5px}.inode.alerted.warning{border-color:#ffd43b}
+.irow .amark{margin-left:4px;font-size:9.5px;padding:0 4px}
+.chip.alert{font-weight:600;margin-right:4px}.chip.alert.critical{background:#ffe3e3;color:#c92a2a}
+.chip.alert.warning{background:#fff4d6;color:#8a5a00}.chip.alert.info{background:#e7f5ff;color:#1864ab}
+.chip.alert:not(.on){opacity:.65}
+.palerts{margin:6px 0 8px}.palert{border-left:4px solid #ffd43b;background:#fffbea;padding:5px 9px;margin:4px 0;font-size:12.5px;border-radius:0 6px 6px 0}
+.palert.critical{border-left-color:#fa5252;background:#fff5f5}.palert.info{border-left-color:#4dabf7;background:#f1f8ff}
+.hv.hvw{white-space:normal}
+.atip{position:fixed;z-index:20;max-width:360px;white-space:pre-wrap;background:#1c2230;color:#fff;font-size:12px;line-height:1.4;
+  padding:7px 10px;border-radius:7px;border-left:4px solid #ffd43b;box-shadow:0 6px 20px rgba(28,34,48,.3);pointer-events:none}
+.atip.critical{border-left-color:#fa5252}.atip.info{border-left-color:#4dabf7}
 .react-flow__handle{opacity:0;pointer-events:none;width:6px;height:6px;min-width:0;min-height:0}
 
 /* overlays */
