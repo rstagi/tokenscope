@@ -190,6 +190,14 @@ class TestCost(unittest.TestCase):
         self.assertIn("(incl. subagents)", got[0].message)
         self.assertEqual(run(Context(config=cfg(**{"cost.jump_subagents": False}), steps=steps), "cost"), [])
         self.assertEqual(run(Context(config=cfg(**{"cost.jump": False}), steps=steps), "cost"), [])
+        # a long step of ordinary calls: a jump per step, none per call
+        long = steps_of([0.1] * 7 + [1.6])
+        long[7].turns = 16
+        self.assertTrue(run(Context(config=cfg(), steps=long), "cost")[0].message.endswith("over 16 calls"))
+        self.assertEqual(run(Context(config=cfg(**{"cost.jump_per_turn": True}), steps=long), "cost"), [])
+        one = steps_of([0.1] * 7 + [1.6])
+        got = run(Context(config=cfg(**{"cost.jump_per_turn": True}), steps=one), "cost")
+        self.assertEqual(got[0].message, "step cost per call $1.60, 16.0\u00d7 the session median $0.10")
         # unpriced model: cost-weighted tokens instead, with their own floor
         un = [StepFacts(i=i, usd=0.0, cw=c) for i, c in enumerate([20e3] * 7 + [400e3])]
         got = run(Context(config=cfg(), steps=un), "cost")

@@ -1506,7 +1506,8 @@ class LiveState:
         facts = []
         for x in steps:
             facts.append(alertsmod.StepFacts(
-                i=x["i"], usd=x["usd"] or 0.0, cw=x["cw"] or 0.0, closed=x["closed"], cat=x["cat"] or "other",
+                i=x["i"], usd=x["usd"] or 0.0, cw=x["cw"] or 0.0, closed=x["closed"], turns=x["turns"] or 1,
+                cat=x["cat"] or "other",
                 group=next((n for n, g in enumerate(gs) if g["first"] <= x["i"] <= g["last"]), None),
                 delegated=bool(x.get("agents") or x.get("wf_agents")), todo=x.get("todo"), declared=x.get("declared"),
                 prompt=bisect.bisect_right(s.prompt_at, x["turn_first"])))

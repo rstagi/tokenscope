@@ -60,6 +60,7 @@ DEFAULTS = {
         "jump_floor_usd": 0.75,
         "jump_floor_cw": 250_000,
         "jump_subagents": True,
+        "jump_per_turn": False,
     },
     "off_task": {
         "enabled": False,
@@ -102,6 +103,8 @@ KEYS = {
     "cost.jump_floor_usd": "and costs at least this much $ (metric usd)",
     "cost.jump_floor_cw": "and at least this many cost-weighted tokens (metric cw)",
     "cost.jump_subagents": "count the cost of the subagents a step launched as the step's cost",
+    "cost.jump_per_turn": "compare cost per API call (turn) instead of per step: only expensive calls fire, not "
+                          "long steps of ordinary calls",
     "off_task.enabled": "off-task alerts on/off (off by default; also --off-task)",
     "off_task.window": "recent steps with files looked at",
     "off_task.min_unrelated": "of which at least this many touch only files unrelated to the active intent",
@@ -295,6 +298,7 @@ class StepFacts:
     usd: float = 0.0
     cw: float = 0.0
     closed: bool = True
+    turns: int = 1                # API calls (turns) in the step
     cat: str = "other"
     group: Optional[int] = None   # intent group index (canvas node), None: the step is its own node
     delegated: bool = False       # launched subagents (their cost is in usd / cw)
@@ -508,19 +512,26 @@ class CostDetector:
         if metric == "usd" and not any(x.usd > 0 for x in ctx.steps):
             metric = "cw"   # unpriced model: tokens instead
         val = (lambda x: x.usd) if metric == "usd" else (lambda x: x.cw)
+        if c["jump_per_turn"]:
+            per = val
+            val = lambda x: per(x) / max(1, x.turns)  # noqa: E731
         floor = c["jump_floor_usd"] if metric == "usd" else c["jump_floor_cw"]
         steps = [x for x in ctx.steps if c["jump_subagents"] or not x.delegated]
         out = []
         for k, v, m, r, z in cost_jumps([val(x) for x in steps], c["jump_window"], c["jump_warmup"],
                                         c["jump_ratio"], c["jump_z"], floor, c["jump_max_ratio"]):
             x = steps[k]
-            sev = "critical" if r >= 2 * c["jump_ratio"] else "warning"
+            sev = "critical" if r >= 4 * c["jump_ratio"] else "warning"
             fmt = money if metric == "usd" else (lambda v: tok(v) + " CW")
-            out.append(Alert("cost", "jump", sev, "step cost %s, %.1f× the session median %s%s" % (
-                fmt(v), r, fmt(m), " (incl. subagents)" if x.delegated else ""), step=x.i, first=x.i,
+            what = "cost per call" if c["jump_per_turn"] else "cost"
+            tail = " (incl. subagents)" if x.delegated else \
+                " over %d calls" % x.turns if x.turns >= 3 and not c["jump_per_turn"] else ""
+            out.append(Alert("cost", "jump", sev, "step %s %s, %.1f× the session median %s%s" % (
+                what, fmt(v), r, fmt(m), tail), step=x.i, first=x.i,
                 details={"metric": metric, "value": round(v, 4), "median": round(m, 4),
                          "ratio": round(r, 2), "z": round(z, 1), "baseline_n": min(c["jump_window"], k),
-                         "open": not x.closed, "delegated": x.delegated}, key="jump:%d" % x.i))
+                         "open": not x.closed, "delegated": x.delegated, "turns": x.turns,
+                         "per_turn": c["jump_per_turn"]}, key="jump:%d" % x.i))
         return out
 
 

@@ -94,7 +94,9 @@ step (or step range) it is about:
   `cost.jump_warmup` of them: the step must cost at least `cost.jump_ratio` x their median, have a robust z-score of
   at least `cost.jump_z` on log costs (median / MAD of ln cost; step costs are heavy-tailed), be at least
   `cost.jump_max_ratio` x the largest of them (a new high, not a spike size the session already had) and cost at
-  least `cost.jump_floor_usd` (tiny steps never fire). It fires while the step is still open, so you see it live.
+  least `cost.jump_floor_usd` (tiny steps never fire). On real traces most jumps are long steps of ordinary
+  calls (the message says `over N calls`); `cost.jump_per_turn` compares cost per call instead, so only expensive
+  calls fire. It fires while the step is still open, so you see it live.
   Unpriced models fall back to cost-weighted tokens (`cost.jump_floor_cw`).
 - **off-task** (opt-in: `--off-task` or `off_task.enabled = true`): recent steps touch only files whose path words
   share nothing with the active intent (the declared intent, else the in-progress todo item; with
@@ -107,6 +109,9 @@ step (or step range) it is about:
   background task's output is ignored), `retry` (the same call failing again and again with no edit in between)
   and `edit_revert` (edits undone: A->B then B->A, or a file written back to an earlier content). Counted per thread
   (main and each subagent) within `looping.window` calls.
+
+Severity: `warning`, or `critical` for a session / intent at >= 2x its threshold, a jump at >= 4x `cost.jump_ratio`,
+a repeat or retry at >= 2x its count, and edits undone >= 2x `looping.edit_revert_n` + 1 times.
 
 Messages are privacy-safe in every mode: no paths, file names, commands, patterns, prompt text, user names, e-mails
 or keys; files and commands are named by kind and a per-session ordinal (`same .py file read 6× (file #2)`,
@@ -159,6 +164,7 @@ default (valid TOML). Unknown keys and wrong types are errors.
 | `cost.jump_floor_usd` | `0.75` | and costs at least this much $ (metric usd) |
 | `cost.jump_floor_cw` | `250000` | and at least this many cost-weighted tokens (metric cw) |
 | `cost.jump_subagents` | `true` | count the cost of the subagents a step launched as the step's cost |
+| `cost.jump_per_turn` | `false` | compare cost per API call (turn) instead of per step: only expensive calls fire, not long steps of ordinary calls |
 | `off_task.enabled` | `false` | off-task alerts on/off (off by default; also --off-task) |
 | `off_task.window` | `4` | recent steps with files looked at |
 | `off_task.min_unrelated` | `3` | of which at least this many touch only files unrelated to the active intent |
