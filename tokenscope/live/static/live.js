@@ -72,17 +72,20 @@
     repeat_read: "read loop", repeat_search: "search loop", repeat_command: "command loop", repeat_call: "call loop",
     retry: "retry loop", edit_revert: "edit revert"};
   function alertName(x) { return ALERT_NAMES[x.rule] || String(x.rule || x.kind || "alert").replace(/_/g, " "); }
+  // (board cards: "top" holds the active ones not acknowledged; "new" counts every one not acknowledged)
   function alertChips(node, al) {
-    if (!al || !al.n) return;
+    var n = al ? (al.new != null ? al.new : al.n) : 0;
+    if (!n) return;
     var top = Array.isArray(al.top) ? al.top : [];
     top.forEach(function (x) {
       var c = el("span", "chip alert " + (x.severity || "warning"), "▲ " + alertName(x));
       c.title = x.message || "";
       node.appendChild(c);
     });
-    if (al.n > top.length) {
-      var m = el("span", "chip", (top.length ? "+" : "") + (al.n - top.length) + " alert" + (al.n - top.length === 1 ? "" : "s"));
-      m.title = Object.keys(al.by_kind || {}).map(function (k) { return k.replace(/_/g, "-") + " ×" + al.by_kind[k]; }).join(" · ");
+    if (n > top.length) {
+      var by = al.new_by_kind || al.by_kind || {};
+      var m = el("span", "chip", (top.length ? "+" : "") + (n - top.length) + " alert" + (n - top.length === 1 ? "" : "s"));
+      m.title = Object.keys(by).map(function (k) { return k.replace(/_/g, "-") + " ×" + by[k]; }).join(" · ");
       node.appendChild(m);
     }
   }
@@ -311,6 +314,8 @@
       var fl = $(".flags", a); fl.innerHTML = "";
       (s.flags || []).forEach(function (f) { fl.appendChild(flagChip(f, s.context_tokens)); });
       alertChips(fl, s.alerts);
+      // unacknowledged alerts: a badge by kind in the header row and the card's edge in the worst severity's colour
+      if (window.TSAlerts) { TSAlerts.badge(r1, s.alerts, $(".pillw", a)); TSAlerts.mark(a, s.alerts); }
       a._s = s;
       a._st = st;
     }
@@ -383,6 +388,19 @@
         a.style.transition = "";
         a.style.transform = "";
       });
+    }
+
+    // the alerts section: a "needs attention" entry or an alert row scrolls to its card (the step link opens the
+    // session canvas on that step)
+    function focusCard(sid) {
+      var a = cards[sid];
+      if (!a) { location.href = SRC.sessionHref(sid); return; }
+      a.scrollIntoView({block: "center", behavior: "smooth"});
+      a.classList.remove("focus"); void a.offsetWidth; a.classList.add("focus");
+    }
+    if (window.TSAlerts && $("#alerts", root) && SRC.followHref) {
+      TSAlerts.panel($("#alerts", root), {page: "board", onSession: focusCard,
+        onJump: function (al, link) { if (link) return false; focusCard(al.sid); return true; }});
     }
 
     setInterval(tickElapsed, 1000);
@@ -529,7 +547,7 @@
     }
     function buildTile(id) {
       var tile = el("div", "ftile");
-      tile.innerHTML = '<div class="fth"><span class="proj"></span><span class="fagn"></span><span class="pillw"></span>' +
+      tile.innerHTML = '<div class="fth"><span class="proj"></span><span class="fagn"></span><span class="fab"></span><span class="pillw"></span>' +
         '<span class="ftot"><b class="usd"></b> <span class="mut small cw"></span></span><button class="unpin" title="stop following">×</button></div>' +
         '<a class="fgoal"></a><div class="fnow"></div><div class="fflow"><div class="fsteps"></div></div>' +
         '<button class="fjump" style="display:none">↓ latest</button>';
@@ -590,9 +608,10 @@
       return nd;
     }
     function updStep(nd, x) {
-      var key = JSON.stringify([x.cat, x.label, x.usd, x.cw, x.open, x.tested, x.dur_s]);
+      var key = JSON.stringify([x.cat, x.label, x.usd, x.cw, x.open, x.tested, x.dur_s, x._al]);
       if (nd._k === key) return;
       nd._k = key;
+      nd._i = x.i;
       nd.className = "fnode" + (x.open ? " open" : "");
       nd.style.borderLeftColor = gcol(x.cat);
       var c = $(".cat", nd);
@@ -603,6 +622,11 @@
       lb.title = x.label || "";
       $(".fc", nd).textContent = (x.usd > 0 && x.usd < 0.005 ? "<$0.01" : fmtUsd(x.usd)) + (num(x.dur_s) != null ? " · " + fmtWall(x.dur_s) : "");
       $(".fc", nd).title = fmtK(x.cw) + " CW";
+      // ▲ a step with alerts not acknowledged (main thread)
+      var mk = $(".amark", nd);
+      if (x._al && !mk) { mk = el("span", "amark"); nd.insertBefore(mk, $(".fc", nd)); }
+      if (mk && !x._al) { nd.removeChild(mk); mk = null; }
+      if (mk) { mk.className = "amark " + x._al; mk.textContent = "▲"; mk.title = "alert at this step (" + x._al + ")"; }
     }
     // a step's subagents: one branch per subagent (parallel ones as siblings), each with its latest steps and, under
     // the step that launched them, its own subagents; reconciled by id so a poll only updates what changed
@@ -704,7 +728,9 @@
       goalNode($(".fgoal", tile), s.goal_source ? {name: s.goal, source: s.goal_source} : s.goal);
       tile._usd.set(s.usd);
       $(".cw", tile).textContent = fmtK(s.cw) + " CW";
-      var flow = $(".fsteps", tile), steps = Array.isArray(s.steps) ? s.steps : [];
+      var flow = $(".fsteps", tile), steps = Array.isArray(s.steps) ? s.steps : [], marks = s.alert_steps || {};
+      steps.forEach(function (x) { x._al = marks[String(x.i)] || null; });
+      if (window.TSAlerts) { TSAlerts.badge($(".fab", tile), s.alerts); TSAlerts.mark(tile, s.alerts); }
       var added = syncSteps(flow, steps, tile._nodes, tile, s.folds);
       var ar = $(".fagn", tile);
       ar.textContent = s.agents_running ? s.agents_running + " subagent" + (s.agents_running > 1 ? "s" : "") + " running" : "";
@@ -768,6 +794,50 @@
     };
     picker.addEventListener("click", function (e) { e.stopPropagation(); });
     document.addEventListener("click", closePicker);
+
+    // the alerts section, a side column: every session's alerts; "needs attention" and alert rows jump to the tile
+    // (and its step), pinning a session not followed yet while there is room
+    function tileOf(sid) {
+      if (tiles[sid]) return tiles[sid];
+      var k = Object.keys(tiles).filter(function (id) { return sid.indexOf(id) === 0 || id.indexOf(sid) === 0; })[0];
+      return k ? tiles[k] : null;
+    }
+    function focusTile(sid, step) {
+      var tile = tileOf(sid);
+      if (!tile) return false;
+      tile.scrollIntoView({block: "nearest", behavior: "smooth"});
+      tile.classList.remove("focus"); void tile.offsetWidth; tile.classList.add("focus");
+      if (step == null) return true;
+      var e = tile._nodes[step];
+      if (!e || e.nd.style.display === "none") return true;
+      var flow = $(".fflow", tile);
+      tile._follow = false;
+      $(".fjump", tile).style.display = "";
+      tile._auto = true;
+      flow.scrollTop = Math.max(0, e.nd.offsetTop - flow.offsetTop - flow.clientHeight / 3);
+      setTimeout(function () { tile._auto = false; }, 50);
+      e.nd.classList.remove("afocus"); void e.nd.offsetWidth; e.nd.classList.add("afocus");
+      return true;
+    }
+    function openSession(sid, step) {
+      if (focusTile(sid, step)) return true;
+      if (list.length < PIN_MAX) {
+        list = togglePin(list, sid); save();
+        load().then(function () { setTimeout(function () { focusTile(sid, step); }, 80); });
+        return true;
+      }
+      return false;
+    }
+    if (window.TSAlerts && $("#fside", root)) {
+      TSAlerts.panel($("#fside", root), {page: "follow",
+        onCollapse: function (v) { $("#fside", root).classList.toggle("collapsed", v); },
+        onSession: function (sid) { if (!openSession(sid)) location.href = SRC.sessionHref(sid); },
+        onJump: function (a, link) {
+          if (openSession(a.sid, a.agent ? null : a.step)) return true;
+          if (!link) location.href = SRC.sessionHref(a.sid);
+          return false;
+        }});
+    }
 
     save();
     setInterval(function () { Object.keys(tiles).forEach(function (id) { tickTile(tiles[id]); }); }, 1000);

@@ -277,5 +277,94 @@ class TestApi(unittest.TestCase):
         self.assertEqual(self.get("/api/alerts")["new"], 0)
 
 
+
+def _playwright():
+    try:
+        from playwright.sync_api import sync_playwright  # noqa: F401
+        return True
+    except Exception:  # noqa: BLE001
+        return False
+
+
+@unittest.skipUnless(_playwright() and os.environ.get("TOKENSCOPE_SKIP_BROWSER") != "1", "Playwright not installed")
+class TestBrowser(unittest.TestCase):
+    """The alerts section (static/alerts.js) on the board, the follow view and the session canvas."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.root = tempfile.mkdtemp()
+        alerts_synth.write_all(cls.root, t0=time.time() - 600 * len(alerts_synth.SCENARIOS) - 1800)
+        cls.live = server.Live(cls.root, since_minutes=10 ** 6, hooks=False, xhints=False,
+                               alerts_history=os.path.join(cls.root, "h.jsonl"))
+        cls.live.poll_once()
+        cls.srv = server.make_server(cls.live, port=0)
+        threading.Thread(target=cls.srv.serve_forever, daemon=True).start()
+        cls.base = "http://127.0.0.1:%d" % cls.srv.server_address[1]
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.srv.shutdown()
+        cls.srv.server_close()
+        cls.live.stop.set()
+        shutil.rmtree(cls.root, ignore_errors=True)
+
+    def test_board_follow_and_canvas(self):
+        from playwright.sync_api import sync_playwright
+        show = alerts_synth.SESSIONS["showcase"][:8]
+        with sync_playwright() as p:
+            try:
+                b = p.chromium.launch()
+            except Exception as e:  # noqa: BLE001 - browsers not downloaded
+                self.skipTest("no Chromium for Playwright: %s" % e)
+            errors = []
+            pg = b.new_page(viewport={"width": 1440, "height": 1000})
+            pg.on("pageerror", lambda e: errors.append(str(e)))
+            pg.goto(self.base + "/")
+            pg.wait_for_selector("#alerts .alrow", timeout=10000)
+            n = pg.locator("#alerts .alrow.new").count()
+            self.assertGreaterEqual(n, 6)
+            self.assertIn("new", pg.locator("#alerts .asum").inner_text())
+            chips = pg.locator("#alerts .asess-chip")
+            self.assertEqual(chips.count(), 6)   # every session but the clean one needs attention
+            self.assertIn("critical", chips.first.get_attribute("class"))   # worst first
+            self.assertGreaterEqual(pg.locator(".scard .abadge").count(), 6)
+            self.assertGreaterEqual(pg.locator(".scard.al-critical").count(), 1)
+            # ack one: it stays in the history, dimmed; the card's badge count drops
+            pg.locator("#alerts .alrow.new .aok").first.click()
+            pg.wait_for_function("document.querySelectorAll('#alerts .alrow.acked').length === 1", timeout=5000)
+            self.assertEqual(pg.locator("#alerts .alrow.new").count(), n - 1)
+            # the "new" filter hides it, and the choice and the collapsed state survive a reload
+            pg.locator("#alerts .aseg button[data-f=new]").click()
+            self.assertEqual(pg.locator("#alerts .alrow.acked").count(), 0)
+            pg.locator("#alerts .atog").click()
+            self.assertIn("collapsed", pg.locator("#alerts .apanel").get_attribute("class"))
+            pg.reload()
+            pg.wait_for_selector("#alerts .apanel.collapsed", timeout=10000)
+            self.assertFalse(pg.locator("#alerts .alist").is_visible())
+            pg.locator("#alerts .atog").click()
+            pg.wait_for_selector("#alerts .alrow", timeout=5000)
+            self.assertEqual(pg.locator("#alerts .alrow.acked").count(), 0)   # still on "new"
+            # follow view: tile badges, ▲ on alerted steps, a row jumps to its tile's step
+            pg.goto(self.base + "/follow?s=" + show)
+            pg.wait_for_selector(".ftile .abadge", timeout=10000)
+            self.assertGreaterEqual(pg.locator(".ftile .fnode .amark").count(), 1)
+            pg.wait_for_selector("#fside .alrow", timeout=10000)
+            pg.locator("#fside .alrow", has_text="read loop").first.click()
+            pg.wait_for_selector(".ftile .fnode.afocus", timeout=5000)
+            self.assertTrue(pg.locator(".ftile .fjump").is_visible())   # stopped following
+            # "needs attention" on a session not followed yet pins it
+            pg.locator("#fside .asess-chip", has_text=alerts_synth.SESSIONS["retry-loop"][:8]).click()
+            pg.wait_for_function("document.querySelectorAll('.ftile').length === 2", timeout=10000)
+            # canvas: the session's alerts as a drawer; a row selects the node of its step
+            pg.goto(self.base + "/s/" + show)
+            pg.wait_for_selector(".cside .alrow", timeout=10000)
+            self.assertEqual(pg.locator(".cside .asess").count(), 0)   # one session: no session column
+            pg.locator(".cside .alrow", has_text="cost jump").click()
+            pg.wait_for_selector(".panel .palert", timeout=5000)
+            self.assertIn("cost jump", pg.locator(".panel .palert").first.inner_text())
+            self.assertEqual(errors, [])
+            b.close()
+
+
 if __name__ == "__main__":
     unittest.main()

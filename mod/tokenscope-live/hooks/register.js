@@ -34,6 +34,10 @@ let timers = []
 let seenRules = null
 // Alert ids already seen (same: the first payload only seeds it, so opening the pane does not replay old alerts)
 let seenAlerts = null
+// The alerts section collapsed to one line (/tokenscope alerts hide|show, or a press on its head); kept in $.store
+// under ALERTS_PREF so it holds across sessions
+let alertsCollapsed = false
+const ALERTS_PREF = 'alertsCollapsed'
 
 // The intent list's view state, kept across redraws: 'intents' or 'phases'; group.first -> expanded, as the
 // person set it with /tokenscope expand|collapse or a press; and 'expanded' / 'collapsed' after "all"
@@ -162,20 +166,27 @@ function normalize(d) {
   }
 }
 
-// payload.alerts (tokenscope/alerts.py: [{id, kind, rule, severity, message, step, first, agent, active}]) -> the
-// fields the banner draws; anything malformed is dropped
+// payload.alerts: the session's alert history (tokenscope/alerts.py, grouped per step; tokenscope/live/alertstore.py:
+// [{id, n, kind, rule, severity, message, step, first, agent, active, state: new|acked, reasons, ts, at}]) -> the
+// fields the alerts section draws; anything malformed is dropped. An older server sends no state: every alert new.
 const ALERT_SEVERITIES = ['info', 'warning', 'critical']
 function normalizeAlerts(v) {
-  return (Array.isArray(v) ? v : []).filter((a) => a && typeof a === 'object' && a.message).map((a) => ({
+  return (Array.isArray(v) ? v : []).filter((a) => a && typeof a === 'object' && a.message).map((a, i) => ({
     id: String(a.id || a.kind + ':' + a.rule + ':' + a.step),
+    n: numOrNull(a.n),
     kind: String(a.kind || ''),
     rule: String(a.rule || ''),
     severity: ALERT_SEVERITIES.includes(a.severity) ? a.severity : 'warning',
     message: String(a.message),
     step: numOrNull(a.step),
+    first: numOrNull(a.first),
     agent: a.agent ? String(a.agent) : null,
     active: a.active !== false,
-  }))
+    state: a.state === 'acked' || a.state === 'dismissed' ? a.state : 'new',
+    at: numOrNull(a.at) != null ? a.at : numOrNull(a.ts),
+    reasons: (Array.isArray(a.reasons) ? a.reasons : []).filter((m) => m && typeof m === 'object' && m.rule)
+      .map((m) => ({ rule: String(m.rule), severity: String(m.severity || ''), message: String(m.message || '') })),
+  })).filter((a) => a.state !== 'dismissed')
 }
 
 // payload.recap (sent only while the session waits for you / is idle) -> { cw, usd, costliest, slowest, hints },
@@ -1007,40 +1018,165 @@ function recapRows(Box, Text, width, r) {
   return rows
 }
 
-// The alert banner, right under the header (above the recap): a bar "▲ ALERTS · 2 active" in the worst severity's
-// colour, then one line per active alert, worst first ("▲ cost jump  step 9 · step cost $1.80, 56.1× the session
-// median $0.03"), at most MAX_ALERTS of them and "+N more"; nothing when no alert is active.
-const MAX_ALERTS = 3
+// The alerts section, right under the header (above the recap): every alert of the session until it is
+// acknowledged or dismissed. Its head "▾ ALERTS · 2 new · 5 total ━━━" takes the worst new severity's colour (green
+// "✓ all acknowledged" once none is new); then one row per alert, new ones first (worst, then newest), acknowledged
+// ones dim with ✓: "#3 ▲ cost jump +2  14:02 · step 9 · step cost per call $0.84, …", at most MAX_ALERTS and
+// "+N more · /tokenscope alerts". Collapsed (a press on the head, /tokenscope alerts hide) it is the head alone:
+// "▸ ALERTS · 2 new · cost 1 · loop 1 · 5 total". A press on a new alert's row acknowledges it.
+const MAX_ALERTS = 5
 const ALERT_COLORS = { critical: 'redBright', warning: 'yellowBright', info: 'cyan' }
 const ALERT_NAMES = {
   session_usd: 'session $', intent_usd: 'intent $', jump: 'cost jump', unrelated: 'off-task',
   repeat_read: 'read loop', repeat_search: 'search loop', repeat_command: 'command loop', repeat_call: 'call loop',
   retry: 'retry loop', edit_revert: 'edit revert',
 }
+const KIND_SHORT = { cost: 'cost', off_task: 'off-task', looping: 'loop' }
 export const alertName = (a) => ALERT_NAMES[a.rule] || (a.rule || a.kind || 'alert').replace(/_/g, ' ')
+const sevRank = (a) => ALERT_SEVERITIES.indexOf(a.severity)
 
 export function activeAlerts(alerts) {
-  const rank = (a) => ALERT_SEVERITIES.indexOf(a.severity)
-  return alerts.filter((a) => a.active).slice().sort((a, b) => rank(b) - rank(a))
+  return alerts.filter((a) => a.active && a.state === 'new').slice().sort((a, b) => sevRank(b) - sevRank(a))
 }
 
-function alertRows(Box, Text, width, r) {
-  const act = activeAlerts(r.alerts)
-  if (!act.length) return []
-  const color = ALERT_COLORS[act[0].severity]
-  const head = '▲ ALERTS · ' + act.length + ' active' + (r.alerts.length > act.length ? ' · ' + r.alerts.length + ' total' : '') + ' '
-  const rows = [line(Box, Text, 'alerts', [{ text: head + '━'.repeat(Math.max(0, width - head.length)), color, bold: true }], width)]
-  act.slice(0, MAX_ALERTS).forEach((a, i) => {
-    const where = a.step != null ? (a.agent ? 'subagent step ' : 'step ') + a.step + ' · ' : ''
-    rows.push(line(Box, Text, 'alert-' + i, [
-      { text: ' ▲ ', color: ALERT_COLORS[a.severity], bold: true },
-      { text: alertName(a), color: ALERT_COLORS[a.severity], bold: true },
-      { text: '  ' + where, dimColor: true },
-      { text: a.message },
-    ], width))
+// new first (worst, then newest), then the acknowledged ones, newest first
+export function alertOrder(alerts) {
+  const at = (a) => (a.at || 0)
+  const fresh = alerts.filter((a) => a.state === 'new').sort((a, b) => sevRank(b) - sevRank(a) || at(b) - at(a) || (b.n || 0) - (a.n || 0))
+  const acked = alerts.filter((a) => a.state !== 'new').sort((a, b) => at(b) - at(a) || (b.n || 0) - (a.n || 0))
+  return [...fresh, ...acked]
+}
+
+// "14:02" (local time) of an epoch-seconds stamp
+export function hhmm(t) {
+  if (t == null) return ''
+  const d = new Date(Number(t) * 1000)
+  return String(d.getHours()).padStart(2, '0') + ':' + String(d.getMinutes()).padStart(2, '0')
+}
+
+export function alertCounts(alerts) {
+  const fresh = alerts.filter((a) => a.state === 'new')
+  const by = {}
+  for (const a of fresh) by[a.kind] = (by[a.kind] || 0) + 1
+  const worst = fresh.reduce((w, a) => (w && sevRank(w) >= sevRank(a) ? w : a), null)
+  const kinds = ['cost', 'off_task', 'looping', ...Object.keys(by).filter((k) => !KIND_SHORT[k])]
+    .filter((k) => by[k]).map((k) => (KIND_SHORT[k] || k) + ' ' + by[k]).join(' · ')
+  return { fresh: fresh.length, total: alerts.length, worst: worst ? worst.severity : null, kinds }
+}
+
+const alertNo = (a, i) => '#' + (a.n != null ? a.n : i + 1)
+const alertWhere = (a) => a.step == null ? '' : (a.agent ? 'subagent step ' : 'step ') +
+  (a.first != null && a.first !== a.step ? a.first + '–' : '') + a.step
+
+function pressLine(Box, Text, Button, key, segs, width, onPress) {
+  return Box({ key, flexDirection: 'row', children: [Button({ key, plain: true, onPress, children: texts(Text, segs, width) })] })
+}
+
+function alertRows(Box, Text, Button, width, r, $) {
+  const al = r.alerts
+  if (!al.length) return []
+  const c = alertCounts(al)
+  const color = c.fresh ? ALERT_COLORS[c.worst] : 'green'
+  const toggle = () => setAlertsCollapsed($, !alertsCollapsed)
+  if (alertsCollapsed) {
+    return [pressLine(Box, Text, Button, 'alerts', [
+      { text: '▸ ALERTS', color, bold: true },
+      { text: ' · ' + (c.fresh ? c.fresh + ' new · ' + c.kinds : '✓ all acknowledged'), color, bold: !!c.fresh },
+      { text: ' · ' + c.total + ' total', dimColor: true },
+    ], width, toggle)]
+  }
+  const head = '▾ ALERTS · ' + (c.fresh ? c.fresh + ' new' : '✓ all acknowledged') + ' · ' + c.total + ' total '
+  const rows = [pressLine(Box, Text, Button, 'alerts', [{ text: head + '━'.repeat(Math.max(0, width - head.length)), color, bold: true }], width, toggle)]
+  const order = alertOrder(al)
+  order.slice(0, MAX_ALERTS).forEach((a, i) => {
+    const fresh = a.state === 'new'
+    const col = fresh ? ALERT_COLORS[a.severity] : undefined
+    const more = a.reasons.length > 1 ? ' +' + (a.reasons.length - 1) : ''
+    const where = [hhmm(a.at), alertWhere(a)].filter(Boolean).join(' · ')
+    const segs = [
+      { text: ' ' + alertNo(a, al.indexOf(a)) + ' ', dimColor: true },
+      fresh ? { text: a.severity === 'critical' ? '▲▲ ' : '▲ ', color: col, bold: true } : { text: '✓ ', color: 'green', dimColor: true },
+      { text: alertName(a), color: col, bold: fresh, dimColor: !fresh },
+      more && { text: more, color: col, dimColor: true },
+      { text: '  ' + where + (where ? ' · ' : ''), dimColor: true },
+      { text: a.message, dimColor: !fresh },
+    ]
+    rows.push(fresh ? pressLine(Box, Text, Button, 'alert-' + a.id, segs, width, () => void alertAction($, 'ack', { ids: [a.id] }))
+      : line(Box, Text, 'alert-' + a.id, segs, width))
   })
-  if (act.length > MAX_ALERTS) rows.push(line(Box, Text, 'alert-more', [{ text: '   +' + (act.length - MAX_ALERTS) + ' more', dimColor: true }], width))
+  if (order.length > MAX_ALERTS) rows.push(line(Box, Text, 'alert-more', [{ text: '   +' + (order.length - MAX_ALERTS) + ' more · /tokenscope alerts', dimColor: true }], width))
+  if (c.fresh) rows.push(line(Box, Text, 'alert-hint', [{ text: '   /tokenscope ack <#|all> · dismiss <#|all> · alerts hide', dimColor: true }], width))
   return rows
+}
+
+async function setAlertsCollapsed($, v) {
+  alertsCollapsed = !!v
+  void $.ui.invalidate('ui.render')
+  try { await $.store.set(ALERTS_PREF, alertsCollapsed) } catch { /* the pane still works without the store */ }
+}
+
+// POST /api/alerts/<op> (ack | dismiss); the alerts change locally at once, the next poll brings the server's
+// state. Returns how many changed, or null when the server cannot be reached.
+async function alertAction($, op, body) {
+  let changed = null
+  try {
+    const base = (await $.env.get('TOKENSCOPE_LIVE_URL')) || DEFAULT_BASE
+    const res = await $.http.fetch(base.replace(/\/+$/, '') + '/api/alerts/' + op, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+    })
+    const d = JSON.parse(res.text)
+    if (!res.ok || !d || !d.ok) return null
+    changed = Number(d.changed) || 0
+  } catch {
+    return null
+  }
+  if (remote) {
+    const ids = body.ids ? new Set(body.ids) : null
+    remote = { ...remote, alerts: remote.alerts.flatMap((a) => {
+      if (ids ? !ids.has(a.id) : op === 'ack' && a.state !== 'new') return [a]
+      if (op === 'dismiss') return []
+      return [{ ...a, state: 'acked' }]
+    }) }
+    remoteText = ''   // the next poll redraws from the server whatever it says
+    dirty = true
+  }
+  return changed
+}
+
+// `/tokenscope ack <#|all>`, `/tokenscope dismiss <#|all>`: by the number shown before an alert ("#3")
+async function runAlertAction($, verb, arg, sessionId) {
+  const op = verb === 'ack' ? 'ack' : 'dismiss'
+  const past = op === 'ack' ? 'acknowledged' : 'dismissed'
+  if (!remote) return 'tokenscope: cannot reach the tokenscope server (tokenscope live)'
+  if (!arg) return 'usage: /tokenscope ' + verb + ' <#|all>'
+  let body, what
+  if (arg === 'all') {
+    body = { all: true, sessions: [sessionId] }
+    what = 'every alert of this session'
+  } else {
+    const n = Number(String(arg).replace(/^#/, ''))
+    const a = remote.alerts.find((x, i) => (x.n != null ? x.n : i + 1) === n)
+    if (!a) return 'tokenscope: no alert #' + arg + ' (the number before an alert)'
+    body = { ids: [a.id] }
+    what = '#' + n + ' ' + alertName(a)
+  }
+  const n = await alertAction($, op, body)
+  if (n == null) return 'tokenscope: cannot reach the tokenscope server (tokenscope live)'
+  return 'tokenscope: ' + past + ' ' + what + (arg === 'all' ? ' (' + n + ')' : '')
+}
+
+// `/tokenscope alerts`: the session's whole alert history as the command's output
+export function alertsText(alerts) {
+  if (!alerts.length) return 'tokenscope: no alerts in this session'
+  const c = alertCounts(alerts)
+  const lines = ['tokenscope alerts: ' + c.fresh + ' new' + (c.kinds ? ' (' + c.kinds + ')' : '') + ' · ' + c.total + ' total']
+  alertOrder(alerts).forEach((a) => {
+    const where = [hhmm(a.at), alertWhere(a)].filter(Boolean).join(' · ')
+    lines.push('  ' + alertNo(a, alerts.indexOf(a)) + ' ' + (a.state === 'new' ? '▲' : '✓') + ' [' + a.severity + '] ' +
+      alertName(a) + (where ? ' · ' + where : '') + ': ' + a.message)
+    a.reasons.slice(1).forEach((m) => lines.push('       + ' + alertName(m) + ': ' + m.message))
+  })
+  return lines.join('\n')
 }
 
 // "SKILLS ✦ pr-review ×2 · tdd": skills used in the session (Skill tool and slash-command skills)
@@ -1054,7 +1190,7 @@ function drawRemote(Box, Text, width, Button, $) {
   const top = [header(Box, Text, width, 'tokenscope', r.status, r.elapsed_s != null ? fmtDur(r.elapsed_s) : '')]
   // alerts, then the recap, right under the header, where they are seen without scrolling; the intent list yields
   // rows first
-  top.push(...alertRows(Box, Text, width, r))
+  top.push(...alertRows(Box, Text, Button, width, r, $))
   const recap = recapRows(Box, Text, width, r)
   top.push(...recap)
   top.push(row(Box, Text, 'asked', 'ASKED', [
@@ -1131,7 +1267,7 @@ function toastNewWarnings($, warnings) {
 }
 
 function toastNewAlerts($, alerts) {
-  const fresh = seenAlerts ? activeAlerts(alerts).filter((a) => !seenAlerts.has(a.id)) : []
+  const fresh = seenAlerts ? alertOrder(alerts).filter((a) => a.state === 'new' && !seenAlerts.has(a.id)) : []
   if (!seenAlerts) seenAlerts = new Set()
   for (const a of alerts) seenAlerts.add(a.id)
   if (fresh.length) $.ui.toast(fresh.slice(0, 2).map((a) => '▲ ' + alertName(a) + ': ' + a.message).join('  '))
@@ -1172,7 +1308,7 @@ async function poll($) {
   if (!remote) dirty = true   // local mode: the header's clock ticks once a second
 }
 
-const USAGE = 'usage: /tokenscope [expand <n|all> | collapse <n|all> | view intents|phases | top [5h|24h|7d|30d] [session|goal|turn|intent]]'
+const USAGE = 'usage: /tokenscope [expand <n|all> | collapse <n|all> | view intents|phases | top [5h|24h|7d|30d] [session|goal|turn|intent] | alerts [show|hide] | ack <#|all> | dismiss <#|all>]'
 const TOP_BY = { session: 'sessions', goal: 'goals', turn: 'turns', intent: 'intents' }
 
 // `/tokenscope top 5h [session|goal|turn|intent]`: the window's costliest sessions and intents (or, grouped by
@@ -1254,8 +1390,8 @@ export function register(onEvent) {
   onEvent('session.start', async ($, e, next) => {
     await $.command.register({
       name: 'tokenscope',
-      description: 'Toggle the tokenscope live pane; expand|collapse <n|all>, view intents|phases, top <window> [by]',
-      argumentHint: '[expand <n|all> | collapse <n|all> | view intents|phases | top 5h|24h|7d|30d [session|goal|turn|intent]]',
+      description: 'Toggle the tokenscope live pane; expand|collapse <n|all>, view intents|phases, top <window> [by], alerts [show|hide], ack|dismiss <#|all>',
+      argumentHint: '[expand <n|all> | collapse <n|all> | view intents|phases | top 5h|24h|7d|30d [session|goal|turn|intent] | alerts [show|hide] | ack <#|all> | dismiss <#|all>]',
       immediate: true,
     })
     timers.forEach((t) => t.cancel())
@@ -1266,6 +1402,7 @@ export function register(onEvent) {
     remoteText = ''
     seenRules = null
     seenAlerts = null
+    try { alertsCollapsed = (await $.store.get(ALERTS_PREF)) === true } catch { alertsCollapsed = false }
     local.calls = 0
     local.live = null
     local.sub = null
@@ -1282,6 +1419,19 @@ export function register(onEvent) {
   onEvent('command.run', { command: 'tokenscope' }, async ($, e) => {
     const [verb, arg, ...more] = String(e.args || '').trim().toLowerCase().split(/\s+/)
     if (verb === 'top') return { text: await runTop($, [arg, ...more]) }
+    if (verb === 'alerts') {
+      if (arg === 'hide' || arg === 'show' || arg === 'toggle') {
+        await setAlertsCollapsed($, arg === 'toggle' ? !alertsCollapsed : arg === 'hide')
+        return { text: 'tokenscope: alerts ' + (alertsCollapsed ? 'collapsed to one line' : 'shown') }
+      }
+      if (arg) return { text: USAGE }
+      return { text: remote ? alertsText(remote.alerts) : 'tokenscope: cannot reach the tokenscope server (tokenscope live)' }
+    }
+    if (verb === 'ack' || verb === 'dismiss') {
+      const text = await runAlertAction($, verb, arg, await $.session.id())
+      void $.ui.invalidate('ui.render')
+      return { text }
+    }
     if (verb) {
       const text = runView(verb, arg)
       void $.ui.invalidate('ui.render')

@@ -42,6 +42,17 @@ const COMPACT = {
 
 const WARNING = { rule: 'stuck_error', text: 'same error ×3, no edits since', hint: 'try a different approach', count: 3, ts: 1 }
 
+// payload.alerts: the session's alert history (tokenscope/live/alertstore.py), as the server sends it
+const ALERTS = [
+  { id: 'a1', n: 1, kind: 'looping', rule: 'retry', severity: 'warning', message: 'same failing command retried 3× with no edit in between (command #1)', step: 3, first: 2, agent: 'ag1', active: true, state: 'new', at: 1_790_000_100 },
+  { id: 'a2', n: 2, kind: 'cost', rule: 'jump', severity: 'critical', message: 'step cost per call $1.80, 56.1× the session median $0.03', step: 5, first: 5, agent: null, active: true, state: 'new', at: 1_790_000_050 },
+  { id: 'a3', n: 3, kind: 'cost', rule: 'session_usd', severity: 'warning', message: 'session spend $27.58 passed the $25.00 threshold', step: 5, first: 5, agent: null, active: true, state: 'acked', at: 1_790_000_200,
+    reasons: [{ rule: 'session_usd', severity: 'warning', message: 'session spend $27.58 passed the $25.00 threshold' },
+      { rule: 'intent_usd', severity: 'warning', message: '[CHANGE] intent cost $8.39 (threshold $5.00) over 1 step' },
+      { rule: 'jump', severity: 'warning', message: 'step cost per call $1.10' }] },
+  { id: 'a4', n: 4, kind: 'looping', rule: 'repeat_read', severity: 'warning', message: 'same .py file read 4× with the same result (file #1)', step: 1, first: 0, agent: null, active: false, state: 'acked', at: 1_790_000_000 },
+]
+
 const OLD_SHAPE = {
   goal: { name: 'Fix login bug', source: 'keyword' },
   status: 'idle',
@@ -206,39 +217,111 @@ describe('tokenscope-live', () => {
     expect(await ui.findAll({ type: 'Text', text: /⚠/ })).toHaveLength(1)
   })
 
-  test('active alerts show as a banner under the header, worst first; a new alert toasts once', async ($: any, on: any) => {
+  test('the alerts section: new alerts first, worst first, acknowledged ones dim; a new alert toasts once', async ($: any, on: any) => {
     const clock = base(on)
+    mock.store(on)
     let payload: any = COMPACT
     const toasts: string[] = []
     on('http.fetch', () => ({ value: { status: 200, ok: true, headers: {}, text: JSON.stringify(payload) } }))
     on('ui.toast', (_$: any, e: any) => { toasts.push(e.text); return { value: undefined } })
     await $.session.start(SESSION)
     await clock.advance(1000)
-    payload = { ...COMPACT, alerts: [
-      { id: 'a1', kind: 'looping', rule: 'retry', severity: 'warning', message: 'same failing command retried 3× with no edit in between (command #1)', step: 7, first: 6, agent: null, active: true },
-      { id: 'a2', kind: 'cost', rule: 'jump', severity: 'critical', message: 'step cost $1.80, 56.1× the session median $0.03', step: 5, first: 5, agent: null, active: true },
-      { id: 'a3', kind: 'looping', rule: 'repeat_read', severity: 'warning', message: 'same .py file read 4× with the same result (file #1)', step: 1, first: 0, agent: null, active: false },
-    ] }
+    payload = { ...COMPACT, alerts: ALERTS }
     await clock.advance(1000)
-    expect(toasts).toEqual(['▲ cost jump: step cost $1.80, 56.1× the session median $0.03  ▲ retry loop: same failing command retried 3× with no edit in between (command #1)'])
+    expect(toasts).toEqual(['▲ cost jump: step cost per call $1.80, 56.1× the session median $0.03  ▲ retry loop: same failing command retried 3× with no edit in between (command #1)'])
     payload = { ...payload }
     await clock.advance(1000)
     expect(toasts).toHaveLength(1) // same ids: no second toast
     const ui = await $.ui.mount({ plugin: 'tokenscope-live', surface: 'terminal', component: 'Pane', requestId: 'tokenscope-live', props: { ...PANE_PROPS, bodyColumns: 120 } })
-    expect(await ui.find({ type: 'Text', text: /^▲ ALERTS · 2 active · 3 total ━+$/ })).toBeDefined()
-    const names = await ui.findAll({ type: 'Text', text: /^(cost jump|retry loop|read loop)$/ })
-    expect(names.map((n: any) => n.text)).toEqual(['cost jump', 'retry loop'])   // worst first; the inactive one not shown
-    expect(await ui.find({ type: 'Text', text: /^ {2}step 5 · $/ })).toBeDefined()
-    expect(await ui.find({ type: 'Text', text: 'step cost $1.80, 56.1× the session median $0.03' })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /^▾ ALERTS · 2 new · 4 total ━+$/ })).toBeDefined()
+    const names = await ui.findAll({ type: 'Text', text: /^(cost jump|retry loop|read loop|session \$)$/ })
+    expect(names.map((n: any) => n.text)).toEqual(['cost jump', 'retry loop', 'session $', 'read loop'])   // new (worst first), then acked
+    expect(await ui.find({ type: 'Text', text: /^ #2 $/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /^ \+2$/ })).toBeDefined()   // a grouped alert's other reasons
+    expect(await ui.find({ type: 'Text', text: /^ {2}\d\d:\d\d · step 5 · $/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /^ {2}\d\d:\d\d · subagent step 2–3 · $/ })).toBeDefined()
+    expect((await ui.findAll({ type: 'Text', text: /^✓ $/ })).length).toBe(2)
+    expect(await ui.find({ type: 'Text', text: /^ {3}\/tokenscope ack <#\|all> · dismiss <#\|all> · alerts hide$/ })).toBeDefined()
+    // the whole history as the command's output
+    const res = await $.command.run({ command: 'tokenscope', args: 'alerts' })
+    expect(res.text.split('\n')[0]).toBe('tokenscope alerts: 2 new (cost 1 · loop 1) · 4 total')
+    expect(res.text).toMatch(/#3 ✓ \[warning\] session \$ · \d\d:\d\d · step 5: session spend/)
+    expect(res.text).toMatch(/\n {7}\+ intent \$: \[CHANGE\] intent cost/)
   })
 
-  test('no active alert, no banner', async ($: any, on: any) => {
+  test('alerts: /tokenscope ack <#|all> and dismiss post to the server; a press on a new alert acknowledges it', async ($: any, on: any) => {
     const clock = base(on)
-    const payload = { ...COMPACT, alerts: [{ id: 'a3', kind: 'looping', rule: 'repeat_read', severity: 'warning', message: 'same .py file read 4×', step: 1, active: false }] }
+    mock.store(on)
+    const posts: any[] = []
+    on('http.fetch', (_$: any, e: any) => {
+      if (e.init && e.init.method === 'POST') {
+        posts.push({ url: e.url, body: JSON.parse(e.init.body), type: e.init.headers['Content-Type'] })
+        return { value: { status: 200, ok: true, headers: {}, text: JSON.stringify({ ok: true, changed: 1 }) } }
+      }
+      return { value: { status: 200, ok: true, headers: {}, text: JSON.stringify({ ...COMPACT, alerts: ALERTS }) } }
+    })
+    await $.session.start(SESSION)
+    await clock.advance(1000)
+    expect((await $.command.run({ command: 'tokenscope', args: 'ack 2' })).text).toBe('tokenscope: acknowledged #2 cost jump')
+    expect(posts[0]).toEqual({ url: 'http://127.0.0.1:8765/api/alerts/ack', body: { ids: ['a2'] }, type: 'application/json' })
+    expect((await $.command.run({ command: 'tokenscope', args: 'dismiss #4' })).text).toBe('tokenscope: dismissed #4 read loop')
+    expect(posts[1].body).toEqual({ ids: ['a4'] })
+    expect((await $.command.run({ command: 'tokenscope', args: 'ack all' })).text).toBe('tokenscope: acknowledged every alert of this session (1)')
+    expect(posts[2]).toMatchObject({ url: 'http://127.0.0.1:8765/api/alerts/ack', body: { all: true, sessions: ['sess-1'] } })
+    expect((await $.command.run({ command: 'tokenscope', args: 'ack 9' })).text).toMatch(/no alert #9/)
+    expect((await $.command.run({ command: 'tokenscope', args: 'ack' })).text).toMatch(/^usage: \/tokenscope ack/)
+    await clock.advance(1000)   // the server still says new: the next poll shows it so
+    const ui = await mountPane($)
+    await ui.press({ key: 'alert-a1' })
+    expect(posts[3].body).toEqual({ ids: ['a1'] })
+  })
+
+  test('alerts: collapsed to one line by a press or /tokenscope alerts hide, kept in the store across sessions', async ($: any, on: any) => {
+    const clock = base(on)
+    const kept = new Map<string, unknown>()
+    on('store.get', (_$: any, e: any) => ({ value: kept.get(e.key) }))
+    on('store.set', (_$: any, e: any) => { kept.set(e.key, e.value); return { value: undefined } })
+    on('http.fetch', () => ({ value: { status: 200, ok: true, headers: {}, text: JSON.stringify({ ...COMPACT, alerts: ALERTS }) } }))
+    await $.session.start(SESSION)
+    await clock.advance(1000)
+    let ui = await mountPane($)
+    await ui.press({ key: 'alerts' })
+    await ui.unmount()
+    ui = await mountPane($)
+    expect(await ui.find({ type: 'Text', text: /^▸ ALERTS$/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /^ · 2 new · cost 1 · loop 1$/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /^cost jump$/ })).toBeUndefined()
+    await ui.unmount()
+    expect(kept.get('alertsCollapsed')).toBe(true)
+    await $.session.start(SESSION)   // a new session (or a reload) reads the preference back
+    await clock.advance(1000)
+    ui = await mountPane($)
+    expect(await ui.find({ type: 'Text', text: /^▸ ALERTS$/ })).toBeDefined()
+    await ui.unmount()
+    expect((await $.command.run({ command: 'tokenscope', args: 'alerts show' })).text).toBe('tokenscope: alerts shown')
+    ui = await mountPane($)
+    expect(await ui.find({ type: 'Text', text: /^cost jump$/ })).toBeDefined()
+    await ui.unmount()
+    expect(kept.get('alertsCollapsed')).toBe(false)
+    expect((await $.command.run({ command: 'tokenscope', args: 'alerts hide' })).text).toBe('tokenscope: alerts collapsed to one line')
+    expect(kept.get('alertsCollapsed')).toBe(true)
+    expect((await $.command.run({ command: 'tokenscope', args: 'alerts bogus' })).text).toMatch(/^usage:/)
+  })
+
+  test('alerts: all acknowledged reads green; no alerts, no section', async ($: any, on: any) => {
+    const clock = base(on)
+    mock.store(on)
+    let payload: any = { ...COMPACT, alerts: ALERTS.map((a) => ({ ...a, state: 'acked' })) }
     on('http.fetch', () => ({ value: { status: 200, ok: true, headers: {}, text: JSON.stringify(payload) } }))
     await $.session.start(SESSION)
     await clock.advance(1000)
-    const ui = await $.ui.mount({ plugin: 'tokenscope-live', surface: 'terminal', component: 'Pane', requestId: 'tokenscope-live', props: { ...PANE_PROPS, bodyColumns: 120 } })
+    let ui = await mountPane($)
+    expect(await ui.find({ type: 'Text', text: /^▾ ALERTS · ✓ all acknowledged · 4 total ━+$/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /alerts hide$/ })).toBeUndefined()
+    await ui.unmount()
+    payload = { ...COMPACT, alerts: [] }
+    await clock.advance(1000)
+    ui = await mountPane($)
     expect(await ui.find({ type: 'Text', text: /ALERTS/ })).toBeUndefined()
   })
 

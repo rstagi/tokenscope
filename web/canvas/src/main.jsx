@@ -64,11 +64,14 @@ const ALERT_NAMES = {session_usd: "session $", intent_usd: "intent $", jump: "co
 const SEV = {info: 0, warning: 1, critical: 2};
 const alertName = (a) => ALERT_NAMES[a.rule] || String(a.rule || a.kind || "alert").replace(/_/g, " ");
 const worst = (as) => as.reduce((w, a) => (SEV[a.severity] || 0) > (SEV[w] || 0) ? a.severity : w, "info");
-const alertTip = (as) => as.map((a) => "▲ " + alertName(a) + (a.step != null ? " · step " + (a.first != null && a.first !== a.step ? a.first + "–" : "") + a.step : "") + "\n" + a.message).join("\n\n");
+const alertTip = (as) => as.map((a) => "▲ " + alertName(a) + (a.step != null ? " · step " + (a.first != null && a.first !== a.step ? a.first + "–" : "") + a.step : "") + "\n" + a.message +
+  (a.reasons || []).slice(1).map((m) => "\n  · " + alertName(m) + ": " + m.message).join("")).join("\n\n");
+// the alerts still needing attention: an acknowledged one stays in the alerts drawer (static/alerts.js), not on nodes
+const openAlerts = (C) => (Array.isArray(C.alerts) ? C.alerts : []).filter((a) => a && a.state !== "acked");
 function alertsByLane(C) {
   const out = {};
-  (Array.isArray(C.alerts) ? C.alerts : []).forEach((a) => {
-    if (!a || a.step == null) return;
+  openAlerts(C).forEach((a) => {
+    if (a.step == null) return;
     const lane = a.agent ? "a:" + a.agent : "m";
     (out[lane] = out[lane] || []).push(a);
   });
@@ -357,10 +360,10 @@ function Head({C, elapsed, open, setOpen, conn, replay, onRestart}) {
       {C.tests ? <><span className="hl">TESTS</span><span className="hv"><TestsNode t={C.tests} /></span></> : null}
       {fn ? <><span className="hl">FILES</span><span className="hv" title={files.join("\n")}>{files.length ? "edited " + fn + ": " + files.slice(-6).join(", ") + (files.length > 6 ? ", …" : "") : "edited " + fn + (fn === 1 ? " file" : " files")}</span></> : null}
       {sk.length ? <><span className="hl">SKILLS</span><span className="hv skm">✦ {sk.map((s) => s.name + " ×" + (s.count || 1)).join(" · ")}</span></> : null}
-      {(C.alerts || []).length ? <><span className="hl">ALERTS</span><span className="hv hvw">{C.alerts.slice(0, 6).map((a) =>
+      {openAlerts(C).length ? <><span className="hl">ALERTS</span><span className="hv hvw">{openAlerts(C).slice(0, 6).map((a) =>
         <span key={a.id} className={"chip alert " + a.severity + (a.active ? " on" : "")} title={alertTip([a])}
           onMouseEnter={(e) => showTip({text: alertTip([a]), sev: a.severity, x: e.clientX, y: e.clientY})} onMouseLeave={() => showTip(null)}>▲ {alertName(a)}{a.step != null ? " · " + a.step : ""}</span>)}
-        {C.alerts.length > 6 ? <span className="mut"> +{C.alerts.length - 6}</span> : null}</span></> : null}
+        {openAlerts(C).length > 6 ? <span className="mut"> +{openAlerts(C).length - 6}</span> : null}</span></> : null}
       {(H.flags || []).length ? <><span className="hl">FLAGS</span><span className="hv">{H.flags.map((f, k) => <span key={k} className="chip warn">{String(f.flag).replace(/_/g, " ")}{f.count > 1 ? " ×" + f.count : ""}</span>)}</span></> : null}
     </div> : null}
   </div>;
@@ -529,6 +532,28 @@ function Canvas() {
     if (ev && a && (Math.abs(a.x - vp.x) > 2 || Math.abs(a.y - vp.y) > 2 || Math.abs(a.zoom - vp.zoom) > 1e-3)) setFollow(false);
   }, []);
   const onNodeClick = useCallback((ev, n) => setSelKey((k) => (k === n.id ? null : n.id)), []);
+
+  // jump to an alert's step (the alerts drawer, static/alerts.js, calls window.tsCanvasFocus; /s/<id>#step=N[&agent=X]
+  // on load): stop following, select the node holding it and centre it
+  const focusAlert = useCallback((a) => {
+    if (!view || !a || a.step == null) return false;
+    const lane = a.agent ? "a:" + a.agent : "m";
+    const n = view.nodes.find((x) => x.type === "intent" && x.data.sl.lane === lane && x.data.sl.steps.some((s) => s.i === a.step));
+    if (!n) return false;
+    setFollow(false);
+    setSelKey(n.id);
+    rf.setCenter(n.position.x + NODE_W / 2, n.position.y + (view.heights[n.id] || HEAD_H) / 2, {zoom: Math.max(rf.getZoom(), 0.85), duration: 500});
+    return true;
+  }, [view, rf]);
+  useEffect(() => { window.tsCanvasFocus = focusAlert; }, [focusAlert]);
+  const hashDone = useRef(false);
+  useEffect(() => {
+    if (hashDone.current || !view || !view.nodes.length) return;
+    const q = new URLSearchParams(String(window.location.hash || "").replace(/^#/, ""));
+    if (!q.has("step")) { hashDone.current = true; return; }
+    const a = {step: +q.get("step"), agent: q.get("agent") || null};
+    setTimeout(() => { if (focusAlert(a)) hashDone.current = true; }, 120);
+  }, [view, focusAlert]);
 
   if (err && !C) return <div className="empty">{err}</div>;
   if (!C) return <div className="empty">loading…</div>;
