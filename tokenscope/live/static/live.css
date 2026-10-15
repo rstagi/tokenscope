@@ -329,3 +329,19 @@ body[data-page=session] header{position:static}
 .cside .apanel.collapsed{display:inline-block}
 @media (max-width:1100px){.fside{width:300px}}
 @media (max-width:760px){.fbody{flex-direction:column}.fside{width:auto;padding:0 16px 12px}}
+/* a follow tile's own alerts, at its top: one row per alert (cost / off-task / looping), the whole message wrapped */
+.ftal{flex:none;display:flex;flex-direction:column;gap:4px;margin:6px 0 4px}
+.talrow{padding:4px 8px 5px;border:1px solid #f3dfa6;border-left:4px solid #f59f00;border-radius:0 7px 7px 0;background:#fff8e6;font-size:12px;cursor:pointer;min-width:0}
+.talrow.critical{border-color:#f5b5b5;border-left-color:#e03131;background:#fff1f1}
+.talrow.info{border-color:#c5e3fa;border-left-color:#4dabf7;background:#f0f8ff}
+.talrow.acked{opacity:.55;background:#fafafa;border-color:var(--line);border-left-color:#c3c9d3}
+.talrow.acked .tmsg{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.talrow.fresh{animation:tfresh 2.4s ease-out}
+@keyframes tfresh{0%{box-shadow:0 0 0 3px #ffc9c9}100%{box-shadow:0 0 0 0 transparent}}
+.tar1{display:flex;align-items:center;flex-wrap:wrap;gap:3px 6px;min-width:0}
+.tsev{font-size:10.5px;font-weight:800;text-transform:uppercase;letter-spacing:.3px;color:#b35c00}
+.talrow.critical .tsev{color:#c92a2a}.talrow.info .tsev{color:#1864ab}
+.talrow.critical .acount{background:#ffe3e3;color:#c92a2a}
+.tar1 .astep{margin-left:auto}
+.tmsg{color:var(--ink);margin-top:2px;line-height:1.35;overflow-wrap:anywhere}
+.tearlier{margin-top:1px;font-size:11px;color:var(--mut);display:-webkit-box;-webkit-line-clamp:1;-webkit-box-orient:vertical;overflow:hidden;overflow-wrap:anywhere}

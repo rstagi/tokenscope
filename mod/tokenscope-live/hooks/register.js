@@ -1028,10 +1028,13 @@ function recapRows(Box, Text, width, r) {
 // The alerts section, right under the header (above the recap): every alert of the session until it is
 // acknowledged or dismissed. Its head "▾ ALERTS · 2 new · 5 total ━━━" takes the worst new severity's colour (green
 // "✓ all acknowledged" once none is new); then one row per alert, new ones first (worst, then newest), acknowledged
-// ones dim with ✓: "#3 ▲ cost jump +2  14:02 · step 9 · step cost per call $0.84, …", at most MAX_ALERTS and
+// ones dim with ✓ on one line ("#3 ✓ cost jump +2  14:02 · step 9 · step cost per call $0.84, …"), a new one in full:
+// "#1 ▲▲ retry loop ×3  14:02 · step 9", its message wrapped under it, "earlier: read loop step 4 · …"; at most MAX_ALERTS and
 // "+N more · /tokenscope alerts". Collapsed (a press on the head, /tokenscope alerts hide) it is the head alone:
 // "▸ ALERTS · 2 new · cost 1 · loop 1 · 5 total". A press on a new alert's row acknowledges it.
 const MAX_ALERTS = 5
+const ALERT_INDENT = '     '   // under "#1 ▲ ": a new alert's message and earlier triggers
+const ALERT_MSG_LINES = 3      // a new alert's message, wrapped (only a longer one is cut, with "…")
 const ALERT_COLORS = { critical: 'redBright', warning: 'yellowBright', info: 'cyan' }
 const ALERT_NAMES = {
   session_usd: 'session $', intent_usd: 'intent $', jump: 'cost jump', unrelated: 'off-task',
@@ -1107,11 +1110,21 @@ function alertRows(Box, Text, Button, width, r, $) {
       { text: alertName(a), color: col, bold: fresh, dimColor: !fresh },
       a.count > 1 && { text: alertTimes(a), color: col, bold: fresh, dimColor: !fresh },
       more && { text: more, color: col, dimColor: true },
-      { text: '  ' + where + (where ? ' · ' : ''), dimColor: true },
-      { text: a.message, dimColor: !fresh },
+      { text: '  ' + where + (fresh || !where ? '' : ' · '), dimColor: true },
+      !fresh && { text: a.message, dimColor: true },
     ]
-    rows.push(fresh ? pressLine(Box, Text, Button, 'alert-' + a.id, segs, width, () => void alertAction($, 'ack', { ids: [a.id] }))
-      : line(Box, Text, 'alert-' + a.id, segs, width))
+    if (!fresh) { rows.push(line(Box, Text, 'alert-' + a.id, segs, width)); return }
+    const ack = () => void alertAction($, 'ack', { ids: [a.id] })
+    rows.push(pressLine(Box, Text, Button, 'alert-' + a.id, segs, width, ack))
+    // a new alert in full: its message wrapped under it, then its earlier triggers on one line
+    wrapText(a.message, width - ALERT_INDENT.length, ALERT_MSG_LINES).forEach((t, k) =>
+      rows.push(pressLine(Box, Text, Button, 'alert-' + a.id + '-m' + k, [{ text: ALERT_INDENT + t, color: col }], width, ack)))
+    const ts = (a.triggers || []).slice(0, -1).reverse()
+    if (ts.length) {
+      const more = (a.count || ts.length + 1) - 1 - ts.length
+      const earlier = ts.map((t) => alertName(t) + (t.step != null ? ' ' + alertWhere(t) : '')).join(' · ') + (more > 0 ? ' · +' + more + ' more' : '')
+      rows.push(line(Box, Text, 'alert-' + a.id + '-e', [{ text: ALERT_INDENT + 'earlier: ' + earlier, dimColor: true }], width))
+    }
   })
   if (order.length > MAX_ALERTS) rows.push(line(Box, Text, 'alert-more', [{ text: '   +' + (order.length - MAX_ALERTS) + ' more · /tokenscope alerts', dimColor: true }], width))
   if (c.fresh) rows.push(line(Box, Text, 'alert-hint', [{ text: '   /tokenscope ack <#|all> · dismiss <#|all> · alerts hide', dimColor: true }], width))

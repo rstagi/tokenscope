@@ -247,8 +247,14 @@ describe('tokenscope-live', () => {
     expect(await ui.find({ type: 'Text', text: /^ ×4$/ })).toBeDefined()   // how often the looping alert fired
     expect(await ui.find({ type: 'Text', text: /^ #2 $/ })).toBeDefined()
     expect(await ui.find({ type: 'Text', text: /^ \+2$/ })).toBeDefined()   // the cost alert's other reasons
-    expect(await ui.find({ type: 'Text', text: /^ {2}\d\d:\d\d · step 5 · $/ })).toBeDefined()
-    expect(await ui.find({ type: 'Text', text: /^ {2}\d\d:\d\d · subagent step 2–4 · $/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /^ {2}\d\d:\d\d · step 5$/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /^ {2}\d\d:\d\d · subagent step 2–4$/ })).toBeDefined()
+    // a new alert in full: the whole message on its own line(s), then its earlier triggers; an acked one on one line
+    expect(await ui.find({ type: 'Text', text: /^ {5}same failing command retried 3× with no edit in between \(command #1\)$/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /^ {5}step cost per call \$1\.80, 56\.1× the session median \$0\.03$/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /^ {5}earlier: edit revert step 2 · read loop step 0–1 · \+1 more$/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /^ {2}\d\d:\d\d · step 4–7 · $/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /^4 of the last 4 steps touched files/ })).toBeDefined()
     expect((await ui.findAll({ type: 'Text', text: /^✓ $/ })).length).toBe(1)
     expect(await ui.find({ type: 'Text', text: /^ {3}\/tokenscope ack <#\|all> · dismiss <#\|all> · alerts hide$/ })).toBeDefined()
     await ui.unmount()
@@ -323,6 +329,26 @@ describe('tokenscope-live', () => {
     expect((await $.command.run({ command: 'tokenscope', args: 'alerts hide' })).text).toBe('tokenscope: alerts collapsed to one line')
     expect(kept.get('alertsCollapsed')).toBe(true)
     expect((await $.command.run({ command: 'tokenscope', args: 'alerts bogus' })).text).toMatch(/^usage:/)
+  })
+
+  test('alerts: a narrow pane wraps a new alert\'s whole message under it; nothing needs an ack to stay shown', async ($: any, on: any) => {
+    const clock = base(on)
+    mock.store(on)
+    on('http.fetch', () => ({ value: { status: 200, ok: true, headers: {}, text: JSON.stringify({ ...COMPACT, alerts: ALERTS }) } }))
+    await $.session.start(SESSION)
+    await clock.advance(1000)
+    const ui = await $.ui.mount({ plugin: 'tokenscope-live', surface: 'terminal', component: 'Pane', requestId: 'tokenscope-live', props: { ...PANE_PROPS, bodyColumns: 40 } })
+    const msg = (await ui.findAll({ type: 'Text', text: /^ {5}\S/ })).map((t: any) => t.text.trim())
+    // the cost jump's message, then the retry loop's, each wrapped onto several lines, whole (no "…")
+    const e = msg.findIndex((t: string) => t.startsWith('earlier: '))
+    expect(msg.slice(0, e).join(' ')).toBe('step cost per call $1.80, 56.1× the session median $0.03 ' +
+      'same failing command retried 3× with no edit in between (command #1)')
+    expect(e).toBeGreaterThan(3)
+    expect(msg.slice(0, e).every((t: string) => t.length <= 35 && !t.endsWith('…'))).toBe(true)
+    expect(msg[e]).toMatch(/^earlier: edit revert step 2/)
+    await clock.advance(60_000)   // a minute later, no ack: still there
+    expect((await ui.findAll({ type: 'Text', text: /^ {5}\S/ })).map((t: any) => t.text.trim())).toEqual(msg)
+    await ui.unmount()
   })
 
   test('alerts: all acknowledged reads green; no alerts, no section', async ($: any, on: any) => {

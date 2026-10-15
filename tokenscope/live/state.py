@@ -50,6 +50,8 @@ FOLLOW_STATUS = {"working": "running"}   # follow-view tile status: running / wa
 FOLLOW_AGENTS = 12   # subagent branches one follow tile shows (active ones first; the rest counted per step)
 FOLLOW_AGENT_STEPS = 6   # latest steps shown in a subagent branch
 FOLLOW_DEPTH = 3     # nesting levels of subagent branches in a follow tile
+TILE_KINDS = ("cost", "off_task", "looping")   # order of the alert rows at the top of a follow tile
+TILE_TRIGGERS = 4    # triggers carried per tile alert (the latest one and up to 3 earlier)
 AGENT_CALL_S = 10 * 60   # a subagent call without its result keeps the subagent active this long (a long test run)
 
 
@@ -1172,7 +1174,10 @@ class LiveState:
 
     def _tile_alerts(self, s, now):
         """A follow tile's alerts: alert_counts, and "alert_steps": {main step: worst severity of its alerts not
-        acknowledged} (a ▲ on the step, and where a jump to the alert scrolls)."""
+        acknowledged} (a ▲ on the step, and where a jump to the alert scrolls), and "items": the alerts themselves
+        (at most one per kind, cost / off-task / looping order; acknowledged ones too, with their state), drawn as a
+        block at the top of the tile: severity, rule, message, count, latest step and the earlier triggers (the
+        last TILE_TRIGGERS)."""
         al = self.alerts_public(s, now)
         marks = {}
         for a in al:
@@ -1180,7 +1185,14 @@ class LiveState:
                 k = str(a["step"])
                 if alertsmod.SEV_RANK.get(a["severity"], 0) >= alertsmod.SEV_RANK.get(marks.get(k), -1):
                     marks[k] = a["severity"]
-        return {"alerts": self.alert_counts(al), "alert_steps": marks}
+        keys = ("id", "kind", "rule", "severity", "message", "count", "step", "first", "agent", "state", "raised",
+                "active")
+        order = {k: n for n, k in enumerate(TILE_KINDS)}
+        items = [dict({k: a.get(k) for k in keys},
+                      triggers=[{k: t.get(k) for k in ("rule", "severity", "step", "first", "agent", "message")}
+                                for t in (a.get("triggers") or [])[-TILE_TRIGGERS:]])
+                 for a in sorted(al, key=lambda a: order.get(a["kind"], len(order)))]
+        return {"alerts": dict(self.alert_counts(al), items=items), "alert_steps": marks}
 
     def _follow_early(self, s, early, ctx):
         """The steps before a tile's latest ones that launched a subagent still active (a background agent the main

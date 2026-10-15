@@ -3,7 +3,8 @@
 // count, its latest message and step, a severity that only rises; with its state), "needs attention"
 // (the sessions with alerts not acknowledged, worst first), ack / dismiss per alert and "ack all" (POST
 // /api/alerts/ack|dismiss), and a collapsed state kept in localStorage. Also the per-session badge (unacknowledged
-// counts by kind in the worst severity's colour) the board cards and follow tiles draw.
+// counts by kind in the worst severity's colour) the board cards and follow tiles draw, and the block of a follow
+// tile's own alerts at its top (tileBlock).
 (function () {
   "use strict";
   var POLL_MS = 2000;
@@ -266,7 +267,65 @@
     return {el: root, refresh: refresh, setCollapsed: setCollapsed, isCollapsed: function () { return collapsed; }};
   }
 
-  window.TSAlerts = {panel: panel, badge: badge, mark: mark, api: api, ruleName: ruleName, clock: clock};
+  // A follow tile's own alerts, as a block at its top: one row per alert (at most one per kind: cost, off-task,
+  // looping), coloured by severity, with the kind, rule, ×N, "↻ back", the latest step's link, the whole message
+  // (wrapped) and the earlier triggers (clamped). Acknowledged ones stay, dimmed and one line of message.
+  // items: the tile's alerts.items; opts: {onJump(alert): show its step in the tile, stepHref(alert)}
+  function tileBlock(host, items, opts) {
+    opts = opts || {};
+    items = Array.isArray(items) ? items : [];
+    var key = JSON.stringify(items.map(function (a) { return [a.id, a.state, a.severity, a.rule, a.message, a.step, a.first, a.count, a.raised,
+      (a.triggers || []).length]; }));
+    if (host._key === key) return;
+    var was = host._sig || null, sig = {};
+    host._key = key;
+    host.innerHTML = "";
+    host.style.display = items.length ? "" : "none";
+    items.forEach(function (a) {
+      sig[a.id] = [a.count, a.severity, a.step, a.raised].join("|");
+      var upd = was && a.state === "new" && was[a.id] !== sig[a.id];
+      var r = el("div", "talrow " + (a.severity || "warning") + " " + (a.state || "new") + (upd ? " fresh" : ""));
+      r.setAttribute("data-id", a.id);
+      r.setAttribute("data-kind", a.kind);
+      var top = el("div", "tar1");
+      top.appendChild(el("span", "tsev", (a.severity === "critical" ? "▲▲ " : "▲ ") + (a.severity || "warning")));
+      top.appendChild(el("span", "akind k-" + a.kind, KIND_LONG[a.kind] || a.kind));
+      top.appendChild(el("b", "arule", ruleName(a)));
+      if (a.count > 1) {
+        var cn = top.appendChild(el("span", "acount", "×" + a.count));
+        cn.title = "fired " + a.count + " times in this session (latest trigger shown)";
+      }
+      if (a.raised && a.state === "new") top.appendChild(el("span", "araised", "↻ back"));
+      if (a.state === "acked") top.appendChild(el("span", "aacked", "✓ acked"));
+      var st = where(a);
+      if (st) {
+        var link = el("a", "astep", st + " ↗");
+        link.href = opts.stepHref ? opts.stepHref(a) : "/s/" + encodeURIComponent(a.sid || "") + "#step=" + a.step;
+        link.title = "jump to the latest trigger's step";
+        link.onclick = function (e) {
+          e.stopPropagation();
+          if (opts.onJump && opts.onJump(a) !== false) e.preventDefault();
+        };
+        top.appendChild(link);
+      }
+      r.appendChild(top);
+      r.appendChild(el("div", "tmsg", a.message || ""));
+      var ts = Array.isArray(a.triggers) ? a.triggers.slice(0, -1).reverse() : [];
+      if (ts.length && a.state === "new") {
+        var more = (a.count || ts.length + 1) - 1 - ts.length;
+        var er = el("div", "tearlier", "earlier: " + ts.map(function (t) { return ruleName(t) + (t.step != null ? " " + where(t) : ""); }).join(" · ") +
+          (more > 0 ? " · +" + more + " more" : ""));
+        er.title = ts.map(function (t) { return "[" + t.severity + "] " + ruleName(t) + " " + where(t) + ": " + t.message; }).join("\n");
+        r.appendChild(er);
+      }
+      r.title = "click to show the latest trigger's step in this tile";
+      r.onclick = function (e) { e.stopPropagation(); if (opts.onJump) opts.onJump(a); };
+      host.appendChild(r);
+    });
+    host._sig = sig;
+  }
+
+  window.TSAlerts = {panel: panel, badge: badge, mark: mark, tileBlock: tileBlock, api: api, ruleName: ruleName, clock: clock};
 
   // the session canvas (/s/<id>): this session's alert history as a drawer; a row centres the canvas on its step
   function initCanvas() {

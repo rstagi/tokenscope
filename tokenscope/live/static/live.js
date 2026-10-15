@@ -549,7 +549,7 @@
       var tile = el("div", "ftile");
       tile.innerHTML = '<div class="fth"><span class="proj"></span><span class="fagn"></span><span class="fab"></span><span class="pillw"></span>' +
         '<span class="ftot"><b class="usd"></b> <span class="mut small cw"></span></span><button class="unpin" title="stop following">×</button></div>' +
-        '<a class="fgoal"></a><div class="fnow"></div><div class="fflow"><div class="fsteps"></div></div>' +
+        '<div class="ftal" style="display:none"></div><a class="fgoal"></a><div class="fnow"></div><div class="fflow"><div class="fsteps"></div></div>' +
         '<button class="fjump" style="display:none">↓ latest</button>';
       tile._usd = new Counter($(".usd", tile), fmtUsd);
       tile._follow = true;
@@ -581,6 +581,7 @@
         if (tile._s) updTile(tile, tile._s);
       };
       $(".unpin", tile).onclick = function (e) { e.stopPropagation(); unpin(id); };
+      tile._jump = function (step) { return focusTile(id, step); };   // an alert in the tile's block: show its step
       // the whole tile opens the session canvas (not its buttons, not a text selection)
       tile.addEventListener("click", function (e) {
         if (e.target.closest("button") || String(window.getSelection ? window.getSelection() : "")) return;
@@ -784,7 +785,13 @@
       $(".cw", tile).textContent = fmtK(s.cw) + " CW";
       var flow = $(".fsteps", tile), steps = Array.isArray(s.steps) ? s.steps : [], marks = s.alert_steps || {};
       steps.forEach(function (x) { x._al = marks[String(x.i)] || null; });
-      if (window.TSAlerts) { TSAlerts.badge($(".fab", tile), s.alerts); TSAlerts.mark(tile, s.alerts); }
+      if (window.TSAlerts) {
+        TSAlerts.badge($(".fab", tile), s.alerts); TSAlerts.mark(tile, s.alerts);
+        // the tile's alerts in full at its top; a row or its step link shows the latest trigger's step here
+        TSAlerts.tileBlock($(".ftal", tile), s.alerts && s.alerts.items, {
+          stepHref: function (a) { return SRC.sessionHref(s.id) + "#step=" + a.step + (a.agent ? "&agent=" + encodeURIComponent(a.agent) : ""); },
+          onJump: function (a) { return tile._jump ? tile._jump(a.agent ? null : a.step) : false; }});
+      }
       var added = syncSteps(flow, steps, tile._nodes, tile, s.intents, "m");
       var ar = $(".fagn", tile);
       ar.textContent = s.agents_running ? s.agents_running + " subagent" + (s.agents_running > 1 ? "s" : "") + " running" : "";

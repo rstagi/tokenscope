@@ -244,6 +244,17 @@ class TestStateHistory(unittest.TestCase):
         tile = state.follow_tile(s)
         self.assertEqual(tile["alerts"]["new"], 1)
         self.assertEqual(set(tile["alert_steps"]), {str(al[2]["step"])})   # the latest trigger's step
+        # the tile's own alerts, in full: the dismissed one gone, the acked one kept with its state, kind order
+        items = tile["alerts"]["items"]
+        self.assertEqual({a["id"]: a["state"] for a in items}, {al[0]["id"]: "acked", al[2]["id"]: "new"})
+        order = ("cost", "off_task", "looping")
+        self.assertEqual([a["kind"] for a in items], sorted((a["kind"] for a in items), key=order.index))
+        by = {a["id"]: a for a in al}
+        for a in items:
+            self.assertEqual((a["message"], a["count"], a["step"], a["severity"]),
+                             (by[a["id"]]["message"], by[a["id"]]["count"], by[a["id"]]["step"], by[a["id"]]["severity"]))
+            self.assertLessEqual(len(a["triggers"]), 4)
+            self.assertEqual(a["triggers"][-1]["step"], a["step"])   # the latest trigger last
         h = state.alert_history()
         self.assertEqual(h["new"], 1)
         self.assertEqual(h["sessions"][0]["id"], s.id)
@@ -281,6 +292,9 @@ class TestStateHistory(unittest.TestCase):
             self.assertGreater(loop2["step"], loop["step"])
             self.assertEqual(loop2["rule"], "retry")
             self.assertEqual(loop2["state"], "acked")   # same severity: not raised again
+            tl = [a for a in L.state.follow_tile(s)["alerts"]["items"] if a["kind"] == "looping"]
+            self.assertEqual([(a["count"], a["step"], a["state"]) for a in tl], [(loop2["count"], loop2["step"], "acked")])
+            self.assertEqual([t["rule"] for t in tl[0]["triggers"]][-1], "retry")
             L.stop.set()
         finally:
             shutil.rmtree(d, ignore_errors=True)
@@ -458,6 +472,55 @@ class TestBrowser(unittest.TestCase):
             pg.locator(".cside .alrow", has_text="cost jump").click()
             pg.wait_for_selector(".panel .palert", timeout=5000)
             self.assertIn("cost jump", pg.locator(".panel .palert").first.inner_text())
+            self.assertEqual(errors, [])
+            b.close()
+
+    def test_follow_tile_shows_its_alerts(self):
+        """A follow tile draws its own alerts as a block at its top: one row per kind, the whole message, ×N,
+        the earlier triggers and a step link that shows the step in the tile; acknowledged ones dimmed."""
+        from playwright.sync_api import sync_playwright
+        show = alerts_synth.SESSIONS["showcase"][:8]
+        st = self.live.state
+        sess = st.sessions[alerts_synth.SESSIONS["showcase"]]
+        st.alert_store.reopen([a["id"] for a in st.alerts_public(sess)])
+        with sync_playwright() as p:
+            try:
+                b = p.chromium.launch()
+            except Exception as e:  # noqa: BLE001 - browsers not downloaded
+                self.skipTest("no Chromium for Playwright: %s" % e)
+            errors = []
+            pg = b.new_page(viewport={"width": 1440, "height": 1000})
+            pg.on("pageerror", lambda e: errors.append(str(e)))
+            pg.goto(self.base + "/follow?s=" + show)
+            pg.wait_for_selector(".ftile .ftal .talrow", timeout=10000)
+            # the tile's own alerts at its top: one row per kind, the whole message, ×N, earlier, the step link
+            tile = pg.locator(".ftile").first
+            rows = tile.locator(".ftal .talrow")
+            hist = st.alerts_public(sess)
+            self.assertEqual(rows.count(), len(hist))
+            self.assertLessEqual(rows.count(), 3)
+            lrow = tile.locator(".ftal .talrow[data-kind=looping]")
+            la = next(a for a in hist if a["kind"] == "looping")
+            self.assertEqual(lrow.locator(".tmsg").inner_text(), la["message"])   # not truncated
+            self.assertEqual(lrow.get_attribute("class").split()[1:], [la["severity"], "new"])
+            self.assertIn("×%d" % la["count"], lrow.inner_text())
+            self.assertIn("earlier: ", lrow.inner_text())
+            self.assertIn("step %d" % la["step"], lrow.locator(".astep").inner_text())
+            self.assertGreaterEqual(tile.locator(".fsteps .fint").count(), 1)   # the intents are still there
+            top = pg.evaluate("[...document.querySelector('.ftile').children].map(e => e.className)")
+            self.assertLess(top.index("ftal"), top.index("fflow"))   # above the flow
+            lrow.locator(".astep").click()
+            pg.wait_for_selector(".ftile .fnode.afocus, .ftile .fint.afocus", timeout=5000)
+            self.assertEqual(pg.url.split("?")[0], self.base + "/follow")   # stayed on the follow view
+            # acknowledged: still in the tile, dimmed, without its earlier triggers
+            pg.request.post(self.base + "/api/alerts/ack", data={"ids": [la["id"]]})   # as the alerts section does
+            pg.wait_for_selector(".ftile .ftal .talrow.acked[data-kind=looping]", timeout=10000)
+            self.assertEqual(lrow.locator(".tearlier").count(), 0)
+            self.assertIn("✓ acked", lrow.inner_text())
+            # dismissed: gone from the tile
+            pg.request.post(self.base + "/api/alerts/dismiss", data={"ids": [la["id"]]})
+            pg.wait_for_function("!document.querySelector('.ftile .ftal .talrow[data-kind=looping]')", timeout=10000)
+            self.assertEqual(rows.count(), len(hist) - 1)
             self.assertEqual(errors, [])
             b.close()
 
