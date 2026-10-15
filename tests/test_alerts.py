@@ -193,14 +193,16 @@ class TestCost(unittest.TestCase):
         # a long step of ordinary calls: a jump per step, none per call
         long = steps_of([0.1] * 7 + [1.6])
         long[7].turns = 16
-        self.assertTrue(run(Context(config=cfg(), steps=long), "cost")[0].message.endswith("over 16 calls"))
-        self.assertEqual(run(Context(config=cfg(**{"cost.jump_per_turn": True}), steps=long), "cost"), [])
+        self.assertEqual(run(Context(config=cfg(), steps=long), "cost"), [])   # per call by default
+        per_step = cfg(**{"cost.jump_per_turn": False})
+        self.assertTrue(run(Context(config=per_step, steps=long), "cost")[0].message.endswith("over 16 calls"))
+        self.assertTrue(A.DEFAULTS["cost"]["jump_per_turn"])
         one = steps_of([0.1] * 7 + [1.6])
-        got = run(Context(config=cfg(**{"cost.jump_per_turn": True}), steps=one), "cost")
+        got = run(Context(config=cfg(), steps=one), "cost")
         self.assertEqual(got[0].message, "step cost per call $1.60, 16.0\u00d7 the session median $0.10")
         # unpriced model: cost-weighted tokens instead, with their own floor
         un = [StepFacts(i=i, usd=0.0, cw=c) for i, c in enumerate([20e3] * 7 + [400e3])]
-        got = run(Context(config=cfg(), steps=un), "cost")
+        got = run(Context(config=cfg(**{"cost.jump_per_turn": False}), steps=un), "cost")
         self.assertEqual((got[0].details["metric"], got[0].message), ("cw", "step cost 400k CW, 20.0\u00d7 the session median 20k CW"))
         self.assertEqual(run(Context(config=cfg(**{"cost.jump_floor_cw": 500000}), steps=un), "cost"), [])
 
@@ -220,8 +222,15 @@ class TestCost(unittest.TestCase):
             x.group = 0
         groups = [{"first": 0, "last": 2, "usd": 6.0, "cw": 6e5, "cat": "change"}]
         got = run(Context(config=cfg(**{"cost.jump": False}), steps=steps, groups=groups), "cost")
+        # an intent points at the step that took it over the threshold (the group: 1 + 2 + 3 >= 5 at step 2)
         self.assertEqual([(a.rule, a.first, a.step) for a in got], [("intent_usd", 3, 3), ("intent_usd", 0, 2)])
         self.assertEqual(got[1].message, "[CHANGE] intent cost $6.00 (threshold $5.00) over 3 steps")
+        groups[0]["last"] = 4
+        for x in steps[3:]:
+            x.group = 0
+        groups[0]["usd"] = 12.5
+        got = run(Context(config=cfg(**{"cost.jump": False}), steps=steps, groups=groups), "cost")
+        self.assertEqual([(a.rule, a.first, a.step, a.severity) for a in got], [("intent_usd", 0, 2, "critical")])
         self.assertEqual(run(Context(config=cfg(**{"cost.jump": False}), steps=steps_of([4.9, 1.0])), "cost"), [])
 
 
@@ -512,7 +521,7 @@ class TestSyntheticTraces(unittest.TestCase):
         for name, want in EXPECTED.items():
             state, s = replay(fixture(name), redact=True, alerts_config=on)
             got = state.alerts_public(s)
-            self.assertEqual({(a["kind"], a["rule"]) for a in got}, want, name)
+            self.assertEqual({(a["kind"], m["rule"]) for a in got for m in a["reasons"]}, want, name)
             self.assertTrue(all(a["step"] is not None for a in got), name)
         state, s = replay(fixture("off-task"), redact=True)   # default config: off-task stays off
         self.assertEqual(state.alerts_public(s), [])
@@ -537,7 +546,9 @@ class TestSyntheticTraces(unittest.TestCase):
             self.assertEqual(len(compact["alerts"]), 5)
             self.assertEqual(flow["alerts"], compact["alerts"])
             self.assertEqual({"id", "kind", "rule", "severity", "message", "step", "first", "agent", "details",
-                              "active"}, set(compact["alerts"][0]))
+                              "active", "reasons", "n", "ts", "at", "intent", "state", "raised", "live"},
+                             set(compact["alerts"][0]))
+            self.assertEqual({a["state"] for a in compact["alerts"]}, {"new"})
             # the newest ones (retry at the last step, the read loop just before it) are active
             act = {a["rule"] for a in compact["alerts"] if a["active"]}
             self.assertIn("retry", act)
@@ -546,7 +557,14 @@ class TestSyntheticTraces(unittest.TestCase):
             self.assertEqual((row["alerts"]["n"], row["alerts"]["worst"]), (5, "warning"))
             self.assertTrue(row["alerts"]["top"])
             self.assertEqual(state.follow_tile(s, now)["alerts"]["n"], 5)
-            blob = json.dumps(compact["alerts"]) + json.dumps(row["alerts"])
+            # "intent" is the step's label as the views show it (redaction-aware), not alert text
+            blob = json.dumps([{k: v for k, v in a.items() if k != "intent"} for a in compact["alerts"]]) + \
+                json.dumps(row["alerts"])
+            steps = {x["i"]: x for x in compact["intents"]["steps"]}
+            groups = compact["intents"]["groups"]
+            for a in compact["alerts"]:
+                g = next((g for g in groups if g["first"] <= a["step"] <= g["last"]), None)
+                self.assertEqual(a["intent"]["label"], A.scrub((g or steps[a["step"]])["label"]))
             for bad in ("/work", "demo", "invoice", "session_store", "colors", "tax.py", "npm", "eslint", "lint"):
                 self.assertNotIn(bad, blob)
 
@@ -564,7 +582,7 @@ class TestSyntheticTraces(unittest.TestCase):
                                        "--alert", "off_task.use_prompt=true"]), 0)
         text = out.getvalue()
         self.assertIn("a1e70008: 5 alerts", text)
-        self.assertIn("[critical] cost/jump step 6: step cost $1.69", text)
+        self.assertIn("[critical] cost/jump step 6: step cost per call $0.84, 26.3\u00d7 the session median $0.03", text)
         out = io.StringIO()
         with redirect_stdout(out):
             self.assertEqual(cli.main(["alerts", "a1e70008", "--root", FIXTURES, "--json", "--no-alerts"]), 0)
@@ -629,7 +647,8 @@ class TestApi(unittest.TestCase):
         board = {r["id"]: r for r in self.get("/api/board")["sessions"]}
         self.assertEqual(board[sid]["alerts"]["n"], 5)
         self.assertEqual(board[alerts_synth.SESSIONS["clean"]]["alerts"], {"n": 0, "active": 0, "worst": None,
-                                                                           "by_kind": {}, "top": []})
+                                                                           "by_kind": {}, "top": [], "new": 0,
+                                                                           "new_by_kind": {}, "new_worst": None})
         follow = self.get("/api/follow?s=" + sid[:8])
         self.assertEqual(follow["sessions"][0]["alerts"]["n"], 5)
 

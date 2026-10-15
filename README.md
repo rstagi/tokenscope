@@ -94,9 +94,10 @@ step (or step range) it is about:
   `cost.jump_warmup` of them: the step must cost at least `cost.jump_ratio` x their median, have a robust z-score of
   at least `cost.jump_z` on log costs (median / MAD of ln cost; step costs are heavy-tailed), be at least
   `cost.jump_max_ratio` x the largest of them (a new high, not a spike size the session already had) and cost at
-  least `cost.jump_floor_usd` (tiny steps never fire). On real traces most jumps are long steps of ordinary
-  calls (the message says `over N calls`); `cost.jump_per_turn` compares cost per call instead, so only expensive
-  calls fire. It fires while the step is still open, so you see it live.
+  least `cost.jump_floor_usd` (tiny steps never fire). By default (`cost.jump_per_turn = true`) the cost compared
+  is per API call (the step's cost / its calls), so only expensive calls fire: per step, most jumps on real traces
+  were long steps of ordinary calls. With `cost.jump_per_turn = false` per-step spend is compared (a long step's
+  message then says `over N calls`). It fires while the step is still open, so you see it live.
   Unpriced models fall back to cost-weighted tokens (`cost.jump_floor_cw`).
 - **off-task** (opt-in: `--off-task` or `off_task.enabled = true`): recent steps touch only files whose path words
   share nothing with the active intent (the declared intent, else the in-progress todo item; with
@@ -164,7 +165,7 @@ default (valid TOML). Unknown keys and wrong types are errors.
 | `cost.jump_floor_usd` | `0.75` | and costs at least this much $ (metric usd) |
 | `cost.jump_floor_cw` | `250000` | and at least this many cost-weighted tokens (metric cw) |
 | `cost.jump_subagents` | `true` | count the cost of the subagents a step launched as the step's cost |
-| `cost.jump_per_turn` | `false` | compare cost per API call (turn) instead of per step: only expensive calls fire, not long steps of ordinary calls |
+| `cost.jump_per_turn` | `true` | compare cost per API call (turn) instead of per step: only expensive calls fire, not long steps of ordinary calls (false: per-step spend) |
 | `off_task.enabled` | `false` | off-task alerts on/off (off by default; also --off-task) |
 | `off_task.window` | `4` | recent steps with files looked at |
 | `off_task.min_unrelated` | `3` | of which at least this many touch only files unrelated to the active intent |

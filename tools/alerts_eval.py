@@ -10,7 +10,8 @@ per-session `llm_request` / `invoke` events (another harness's trace export: usa
 error + result size per call), turned into transcript records first; no prompts there, and a call's result is only
 known by its size, so "same result" means "same size".
 
-Prints per trace (--per-trace) and in total the alerts per kind and rule. Traces are named by an ordinal and their
+Prints per trace (--per-trace) and in total the alerts per kind and rule: per rule every reason (the alerts as the
+detectors fire them), per kind also the grouped alerts the views show (alerts.group: one per kind, thread and step). Traces are named by an ordinal and their
 session id prefix, never by project or path; messages are the alerts' own (already privacy-safe) text. --sample N
 prints up to N alerts per rule with their step and details, for hand-checking.
 """
@@ -104,7 +105,7 @@ def event_sessions(path):
 
 def evaluate(state, s, source, n):
     steps, _ = state.steps(s, final=True) if s.main.turn_steps else ([], [])
-    al = state.alerts_public(s)
+    al = state.alerts_public(s, limit=10 ** 6)
     return {"trace": "%s#%d" % (source, n), "sid": s.id[:8], "steps": len(steps), "agents": len(s.agents),
             "usd": round(s.totals["usd"], 2), "alerts": al}
 
@@ -163,6 +164,11 @@ def _defaults(overrides, off_task):
     return cfg
 
 
+def reasons(x):
+    """The detector alerts a (grouped) alert holds."""
+    return x.get("reasons") or [x]
+
+
 def report(rows, a, cfg):
     kinds = alertsmod.KINDS
     by_src = defaultdict(list)
@@ -173,7 +179,7 @@ def report(rows, a, cfg):
         print("\n%-12s %-9s %6s %5s %9s  %s" % ("trace", "session", "steps", "agts", "usd", "  ".join(kinds)))
         for r in rows:
             c = Counter(x["kind"] for x in r["alerts"])
-            rules = Counter(x["rule"] for x in r["alerts"])
+            rules = Counter(m["rule"] for x in r["alerts"] for m in reasons(x))
             print("%-12s %-9s %6d %5d %9.2f  %s   %s" % (
                 r["trace"], r["sid"], r["steps"], r["agents"], r["usd"],
                 "  ".join("%*d" % (len(k), c.get(k, 0)) for k in kinds),
@@ -184,15 +190,17 @@ def report(rows, a, cfg):
         print("%s: %d traces, %d main steps" % (src, len(rs), steps))
         per = defaultdict(lambda: [0, 0])
         for r in rs:
-            for rule in set((x["kind"], x["rule"]) for x in r["alerts"]):
+            for rule in set((x["kind"], m["rule"]) for x in r["alerts"] for m in reasons(x)):
                 per[rule][0] += 1
             for x in r["alerts"]:
-                per[(x["kind"], x["rule"])][1] += 1
+                for m in reasons(x):
+                    per[(x["kind"], m["rule"])][1] += 1
         for kind in kinds:
             sub = {k: v for k, v in per.items() if k[0] == kind}
             tot = sum(v[1] for v in sub.values())
+            grouped = sum(1 for r in rs for x in r["alerts"] if x["kind"] == kind)
             ses = sum(1 for r in rs if any(x["kind"] == kind for x in r["alerts"]))
-            print("  %-9s %4d alerts in %3d traces  %s" % (kind, tot, ses, "  ".join(
+            print("  %-9s %4d alerts, %4d grouped, in %3d traces  %s" % (kind, tot, grouped, ses, "  ".join(
                 "%s %d (%d traces)" % (k[1], v[1], v[0]) for k, v in sorted(sub.items()))))
     if a.sample:
         rnd = random.Random(a.seed)

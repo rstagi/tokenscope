@@ -11,7 +11,13 @@ Endpoints (see docs/live-spec.md):
                                  totals and status in one request; subagent branches, and while one runs "folds"
                                  of finished main steps (state.follow_branches / follow_folds)
   GET /api/session/<id>          full session model (+ "seq"); ?since=<seq> -> only new / updated steps
-  GET /api/session/<id>/alerts   the session's alerts (tokenscope/alerts.py) with "active", plus the config in use
+  GET /api/session/<id>/alerts   the session's alert history (tokenscope/alerts.py, grouped; alertstore.py: "state"
+                                 new / acked, "active", "n", "ts", "intent") plus the config in use
+  GET /api/alerts                the alert history across sessions (state.alert_history): ?s=<id>,... only those,
+                                 ?state=all also the dismissed ones, &limit=N; "sessions": who needs attention
+  POST /api/alerts/ack           acknowledge: {"ids": [...]} or {"all": true[, "sessions": [<id>, ...]]}
+  POST /api/alerts/dismiss       dismiss (out of the history views), same body; POST /api/alerts/reopen {"ids"}
+                                 POSTs want Content-Type: application/json (no cross-site form posts)
   GET /api/session/<id>/compact  small payload for a Claude Code mod (and the session page: ?ops=all -> every
                                  intent step with its calls)
   GET /api/session/<id>/flow     the session canvas payload: compact + every call + header + subagent sub-flows;
@@ -40,6 +46,7 @@ from ..parse import resolve_root
 from . import goalname
 from .goalname import HaikuNamer, mask
 from .hookevents import HookEvents
+from .alertstore import AlertStore, default_path as alerts_history_path
 from .state import LiveState
 from .tail import Tailer
 from ..stepnames import StepNamer, label_batch
@@ -47,6 +54,7 @@ from ..stepnames import StepNamer, label_batch
 STATIC = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
 POLL_S = 0.5
 HEARTBEAT_S = 15
+ALERTS_SYNC_S = 1.0   # poll loop: sessions that changed are synced into the alert history at most this often
 TOP_REFRESH_S = 60   # /api/top rebuilds the cross-session index (incrementally) at most this often
 
 
@@ -59,7 +67,8 @@ class Live:
 
     def __init__(self, root, redact=True, since_minutes=120, haiku=False,
                  events_path=None, hooks=True, project="*", xhints=False, index_root=None, skills_dirs=(),
-                 cached_labels=False, odd_goals=False, cached_goals=False, goal_namer=None, alerts_config=None):
+                 cached_labels=False, odd_goals=False, cached_goals=False, goal_namer=None, alerts_config=None,
+                 alerts_history=None):
         self.lock = threading.Lock()
         # goal names from Haiku (disk-cached by prompt): every goal with --haiku; with --haiku-odd (odd_goals) only
         # those whose prompt reads oddly as a label (goalname.reads_oddly), goalname.goal_label until it arrives;
@@ -78,7 +87,8 @@ class Live:
             self.step_namer = StepNamer(self._steps_named, labeller=functools.partial(label_batch, cache_only=True))
         self.state = LiveState(redact=redact, on_goal=self.namer.request if self.namer else None,
                                on_prompt=self._name_prompt if self.namer else None,
-                               model_labels=self.step_namer is not None, alerts_config=alerts_config)
+                               model_labels=self.step_namer is not None, alerts_config=alerts_config,
+                               alert_store=AlertStore(alerts_history))   # alerts_history: a file, None: memory
         self.suggester = None
         if xhints:   # cross-session recap hints (tokenscope/xindex.py): the index builds in the background
             from ..xindex import Suggester
@@ -95,6 +105,7 @@ class Live:
         self.top_built = 0.0     # when its last build finished
         self.top_building = False
         self.top_lock = threading.Lock()
+        self.alerts_synced = 0.0
 
     def _name_prompt(self, sid, n, text):
         self.namer.request((sid, n), text)   # cached per (session, prompt n); keyword name until it arrives
@@ -129,6 +140,9 @@ class Live:
             for ev in evs:
                 self.state.apply_hook(ev)
             self._label_steps()
+            if time.time() - self.alerts_synced >= ALERTS_SYNC_S:   # the history records alerts nobody watches
+                self.alerts_synced = time.time()
+                self.state.sync_alerts()
             new = self.state.drain()
             msgs = [("step", {"session": sid, "step": self.state.public_step(st)}) for sid, st in new]
         if msgs:
@@ -253,7 +267,8 @@ class Handler(BaseHTTPRequestHandler):
                 if len(parts) == 4 and parts[3] == "flow":
                     return self._json(st.session_flow(s))
                 if len(parts) == 4 and parts[3] == "alerts":
-                    return self._json({"alerts": st.alerts_public(s), "config": st.alerts_config})
+                    return self._json({"alerts": st.alerts_public(s), "counts": st.alert_counts(st.alerts_public(s)),
+                                       "config": st.alerts_config})
                 if len(parts) == 4:
                     if parts[3] != "compact":
                         return self._json({"error": "not found"}, 404)
@@ -267,11 +282,56 @@ class Handler(BaseHTTPRequestHandler):
                         return self._json({"error": "bad since"}, 400)
                     return self._json(st.session_since(s, n))
                 return self._json(st.session_full(s))
+        if parts == ["api", "alerts"]:
+            q = parse_qs(u.query)
+            ids = [x for v in q.get("s", []) for x in v.split(",") if x.strip()]
+            states = ("new", "acked", "dismissed") if q.get("state") == ["all"] else ("new", "acked")
+            try:
+                limit = min(5000, max(1, int((q.get("limit") or ["500"])[0])))
+            except ValueError:
+                return self._json({"error": "bad limit"}, 400)
+            with live.lock:
+                sids = [s.id for s in (st.find(x) for x in ids) if s is not None] + \
+                    [x for x in ids if st.find(x) is None] if ids else None
+                return self._json(st.alert_history(sids, states, limit))
         if parts == ["api", "top"]:
             return self._top(parse_qs(u.query))
         if parts == ["events"]:
             return self._events()
         return self._json({"error": "not found"}, 404)
+
+    def do_POST(self):  # noqa: N802 - http.server API
+        u = urlparse(self.path)
+        parts = [p for p in u.path.split("/") if p]
+        if len(parts) != 3 or parts[:2] != ["api", "alerts"] or parts[2] not in ("ack", "dismiss", "reopen"):
+            return self._json({"error": "not found"}, 404)
+        # JSON only: a cross-site page cannot send it without a CORS preflight this server never answers
+        if (self.headers.get("Content-Type") or "").split(";")[0].strip().lower() != "application/json":
+            return self._json({"error": "want application/json"}, 415)
+        try:
+            n = int(self.headers.get("Content-Length") or 0)
+            body = json.loads(self.rfile.read(min(n, 1 << 20)).decode("utf-8") or "{}") if n else {}
+        except (ValueError, UnicodeDecodeError):
+            return self._json({"error": "bad json"}, 400)
+        if not isinstance(body, dict):
+            return self._json({"error": "bad json"}, 400)
+        ids = body.get("ids")
+        if ids is not None and (not isinstance(ids, list) or not all(isinstance(x, str) for x in ids)):
+            return self._json({"error": "ids is a list of alert ids"}, 400)
+        if ids is None and not body.get("all"):
+            return self._json({"error": "give ids or all"}, 400)
+        live, st = self.live, self.live.state
+        with live.lock:
+            sids = None
+            if body.get("sessions"):
+                sids = [s.id if s else x for x, s in ((x, st.find(str(x))) for x in body["sessions"])]
+            store = st.alert_store
+            if parts[2] == "reopen":
+                n = store.reopen(ids or [])
+            else:
+                n = (store.ack if parts[2] == "ack" else store.dismiss)(ids, sids)
+            st.version += 1   # the board stream pushes the new counts
+            return self._json({"ok": True, "changed": n, "version": store.version})
 
     def _replay(self, sid, q):
         with self.live.lock:
@@ -392,6 +452,11 @@ def add_arguments(p):
                         "(repeatable)")
     p.add_argument("--no-xhints", action="store_true", help="no cross-session recap hints (no index is built)")
     alertsmod.add_arguments(p)
+    p.add_argument("--alerts-history", metavar="FILE", default=None,
+                   help="alert history with acknowledgements (JSON lines; default $TOKENSCOPE_ALERTS_HISTORY, else "
+                        "~/.cache/tokenscope/alerts-history.jsonl)")
+    p.add_argument("--no-alerts-history", action="store_true",
+                   help="keep the alert history in memory only (lost when the server stops)")
     return p
 
 
@@ -409,7 +474,9 @@ def main(args=None):
                 since_minutes=args.since_minutes, project=args.project, haiku=args.haiku,
                 xhints=not args.no_xhints, index_root=args.index_root, skills_dirs=args.skills_dir,
                 cached_labels=True, odd_goals=getattr(args, "haiku_odd", False), cached_goals=True,
-                alerts_config=alerts_config)
+                alerts_config=alerts_config,
+                alerts_history=None if getattr(args, "no_alerts_history", False) else
+                os.path.expanduser(getattr(args, "alerts_history", None) or alerts_history_path()))
     srv = make_server(live, args.host, args.port)
     threading.Thread(target=live.run, daemon=True).start()
     print("tokenscope live: http://%s:%d/  (redaction %s; Ctrl-C to stop)" % (

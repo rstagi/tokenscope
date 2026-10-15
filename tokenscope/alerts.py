@@ -60,7 +60,7 @@ DEFAULTS = {
         "jump_floor_usd": 0.75,
         "jump_floor_cw": 250_000,
         "jump_subagents": True,
-        "jump_per_turn": False,
+        "jump_per_turn": True,
     },
     "off_task": {
         "enabled": False,
@@ -104,7 +104,7 @@ KEYS = {
     "cost.jump_floor_cw": "and at least this many cost-weighted tokens (metric cw)",
     "cost.jump_subagents": "count the cost of the subagents a step launched as the step's cost",
     "cost.jump_per_turn": "compare cost per API call (turn) instead of per step: only expensive calls fire, not "
-                          "long steps of ordinary calls",
+                          "long steps of ordinary calls (false: per-step spend)",
     "off_task.enabled": "off-task alerts on/off (off by default; also --off-task)",
     "off_task.window": "recent steps with files looked at",
     "off_task.min_unrelated": "of which at least this many touch only files unrelated to the active intent",
@@ -493,13 +493,22 @@ class CostDetector:
                 money(ctx.session_usd), money(c["session_usd"])), step=at, first=at,
                 details={"usd": round(ctx.session_usd, 4), "threshold": c["session_usd"]}, key="session"))
         if c["intent_usd"] > 0:
+            usd = {x.i: x.usd for x in ctx.steps}
             for node in intent_nodes(ctx):
                 if node["usd"] >= c["intent_usd"]:
                     sev = "critical" if node["usd"] >= 2 * c["intent_usd"] else "warning"
                     n = node["last"] - node["first"] + 1
+                    # it points at the step that took the intent over the threshold (stable as the intent grows,
+                    # so it groups with that step's other alerts), else the intent's last step
+                    run, at = 0.0, node["last"]
+                    for i in range(node["first"], node["last"] + 1):
+                        run += usd.get(i, 0.0)
+                        if run >= c["intent_usd"]:
+                            at = i
+                            break
                     out.append(Alert("cost", "intent_usd", sev, "[%s] intent cost %s (threshold %s) over %d step%s" % (
                         node["cat"].upper(), money(node["usd"]), money(c["intent_usd"]), n, "s" if n != 1 else ""),
-                        step=node["last"], first=node["first"],
+                        step=at, first=node["first"],
                         details={"usd": round(node["usd"], 4), "threshold": c["intent_usd"], "steps": n},
                         key="intent:%d" % node["first"]))
         if c["jump"]:
@@ -842,18 +851,73 @@ def run(ctx, names=None):
     return out[:cfg.get("max", 50)]
 
 
-def public(alerts, last_step=None, agents_live=(), active_steps=3):
-    """Alerts as dicts with "active": a session-level alert always, a main-thread one while its step is within
-    `active_steps` of the newest step, a subagent one while that subagent works."""
-    out = []
+RULE_RANK = {r: i for i, r in enumerate(("session_usd", "intent_usd", "jump"))}
+
+
+def _anchor(a):
+    """The step an alert fired at, for grouping: a cost alert's step (fixed once fired), else the step its episode
+    began at (a loop's latest step moves as it goes on)."""
+    return a.step if a.kind == "cost" else a.first if a.first is not None else a.step
+
+
+def group(alerts):
+    """Alerts of one kind firing at the same step of the same thread, merged: [[lead, *others]], the lead the most
+    severe (then session_usd, intent_usd, jump, the rest), groups in the order of their first member. One expensive
+    step that passes the session and intent thresholds and is a jump is one alert with three reasons."""
+    out, at = [], {}
     for a in alerts:
-        d = a.to_dict()
-        if a.rule == "session_usd":
-            d["active"] = True
-        elif a.agent is not None:
-            d["active"] = a.agent in agents_live
+        anc = _anchor(a)
+        if anc is None:
+            out.append([a])
+            continue
+        k = (a.kind, a.agent, anc)
+        if k in at:
+            at[k].append(a)
         else:
-            d["active"] = last_step is not None and a.step is not None and a.step >= last_step - active_steps + 1
+            at[k] = [a]
+            out.append(at[k])
+    for g in out:
+        g.sort(key=lambda a: (-SEV_RANK.get(a.severity, 0), RULE_RANK.get(a.rule, len(RULE_RANK))))
+    return out
+
+
+def group_id(members):
+    """A grouped alert's id: a cost group is the step it fired at (the same id whichever reasons join it later); a
+    single other alert keeps its own id; others hash their kind, thread and step."""
+    a = members[0]
+    if a.kind == "cost" and a.step is not None:
+        return hashlib.blake2b(("cost|%s|%s" % (a.agent, a.step)).encode(), digest_size=5).hexdigest()
+    if len(members) == 1:
+        return a.id
+    return hashlib.blake2b(("group|%s|%s|%s" % (a.kind, a.agent, _anchor(a))).encode(), digest_size=5).hexdigest()
+
+
+def _active(a, last_step, agents_live, active_steps):
+    if a.rule == "session_usd":
+        return True
+    if a.agent is not None:
+        return a.agent in agents_live
+    return last_step is not None and a.step is not None and a.step >= last_step - active_steps + 1
+
+
+def public(alerts, last_step=None, agents_live=(), active_steps=3):
+    """Alerts as dicts, grouped (group: one per kind, thread and step) with "active": a session-level alert always,
+    a main-thread one while its step is within `active_steps` of the newest step, a subagent one while that subagent
+    works. A group carries the lead's rule, message and details, the worst severity, the widest step range, and
+    "reasons": every member ({"id", "rule", "severity", "message", "details"}, the lead first); "members" are their
+    ids (history keeps a group's acknowledgement when members join)."""
+    out = []
+    for g in group(alerts):
+        lead = g[0]
+        d = lead.to_dict()
+        d["id"] = group_id(g)
+        d["severity"] = max((a.severity for a in g), key=lambda s: SEV_RANK.get(s, 0))
+        d["first"] = min(a.first if a.first is not None else a.step for a in g)
+        d["step"] = max(a.step for a in g) if all(a.step is not None for a in g) else lead.step
+        d["active"] = any(_active(a, last_step, agents_live, active_steps) for a in g)
+        d["reasons"] = [{k: m[k] for k in ("id", "rule", "severity", "message", "details")}
+                        for m in (a.to_dict() for a in g)]
+        d["members"] = [a.id for a in g]
         out.append(d)
     return out
 

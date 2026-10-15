@@ -30,6 +30,7 @@ from datetime import datetime
 from urllib.parse import urlparse
 
 from .. import alerts as alertsmod, intents, pricing, steps as stepsmod
+from .alertstore import AlertStore
 from ..xindex import named_files, prompt_words
 from ..analyze import est_tokens
 from ..parse import prompt_source, real_prompt_text
@@ -469,9 +470,12 @@ class Session:
 
 class LiveState:
     def __init__(self, redact=True, on_goal=None, on_prompt=None, clock=time.time, model_labels=False,
-                 alerts_config=None):
+                 alerts_config=None, alert_store=None):
         self.redact = redact
         self.alerts_config = alerts_config or copy.deepcopy(alertsmod.DEFAULTS)   # alerts.load_config()
+        # alert history with acknowledgement state (alertstore.py): on disk for the server, else in memory
+        self.alert_store = alert_store if alert_store is not None else AlertStore(clock=clock)
+        self.alert_synced = {}    # session id -> seq its alerts were last synced to the history at
         self.model_labels = model_labels   # True: closed steps wait for a model label (see label_requests)
         self.on_prompt = on_prompt   # callback(session_id, prompt n, text) for later prompts (Haiku naming)
         self.clock = clock
@@ -1102,10 +1106,21 @@ class LiveState:
                 "cw_series": self.cw_series(turns), **self._board_intent(s, now), **self._board_alerts(s, now)}
 
     def _board_alerts(self, s, now):
-        """A board card's alerts: counts ("alerts": alerts.counts) and the active ones' messages (at most 3)."""
+        """A board card's alerts: alert_counts, and the messages of the active ones not acknowledged (at most 3)."""
         al = self.alerts_public(s, now)
-        return {"alerts": dict(alertsmod.counts(al), top=[{k: a[k] for k in ("kind", "rule", "severity", "message")}
-                                                          for a in al if a["active"]][:3])}
+        return {"alerts": dict(self.alert_counts(al), top=[{k: a[k] for k in ("id", "kind", "rule", "severity", "message")}
+                                                           for a in al if a["active"] and a["state"] == "new"][:3])}
+
+    @staticmethod
+    def alert_counts(al):
+        """alerts.counts of a session's alert history, plus what still needs attention: "new" (not acknowledged),
+        "new_by_kind" ({kind: n}) and "new_worst" (their worst severity)."""
+        new = [a for a in al if a.get("state", "new") == "new"]
+        by = {}
+        for a in new:
+            by[a["kind"]] = by.get(a["kind"], 0) + 1
+        worst = max((a["severity"] for a in new), key=lambda v: alertsmod.SEV_RANK.get(v, 0), default=None)
+        return dict(alertsmod.counts(al), new=len(new), new_by_kind=by, new_worst=worst)
 
     @staticmethod
     def cw_series(turns, n=BOARD_SPARK_N):
@@ -1167,7 +1182,19 @@ class LiveState:
                 "cw": round(s.totals["cw"], 1), "usd": round(s.totals["usd"], 6), "turns": s.totals["turns"],
                 "started": s.started, "last_ts": s.last_ts, "seq": s.seq, "steps_n": len(steps),
                 "agents_running": sum(ctx["active"].values()) + len(ctx["pending"]) if ctx else 0,
-                "now": w, "steps": out, "folds": folds, "alerts": alertsmod.counts(self.alerts_public(s, now))}
+                "now": w, "steps": out, "folds": folds, **self._tile_alerts(s, now)}
+
+    def _tile_alerts(self, s, now):
+        """A follow tile's alerts: alert_counts, and "alert_steps": {main step: worst severity of its alerts not
+        acknowledged} (a ▲ on the step, and where a jump to the alert scrolls)."""
+        al = self.alerts_public(s, now)
+        marks = {}
+        for a in al:
+            if a["state"] == "new" and a["agent"] is None and a["step"] is not None:
+                k = str(a["step"])
+                if alertsmod.SEV_RANK.get(a["severity"], 0) >= alertsmod.SEV_RANK.get(marks.get(k), -1):
+                    marks[k] = a["severity"]
+        return {"alerts": self.alert_counts(al), "alert_steps": marks}
 
     def _follow_early(self, s, early, ctx):
         """The steps before a tile's latest ones that launched a subagent still active (a background agent the main
@@ -1535,16 +1562,101 @@ class LiveState:
         s.alerts_cache = (key, got)
         return got
 
-    def alerts_public(self, s, now=None):
-        """The "alerts" payload key: alert dicts (alerts.Alert.to_dict + "active"), newest first."""
+    def alerts_public(self, s, now=None, limit=100):
+        """The "alerts" payload key: the session's alert history (alertstore records not dismissed, newest first, at
+        most `limit`), each the alert as alerts.public last made it (grouped, "reasons") with "active" (in the
+        current run and active), "live" (in the current run), "state" (new / acked), "n", "ts" (first seen), "at"
+        (its step's time) and "intent" ({"cat", "label"} of its step's intent). The current run is synced into the
+        history first."""
         now = self.clock() if now is None else now
+        cur = self._sync_alerts(s, now)
+        live = {a["id"]: a for a in cur}
+        out = []
+        for r in self.alert_store.records([s.id])[:limit]:
+            a = live.get(r["id"])
+            d = {k: r.get(k) for k in ("id", "kind", "rule", "severity", "message", "step", "first", "agent",
+                                       "reasons", "n", "ts", "at", "intent", "state", "raised")}
+            d["details"] = (a or {}).get("details") or {}
+            d["active"] = bool(a and a["active"])
+            d["live"] = a is not None
+            out.append(d)
+        return out
+
+    def _sync_alerts(self, s, now):
+        """The session's current alerts (alerts.public) with "at" / "intent", synced into the alert history."""
         got = self.alerts(s, now)
         if not got:
             return []
-        steps, _ = self.steps(s, now) if s.main.turn_steps else ([], [])
+        steps, gs = self.steps(s, now) if s.main.turn_steps else ([], [])
         live = {a["id"] for a in s.agents.values() if self.agent_active(s, a, now)}
-        return alertsmod.public(got, steps[-1]["i"] if steps else None, live,
-                                self.alerts_config.get("active_steps", 3))
+        pub = alertsmod.public(got, steps[-1]["i"] if steps else None, live,
+                               self.alerts_config.get("active_steps", 3))
+        by_i = {x["i"]: x for x in steps}
+        for a in pub:
+            if a["agent"] is not None:
+                ag = s.agents.get(a["agent"]) or {}
+                a["at"] = ag.get("last_ts")
+                a["intent"] = {"cat": "delegate", "label": "subagent " + str(ag.get("type") or "agent")}
+                continue
+            x = by_i.get(a["step"])
+            if x is None:
+                continue
+            g = next((g for g in gs if g["first"] <= x["i"] <= g["last"]), None)
+            a["at"] = x.get("ts1") or x.get("ts0")
+            a["intent"] = {"cat": (g or x)["cat"], "label": alertsmod.scrub(self._lab((g or x)["label"]))}
+        key = (s.seq, s.alerts_cache[0] if s.alerts_cache else None)
+        if self.alert_synced.get(s.id) != key:
+            self.alert_store.sync(s.id, pub, {"project": self._project(s.project_raw),
+                                              "goal": s.goal["name"] if s.goal else None})
+            self.alert_synced[s.id] = key
+        return pub
+
+    def sync_alerts(self, now=None):
+        """Bring every session that changed since its last sync into the alert history (the server's poll loop:
+        alerts are kept even while nobody watches)."""
+        now = self.clock() if now is None else now
+        for s in list(self.sessions.values()):
+            k = self.alert_synced.get(s.id)
+            if k is None or k[0] != s.seq:
+                self._sync_alerts(s, now)
+                self.alert_synced.setdefault(s.id, (s.seq, None))
+
+    def alert_history(self, sids=None, states=("new", "acked"), limit=500, now=None):
+        """GET /api/alerts: alert records across sessions (or `sids`), newest first, with the session's current
+        project / goal labels when it is loaded, plus "sessions": per session with alerts, its alert_counts-like
+        summary ({"new", "acked", "total", "by_kind" (new ones), "worst" (of the new ones)}), sessions needing
+        attention (new alerts, worst first) first."""
+        now = self.clock() if now is None else now
+        self.sync_alerts(now)
+        st = self.alert_store
+        recs = st.records(sids, states)
+        sess, out = {}, []
+        for r in recs[:limit]:
+            out.append(self._alert_row(r, sess))
+        rows = []
+        for sid in sorted({r["sid"] for r in st.records(sids, ("new", "acked"))}):
+            s = self.sessions.get(sid)
+            last = next((r for r in st.records([sid], ("new", "acked"))), None)
+            rows.append(dict(st.summary(sid), id=sid, short=sid[:8],
+                             project=self._project(s.project_raw) if s else (last or {}).get("project"),
+                             goal=(s.goal["name"] if s and s.goal else None) if s else (last or {}).get("goal"),
+                             loaded=s is not None, ended=self.ended(s, now) if s else True,
+                             last_ts=(last or {}).get("ts")))
+        rows.sort(key=lambda x: (-(x["new"] > 0), -alertsmod.SEV_RANK.get(x["worst"], -1), -x["new"],
+                                 -(x["last_ts"] or 0)))
+        return {"now": now, "redacted": self.redact, "alerts": out, "sessions": rows,
+                "new": sum(x["new"] for x in rows), "version": st.version}
+
+    def _alert_row(self, r, cache):
+        sid = r["sid"]
+        if sid not in cache:
+            s = self.sessions.get(sid)
+            cache[sid] = {"project": self._project(s.project_raw), "goal": s.goal["name"] if s.goal else None} \
+                if s else {"project": r.get("project"), "goal": r.get("goal")}
+        d = {k: r.get(k) for k in ("id", "sid", "n", "kind", "rule", "severity", "message", "step", "first", "agent",
+                                   "reasons", "ts", "at", "intent", "state", "raised", "acked_ts")}
+        d.update(short=sid[:8], **cache[sid])
+        return d
 
     # ------------------------------------------------------------ idle recap (recap.py)
     def _recap_key(self, s, now):
