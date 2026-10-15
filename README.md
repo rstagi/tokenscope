@@ -45,7 +45,8 @@ truncation handled) and shows:
   context gauge, and the idle recap (costliest and slowest intent, up to 3 hints, cross-session ones marked) while the
   session waits for you. `?replay=1` replays a recorded session server-side as if it were live (about 90 s;
   `&duration=<s>`). The canvas is a vendored React Flow build (`web/canvas/`, licences in THIRD_PARTY_NOTICES.md).
-- **Alerts** (cost, off-task, looping): a banner in the pane, markers on the canvas, chips on the board. See
+- **Alerts** (cost, off-task, looping): in full at the top of each follow tile, a section in the pane, markers on
+  the canvas, chips on the board. See
   [Alerts](#alerts-cost-off-task-looping) below.
 - **Live warnings** (rare by design; a normal fail -> edit -> fail -> edit -> green session shows none; each comes
   with a short hint): `stuck_error` (the same normalised error 3+ times with no edit in between, per thread),
@@ -84,9 +85,24 @@ to `~/.cache/tokenscope-live/events.jsonl` (`$TOKENSCOPE_LIVE_EVENTS`). It never
 
 ### Alerts: cost, off-task, looping
 
-![pane: the alerts section under the header, a new alert in full (message and earlier triggers)](docs/media/pane-alerts.png)
+![follow view: each tile's alerts in full at its top, and the alerts column with "needs attention"](docs/media/alerts-split-view.png)
 
-![canvas: alert markers on the affected steps, tooltip on hover](docs/media/canvas-alerts.png)
+In short:
+
+- **Three types**: cost, off-task (drift from the active intent; opt-in) and looping. **One alert per type per
+  session**, updated in place: its severity only escalates, it shows the latest reason and step, counts its triggers
+  (`×N`) and lists the earlier ones.
+- **In the tiles**: each follow tile shows its alerts in full at its top; the intents stay visible under them, each
+  with `+N other steps` and its latest step (whole intents fold into `+N earlier intents` when the tile is short).
+- **History**: kept on disk (`~/.cache/tokenscope/alerts-history.jsonl`) until you **ack** it (stays, dimmed) or
+  **dismiss** it (leaves). An acked or dismissed alert comes back only when it escalates. The alerts section
+  collapses to one line.
+- **Pane**: `/tokenscope alerts` (the history), `/tokenscope alerts show|hide`, `/tokenscope ack <#|all>`,
+  `/tokenscope dismiss <#|all>`, and `/tokenscope expand <n|all>` for an intent's steps.
+
+![web: alerts arriving and escalating inside the follow tiles, no clicks](docs/media/alerts-web.gif)
+
+![pane: a loop escalating to edit revert ×3, each alert in full with its earlier triggers](docs/media/alerts-pane.gif)
 
 Three kinds of alerts, computed from the same live model as the views (`tokenscope/alerts.py`), each pointing at the
 step (or step range) it is about:
@@ -149,8 +165,6 @@ and the newest one's message and step, and it is new if any of them was. The fil
 the session id, and the project / goal / step labels as the server showed them (masked unless `--no-redact`). The
 server records alerts from its poll loop, whether or not a view is open.
 
-![follow view: each tile's alerts in full at its top, and the alerts column with "needs attention"](docs/media/alerts-split-view.png)
-
 Where they show:
 
 - **Web (board, follow view, session canvas)**: an **Alerts** section with the history across sessions, one row per
@@ -171,7 +185,8 @@ Where they show:
   alert (at most 3, in cost / off-task / looping order), tinted by severity, with the severity, kind, rule, `×N`,
   `↻ back`, the latest step's link (`step N ↗` scrolls the tile to that step), the whole message (wrapped, never
   cut) and the earlier triggers (one line). Acknowledged ones stay dimmed (message on one line, no earlier
-  triggers); dismissed ones leave. You see what is wrong without opening the alerts section. The canvas marks
+  triggers); dismissed ones leave. You see what is wrong without opening the alerts section. When the block leaves
+  too little room, the flow drops whole intents from its top into `+N earlier intents` rather than cutting one. The canvas marks
   the node holding each alert's latest step (▲, coloured by severity; hover for the alert and its earlier
   triggers, click for the side panel) and lists them in an ALERTS row (`retry loop ×3 · 23`); acknowledged ones
   leave the nodes and stay in the drawer.

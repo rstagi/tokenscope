@@ -507,6 +507,11 @@ class TestBrowser(unittest.TestCase):
             self.assertIn("earlier: ", lrow.inner_text())
             self.assertIn("step %d" % la["step"], lrow.locator(".astep").inner_text())
             self.assertGreaterEqual(tile.locator(".fsteps .fint").count(), 1)   # the intents are still there
+            # under the block, the flow never cuts through an intent: its first shown intent header is whole
+            cut = pg.evaluate("""(() => { var f = document.querySelector('.ftile .fflow'), r = f.getBoundingClientRect();
+                var h = [...f.querySelectorAll('.fsteps > .fint')].find(e => e.offsetHeight);
+                return h.getBoundingClientRect().top - r.top; })()""")
+            self.assertGreaterEqual(cut, 0)
             top = pg.evaluate("[...document.querySelector('.ftile').children].map(e => e.className)")
             self.assertLess(top.index("ftal"), top.index("fflow"))   # above the flow
             lrow.locator(".astep").click()

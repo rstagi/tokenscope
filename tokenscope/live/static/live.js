@@ -600,8 +600,28 @@
         top = Math.min(y(live), last ? y(last) : Infinity);
       }
       tile._auto = true;
+      cutIntents(tile, flow, top == null);
       flow.scrollTop = pinScrollTop(flow.clientHeight, flow.scrollHeight, top);
       setTimeout(function () { tile._auto = false; }, 50);
+    }
+    // an overflowing intent flow (e.g. under the tile's alert block) drops whole intents from its top, counted in
+    // "+N earlier intents", rather than cutting through the first one; the newest intent always stays
+    function cutIntents(tile, flow, on) {
+      var box = $(".fsteps", tile), kids = [].slice.call(box.children), groups = [], grp = null;
+      kids.forEach(function (e) { e.removeAttribute("data-cut"); });
+      box.setAttribute("data-more", tile._more || "");
+      if (!on || !tile._intents) return;
+      kids.forEach(function (e) {
+        if (!grp || e.classList.contains("fint")) groups.push(grp = {n: e.classList.contains("fint") ? 1 : 0, els: []});
+        grp.els.push(e);
+      });
+      var cut = 0;
+      for (var k = 0; k < groups.length - 1 && flow.scrollHeight > flow.clientHeight; k++) {
+        groups[k].els.forEach(function (e) { e.setAttribute("data-cut", ""); });
+        cut += groups[k].n;
+        var n = (tile._moreN || 0) + cut;
+        if (cut) box.setAttribute("data-more", "+" + n + " earlier intent" + (n > 1 ? "s" : ""));
+      }
     }
     function stepNode(x) {
       var nd = el("div", "fnode");
@@ -798,6 +818,8 @@
       var more = s.intents ? s.intents_before || 0 : s.steps_n > steps.length ? s.steps_n - steps.length : 0;
       flow.setAttribute("data-more", more ? "+" + more + " earlier " + (s.intents ? "intent" : "step") + (more > 1 ? "s" : "") : "");
       if (!steps.length) flow.setAttribute("data-more", "no steps yet");
+      tile._more = flow.getAttribute("data-more"); tile._moreN = more; tile._intents = !!s.intents;
+      cutIntents(tile, $(".fflow", tile), tile._follow && !$(".fsteps > .fbr > .fag.live", tile));
       if (tile._follow && (added || tile._seq !== s.seq)) scrollEnd(tile);
       tile._seq = s.seq;
       tile._now = s.now ? {tool: s.now.tool, target: s.now.target, agent: s.now.agent, since: s.now.since_s, at: nowS()} : null;
