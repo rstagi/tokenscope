@@ -80,10 +80,12 @@ COST   ⣀⣤⣶⣿ 182k CW · $0.41 · ctx ▕███░░░░░░░▏
   in the worst new alert's colour (bright red critical, bright yellow warning; green
   `✓ all acknowledged` once none is new), then one row per alert, at most one per kind (cost,
   off-task, looping), new ones first (worst, then newest), acknowledged ones dim with `✓`:
-  `#2 ▲ retry loop ×3  10:25 · step 7 · same failing command retried 3× …` (`▲▲` critical,
+  `#2 ▲ retry loop ×3  10:25 · step 7` (`▲▲` critical,
   `×3` when its kind fired 3 times, `+2` when its latest trigger had more reasons, the time of
-  that trigger's step, the step or step range, `subagent step` for a subagent's), then the
-  commands. A new trigger of a kind updates its row in place. `#n` is the alert's number in the
+  that trigger's step, the step or step range, `subagent step` for a subagent's). A new alert
+  shows in full: its whole message wrapped under its row (up to 3 lines) and its earlier
+  triggers on one line (`earlier: retry loop step 6 · read loop step 4`); an acknowledged one is
+  that row and its message on one dim line. Then the commands. A new trigger of a kind updates its row in place. `#n` is the alert's number in the
   session, stable as new ones arrive. An alert stays until it is acknowledged (it then stays
   dim) or dismissed (it leaves); it comes back as new only when its severity rises. Press a new
   alert's row to acknowledge it, or `/tokenscope ack <#|all>`; `/tokenscope dismiss <#|all>`

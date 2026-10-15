@@ -84,7 +84,7 @@ to `~/.cache/tokenscope-live/events.jsonl` (`$TOKENSCOPE_LIVE_EVENTS`). It never
 
 ### Alerts: cost, off-task, looping
 
-![pane: the alerts section under the header, new alerts first, the acknowledged one dim; /tokenscope alerts prints the history](docs/media/pane-alerts.png)
+![pane: the alerts section under the header, a new alert in full (message and earlier triggers)](docs/media/pane-alerts.png)
 
 ![canvas: alert markers on the affected steps, tooltip on hover](docs/media/canvas-alerts.png)
 
@@ -149,7 +149,7 @@ and the newest one's message and step, and it is new if any of them was. The fil
 the session id, and the project / goal / step labels as the server showed them (masked unless `--no-redact`). The
 server records alerts from its poll loop, whether or not a view is open.
 
-![follow view: per-tile alert badges and the alerts column with "needs attention"](docs/media/alerts-split-view.png)
+![follow view: each tile's alerts in full at its top, and the alerts column with "needs attention"](docs/media/alerts-split-view.png)
 
 Where they show:
 
@@ -166,14 +166,20 @@ Where they show:
   above the cards, in the follow view it is a column next to the tiles (collapsed: a narrow strip), on the canvas a
   drawer at the bottom left. Every **board card** and **follow tile** carries a badge with the kinds it has
   unacknowledged alerts of (`▲ cost · loop`) and an edge in the worst one's colour (red critical, amber warning); a
-  tile marks each alert's latest step with `▲` (on the intent header while that step is hidden). The canvas marks
+  tile marks each alert's latest step with `▲` (on the intent header while that step is hidden). Each **follow
+  tile** also shows its own alerts in full, as a block at its top above the goal and the intents: one row per
+  alert (at most 3, in cost / off-task / looping order), tinted by severity, with the severity, kind, rule, `×N`,
+  `↻ back`, the latest step's link (`step N ↗` scrolls the tile to that step), the whole message (wrapped, never
+  cut) and the earlier triggers (one line). Acknowledged ones stay dimmed (message on one line, no earlier
+  triggers); dismissed ones leave. You see what is wrong without opening the alerts section. The canvas marks
   the node holding each alert's latest step (▲, coloured by severity; hover for the alert and its earlier
   triggers, click for the side panel) and lists them in an ALERTS row (`retry loop ×3 · 23`); acknowledged ones
   leave the nodes and stay in the drawer.
 - **Pane** (Claude Code mod): an alerts section under its header with the session's alerts, new ones first,
   acknowledged ones dim with `✓`, each numbered `#n`; press a row or `/tokenscope ack <#|all>` to acknowledge,
   `/tokenscope dismiss <#|all>` to dismiss, `/tokenscope alerts` prints the whole history, `/tokenscope alerts
-  hide|show` (or a press on its head) collapses it to one line, kept across sessions. A row shows `×N` when its
+  hide|show` (or a press on its head) collapses it to one line, kept across sessions. A new alert shows in full:
+  its message wrapped under its row and its earlier triggers on one line; an acknowledged one is one dim line. A row shows `×N` when its
   kind fired more than once; `/tokenscope alerts` lists the earlier triggers too. A new alert raises a toast, and
   so does an escalated one; an in-place update at the same severity does not.
   See `mod/tokenscope-live/README.md`.

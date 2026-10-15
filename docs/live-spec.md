@@ -129,7 +129,10 @@ most once a second), so alerts are kept while nobody watches. Payload: `alerts: 
 "severity","message","step","first","agent","reasons","details","active","live","state","ts","at","intent",
 "raised","count","triggers"}]` (the history, not dismissed, newest first, at most one per kind) in compact / flow; `alerts: {"n","active","worst","by_kind",
 "new","new_by_kind","new_worst","top"}` on board rows (top: active and not acknowledged), the same without top
-plus `alert_steps` ({latest trigger's main step: worst severity not acknowledged}) on follow tiles; `GET /api/session/<id>/alerts`;
+plus `items` and `alert_steps` ({latest trigger's main step: worst severity not acknowledged}) on follow tiles
+(`items`: the tile's alerts, not dismissed, cost / off-task / looping order, each `{"id","kind","rule","severity",
+"message","count","step","first","agent","state","raised","active","triggers"}` with its last 4 triggers; drawn in
+full as the block at the top of the tile); `GET /api/session/<id>/alerts`;
 `GET /api/alerts[?s=<ids>][&state=all][&limit=N]` (every session: "alerts" with sid / short / project / goal, and
 "sessions": per session new / acked / total / by_kind / worst, those needing attention first); `POST
 /api/alerts/ack|dismiss` (`{"ids"}` or `{"all": true, "sessions"?}`) and `/api/alerts/reopen` (`{"ids"}`), JSON
