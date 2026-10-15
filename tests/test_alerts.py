@@ -582,6 +582,11 @@ class TestSyntheticTraces(unittest.TestCase):
                                        "--alert", "off_task.use_prompt=true"]), 0)
         text = out.getvalue()
         self.assertIn("a1e70008: 5 alerts", text)
+        out = io.StringIO()
+        with redirect_stdout(out):
+            self.assertEqual(cli.main(["alerts", "a1e70002", "--root", FIXTURES]), 0)   # one step, two reasons
+        self.assertIn("a1e70002: 1 alert\n  [warning] cost/session_usd step 8: session spend $27.58", out.getvalue())
+        self.assertIn("\n      + [warning] cost/intent_usd: [", out.getvalue())
         self.assertIn("[critical] cost/jump step 6: step cost per call $0.84, 26.3\u00d7 the session median $0.03", text)
         out = io.StringIO()
         with redirect_stdout(out):

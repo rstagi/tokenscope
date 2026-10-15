@@ -60,10 +60,12 @@ the default namer is a local keyword heuristic), `--haiku-odd` (the same, only f
 long, multi-line, opening with filler, carrying paths, URLs, code or markup). Without either, such prompts are named
 from their cleaned-up text, or by a Haiku name an earlier run cached (`~/.cache/tokenscope/goal-names.json`).
 
-Alert flags: `--off-task`, `--alert KEY=VALUE`, `--alerts-config FILE`, `--no-alerts` (see [Alerts](#alerts-cost-off-task-looping)).
+Alert flags: `--off-task`, `--alert KEY=VALUE`, `--alerts-config FILE`, `--no-alerts`, `--alerts-history FILE`,
+`--no-alerts-history` (see [Alerts](#alerts-cost-off-task-looping)).
 
 API: `GET /api/board`, `GET /api/top?window=5h|24h|7d|30d&by=session|goal|turn|intent`, `GET /api/follow?s=<id>,...`,
-`GET /api/session/<id>[?since=<seq>]`, `GET /api/session/<id>/compact`, `GET /api/session/<id>/alerts`, `GET /events` (Server-Sent Events: `board`
+`GET /api/session/<id>[?since=<seq>]`, `GET /api/session/<id>/compact`, `GET /api/session/<id>/alerts`,
+`GET /api/alerts`, `POST /api/alerts/ack|dismiss|reopen`, `GET /events` (Server-Sent Events: `board`
 and `step`). See `docs/live-spec.md`.
 
 **Status heuristic.** From transcripts alone: *working* while the last event is a prompt / tool call / tool result
@@ -81,7 +83,7 @@ to `~/.cache/tokenscope-live/events.jsonl` (`$TOKENSCOPE_LIVE_EVENTS`). It never
 
 ### Alerts: cost, off-task, looping
 
-![pane: alert banner under the header](docs/media/pane-alerts.png)
+![pane: the alerts section under the header, new alerts first, the acknowledged one dim; /tokenscope alerts prints the history](docs/media/pane-alerts.png)
 
 ![canvas: alert markers on the affected steps, tooltip on hover](docs/media/canvas-alerts.png)
 
@@ -114,17 +116,57 @@ step (or step range) it is about:
 Severity: `warning`, or `critical` for a session / intent at >= 2x its threshold, a jump at >= 4x `cost.jump_ratio`,
 a repeat or retry at >= 2x its count, and edits undone >= 2x `looping.edit_revert_n` + 1 times.
 
+**Grouped per step.** Alerts of one kind that fire at the same step of one thread are one alert with several
+reasons: one expensive step that passes the session and intent thresholds and is a jump shows as one critical
+`cost jump +2` (reasons: `intent $`, `session $`), not three. The worst reason leads (then session $, intent $, jump);
+the alert takes the worst severity and the widest step range. A cost alert points at the step it fired at
+(`intent_usd`: the step that took the intent over its threshold), a loop at the step it began at.
+
 Messages are privacy-safe in every mode: no paths, file names, commands, patterns, prompt text, user names, e-mails
 or keys; files and commands are named by kind and a per-session ordinal (`same .py file read 6× (file #2)`,
 `same failing command retried 3× (command #1)`), and a last scrub removes anything path-, e-mail- or key-like.
 
-Where they show: the **pane** draws a banner under its header with the active alerts (worst first; an alert is
-active while it is within `active_steps` steps of the newest step, a subagent's while that subagent works, a session
-threshold always) and toasts each new one; the **session canvas** marks the node holding each alert's step (▲,
-coloured by severity; hover for the alerts, click for the side panel) and lists them in an ALERTS row; **board**
-cards show a chip per active alert. API: `"alerts"` in `/api/session/<id>/compact` and `/flow`
-(`[{id, kind, rule, severity, message, step, first, agent, details, active}]`), counts in `/api/board` and
-`/api/follow`, and `GET /api/session/<id>/alerts` (the list plus the config in use).
+**History and acknowledgement.** Every alert of every session is kept until you acknowledge it (it stays in the
+history, dimmed, no longer counted as needing attention) or dismiss it (it leaves the history). Acknowledged or
+dismissed alerts come back when they get worse (a new reason at the step, a higher severity). The server keeps the
+history and its states on disk, deduplicated by the alert's stable id, so it survives page reloads and server
+restarts: `~/.cache/tokenscope/alerts-history.jsonl` (`$TOKENSCOPE_CACHE_DIR`, or `$TOKENSCOPE_ALERTS_HISTORY`, or
+`--alerts-history FILE`; `--no-alerts-history` keeps it in memory only). It holds the alerts' privacy-safe messages,
+the session id, and the project / goal / step labels as the server showed them (masked unless `--no-redact`). The
+server records alerts from its poll loop, whether or not a view is open.
+
+![follow view: per-tile alert badges and the alerts column with "needs attention"](docs/media/alerts-split-view.png)
+
+Where they show:
+
+- **Web (board, follow view, session canvas)**: an **Alerts** section with the history across sessions, newest
+  first: time, severity, kind (cost / off-task / looping), rule (`+N reasons` for a grouped one, listed under
+  it), session, step and the intent at that step, message; `✓` acknowledges, `×` dismisses, `✓ ack all` and
+  `clear acked` act on all shown; `new` / `history` filters. **Needs attention** lists the sessions with alerts not
+  acknowledged, worst first, each with its counts by kind; click one to jump to its card (board) or tile (follow
+  view; a session not followed yet is pinned). Click an alert to jump to it: the board scrolls to the card, the
+  follow view to the tile and scrolls the tile to the step, the canvas centres and selects the node holding the
+  step; the `step N ↗` link opens the canvas on that step (`/s/<id>#step=N`). The section collapses to its header
+  line (`▾` / `▸`); the choice and the filter are kept per page in the browser (localStorage). On the board it sits
+  above the cards, in the follow view it is a column next to the tiles (collapsed: a narrow strip), on the canvas a
+  drawer at the bottom left. Every **board card** and **follow tile** carries a badge with its unacknowledged
+  alerts by kind (`▲ cost 1 · loop 2`) and an edge in the worst one's colour (red critical, amber warning); a
+  tile marks alerted steps with `▲`. The canvas marks the node holding each alert's step (▲, coloured by severity;
+  hover for the alerts, click for the side panel) and lists them in an ALERTS row; acknowledged ones leave the
+  nodes and stay in the drawer.
+- **Pane** (Claude Code mod): an alerts section under its header with the session's alerts, new ones first,
+  acknowledged ones dim with `✓`, each numbered `#n`; press a row or `/tokenscope ack <#|all>` to acknowledge,
+  `/tokenscope dismiss <#|all>` to dismiss, `/tokenscope alerts` prints the whole history, `/tokenscope alerts
+  hide|show` (or a press on its head) collapses it to one line, kept across sessions. Each new alert raises a toast.
+  See `mod/tokenscope-live/README.md`.
+
+API: `"alerts"` in `/api/session/<id>/compact` and `/flow` (the session's history, not dismissed:
+`[{id, n, kind, rule, severity, message, step, first, agent, reasons, details, active, live, state, ts, at,
+intent, raised}]`), counts in `/api/board` and `/api/follow` (`n`, `active`, `worst`, `by_kind`, and not
+acknowledged: `new`, `new_by_kind`, `new_worst`), `GET /api/session/<id>/alerts` (the list, its counts and the
+config in use), `GET /api/alerts[?s=<id>,...][&state=all][&limit=N]` (the history across sessions plus
+`sessions`: who needs attention), and `POST /api/alerts/ack`, `/dismiss` (`{"ids": [...]}` or `{"all": true,
+"sessions": [...]}`) and `/reopen` (`{"ids": [...]}`); POSTs want `Content-Type: application/json`.
 
 Offline: `tokenscope alerts SESSION [--json]` replays one transcript and prints its alerts;
 `python3 tools/alerts_eval.py --root DIR [--events FILE] [--off-task] [--per-trace] [--sample N]` runs the detectors

@@ -665,6 +665,8 @@ def cmd_alerts(args):
         where = "" if a["step"] is None else " step %s%s" % (
             "%s-%s" % (a["first"], a["step"]) if a["first"] != a["step"] else a["step"], " (subagent)" if a["agent"] else "")
         print("  [%s] %s/%s%s: %s" % (a["severity"], a["kind"], a["rule"], where, a["message"]))
+        for m in (a.get("reasons") or [])[1:]:   # the other alerts of the same step (alerts.group)
+            print("      + [%s] %s/%s: %s" % (m["severity"], a["kind"], m["rule"], m["message"]))
     return 0
 
 

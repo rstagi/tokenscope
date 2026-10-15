@@ -46,6 +46,7 @@ class AlertStore:
         self.path, self.clock, self.max_records = path, clock, max_records
         self.recs = {}          # id -> record
         self.by_member = {}     # member alert id -> record id
+        self.by_sid = {}        # session id -> {record id}
         self.seq = {}           # sid -> last "n" given
         self.version = 0        # bumps on every change (board / SSE signatures)
         self.lock = threading.RLock()
@@ -91,6 +92,7 @@ class AlertStore:
             for m in old.get("members") or ():
                 self.by_member.pop(m, None)
         self.recs[r["id"]] = r
+        self.by_sid.setdefault(r["sid"], set()).add(r["id"])
         for m in r.get("members") or ():
             self.by_member[m] = r["id"]
         if r.get("n"):
@@ -98,6 +100,8 @@ class AlertStore:
 
     def _unindex(self, rid):
         r = self.recs.pop(rid, None)
+        if r is not None:
+            self.by_sid.get(r["sid"], set()).discard(rid)
         for m in (r or {}).get("members") or ():
             if self.by_member.get(m) == rid:
                 self.by_member.pop(m, None)
@@ -203,13 +207,16 @@ class AlertStore:
         return fresh
 
     # ------------------------------------------------------------ acknowledge / dismiss
+    def _of(self, sids):
+        """The records of `sids` (None: every session)."""
+        if sids is None:
+            return list(self.recs.values())
+        return [self.recs[i] for sid in set(sids) for i in self.by_sid.get(sid, ())]
+
     def _select(self, ids=None, sids=None, states=("new",)):
         if ids is not None:
-            ids = set(ids)
-            return [r for r in self.recs.values() if r["id"] in ids]
-        sids = set(sids) if sids else None
-        return [r for r in self.recs.values()
-                if (sids is None or r["sid"] in sids) and r.get("state", "new") in states]
+            return [self.recs[i] for i in set(ids) if i in self.recs]
+        return [r for r in self._of(sids or None) if r.get("state", "new") in states]
 
     def ack(self, ids=None, sids=None):
         """Acknowledge alerts by id, or (ids None) every new one (of `sids`, else of every session): they stay in
@@ -245,17 +252,15 @@ class AlertStore:
 
     def records(self, sids=None, states=("new", "acked")):
         """Records of `sids` (else every session) in `states`, newest first (by first seen)."""
-        sids = set(sids) if sids else None
         with self.lock:
-            out = [r for r in self.recs.values()
-                   if (sids is None or r["sid"] in sids) and r.get("state", "new") in states]
+            out = [r for r in self._of(sids or None) if r.get("state", "new") in states]
         out.sort(key=lambda r: (-(r.get("ts") or 0), r.get("n") or 0))   # one sync: in alerts.run's order
         return out
 
     def summary(self, sid):
         """{"new", "acked", "total" (not dismissed), "by_kind": {kind: new}, "worst": worst new severity}."""
         with self.lock:
-            rs = [r for r in self.recs.values() if r["sid"] == sid and r.get("state") != "dismissed"]
+            rs = [r for r in self._of([sid]) if r.get("state") != "dismissed"]
         new = [r for r in rs if r.get("state", "new") == "new"]
         by = {}
         for r in new:
@@ -265,4 +270,4 @@ class AlertStore:
 
     def sessions(self):
         with self.lock:
-            return sorted({r["sid"] for r in self.recs.values()})
+            return sorted(sid for sid, ids in self.by_sid.items() if ids)

@@ -109,10 +109,27 @@ off-task (opt-in, `unrelated`) and looping (`repeat_*`, `retry`, `edit_revert`).
 facts (`_facts[k]`: kind, hashed identity, hashed result, failure, polling, edit / write hashes; never emitted).
 `LiveState.alerts(s)` builds an `alerts.Context` (main-thread steps with cost, todo / declared intent and request;
 every thread's calls; subagents are segmented only when they have an alert) and runs the registered detectors,
-cached on (seq, open step). Payload: `alerts: [{"id","kind","rule","severity","message","step","first","agent",
-"details","active"}]` in compact / flow, `alerts: {"n","active","worst","by_kind","top"}` on board rows,
-`{"n","active","worst","by_kind"}` on follow tiles, and `GET /api/session/<id>/alerts`. Messages never name files,
-commands or prompts (ordinal labels such as "file #2"). `tools/alerts_eval.py` replays trees offline.
+cached on (seq, open step). `alerts.public` groups them: the alerts of one kind firing at the same step of one
+thread (a cost alert's step; a loop's first step) are one alert with "reasons" (the worst leads; a cost group's id
+is its step, so reasons joining later keep it). Every grouped alert goes into the alert history
+(`tokenscope/live/alertstore.py`, `LiveState.alert_store`): records keyed by id with a per-session ordinal "n",
+first-seen "ts", the step's time "at", its intent ("intent": {cat, label}), and "state" new / acked / dismissed;
+an acknowledged or dismissed alert comes back as new when it gets worse (a new reason, a higher severity), and a
+record a grown group now holds is merged into it. The server keeps it on disk (`--alerts-history FILE`, default
+`$TOKENSCOPE_ALERTS_HISTORY`, else `$TOKENSCOPE_CACHE_DIR` or `~/.cache/tokenscope` / `alerts-history.jsonl`; JSON
+lines `{"op": "put", "rec"}` / `{"op": "ack"|"dismiss", "ids", "ts"}` / `{"op": "drop", "ids"}`, compacted when
+mostly superseded; `--no-alerts-history`: memory only) and syncs changed sessions into it from its poll loop (at
+most once a second), so alerts are kept while nobody watches. Payload: `alerts: [{"id","n","kind","rule",
+"severity","message","step","first","agent","reasons","details","active","live","state","ts","at","intent",
+"raised"}]` (the history, not dismissed, newest first) in compact / flow; `alerts: {"n","active","worst","by_kind",
+"new","new_by_kind","new_worst","top"}` on board rows (top: active and not acknowledged), the same without top
+plus `alert_steps` ({step: worst severity not acknowledged}) on follow tiles; `GET /api/session/<id>/alerts`;
+`GET /api/alerts[?s=<ids>][&state=all][&limit=N]` (every session: "alerts" with sid / short / project / goal, and
+"sessions": per session new / acked / total / by_kind / worst, those needing attention first); `POST
+/api/alerts/ack|dismiss` (`{"ids"}` or `{"all": true, "sessions"?}`) and `/api/alerts/reopen` (`{"ids"}`), JSON
+only. Messages never name files, commands or prompts (ordinal labels such as "file #2"); the intent label is the
+step's own label as the views show it (redaction-aware). `tools/alerts_eval.py` replays trees offline (per rule:
+every reason; per kind also the grouped count).
 
 Status (per session): `working` if the last event is a user prompt / tool_result / assistant tool_use, or a hook
 says PreToolUse/UserPromptSubmit after the last Stop, and the last event is < 90 s old; `waiting` (for the user)

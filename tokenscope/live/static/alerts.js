@@ -187,7 +187,12 @@
       box.innerHTML = "";
       if (opts.attention === false) { box.style.display = "none"; return; }
       var need = (d.sessions || []).filter(function (x) { return x.new > 0; });
-      if (!need.length) { box.appendChild(el("span", "aok-all", (d.alerts || []).length ? "✓ nothing needs attention" : "✓ no alerts")); return; }
+      if (!need.length) {
+        if ((d.alerts || []).length) box.appendChild(el("span", "aok-all", "✓ nothing needs attention"));
+        box.style.display = (d.alerts || []).length ? "" : "none";
+        return;
+      }
+      box.style.display = "";
       box.appendChild(el("span", "alab", "needs attention"));
       need.forEach(function (x) {
         var b = el("button", "asess-chip " + (x.worst || "warning"));

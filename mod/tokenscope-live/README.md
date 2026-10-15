@@ -70,6 +70,22 @@ COST   ⣀⣤⣶⣿ 182k CW · $0.41 · ctx ▕███░░░░░░░▏
   3 lines, only the tail cut), and `✦ <skill> · stub: <path>` when the hint names them (only when the server
   found evidence; often none), then a closing rule. The intent list gives up rows first to make
   room; the box is removed entirely as soon as the agent works again
+- **alerts** (from the server's `alerts`: the session's alert history, see the repository README
+  "Alerts") are a section right under the header, above the recap: `▾ ALERTS · 2 new · 3 total ━━━`
+  in the worst new alert's colour (bright red critical, bright yellow warning; green
+  `✓ all acknowledged` once none is new), then one row per alert, new ones first (worst, then
+  newest), acknowledged ones dim with `✓`:
+  `#3 ▲ edit revert  10:25 · step 8–14 · edits to the same .py file undone 3× …` (`▲▲` critical,
+  `+2` when the step fired more reasons, the time of its step, the step or step range,
+  `subagent step` for a subagent's), at most 5 and `+N more · /tokenscope alerts`, then the
+  commands. `#n` is the alert's number in the session, stable as new ones arrive. An alert stays
+  until it is acknowledged (it then stays dim) or dismissed (it leaves). Press a new alert's row
+  to acknowledge it, or `/tokenscope ack <#|all>`; `/tokenscope dismiss <#|all>` removes it
+  (both go to the server, so the web views agree). `/tokenscope alerts` prints the whole history
+  (with every reason) as the command's output. Collapse the section to its head line
+  (`▸ ALERTS · 2 new · loop 2 · 3 total`) by pressing it or with `/tokenscope alerts hide`
+  (`show` brings it back); the choice is kept in the mod's store, across sessions. Each new alert
+  also raises one toast
 - **warnings** are rare and come only from the server's `warnings`: one yellow line each,
   `⚠ <text> — <hint>`. A warning rule that appears after the first payload also raises one
   toast. A session without warnings shows no `⚠` anywhere
@@ -96,7 +112,8 @@ claude --plugin-dir mod/tokenscope-live
 ```
 
 Then type `/tokenscope` to toggle the pane (it works while Claude is busy, too).
-`/tokenscope expand|collapse <n|all>` and `/tokenscope view intents|phases` change the intent list.
+`/tokenscope expand|collapse <n|all>` and `/tokenscope view intents|phases` change the intent list;
+`/tokenscope alerts [show|hide]`, `/tokenscope ack <#|all>` and `/tokenscope dismiss <#|all>` the alerts.
 
 ## Environment variables
 
@@ -109,7 +126,9 @@ Then type `/tokenscope` to toggle the pane (it works while Claude is busy, too).
 ## Network
 
 Once a second the mod requests `GET {TOKENSCOPE_LIVE_URL}/api/session/{session id}/compact`,
-which by default is localhost only. Nothing is sent anywhere else. A failed request leaves the
+which by default is localhost only; acknowledging or dismissing an alert sends
+`POST /api/alerts/ack|dismiss` (`{"ids": [...]}` or `{"all": true, "sessions": [<session id>]}`)
+to the same server. Nothing is sent anywhere else. A failed request leaves the
 pane in local mode. The fields it reads (all optional) are:
 
 ```json
