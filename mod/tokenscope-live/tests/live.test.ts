@@ -42,15 +42,19 @@ const COMPACT = {
 
 const WARNING = { rule: 'stuck_error', text: 'same error ×3, no edits since', hint: 'try a different approach', count: 3, ts: 1 }
 
-// payload.alerts: the session's alert history (tokenscope/live/alertstore.py), as the server sends it
+// payload.alerts: the session's alert history (tokenscope/live/alertstore.py), as the server sends it: at most one
+// alert per kind, the latest trigger leading, with its count and earlier triggers
 const ALERTS = [
-  { id: 'a1', n: 1, kind: 'looping', rule: 'retry', severity: 'warning', message: 'same failing command retried 3× with no edit in between (command #1)', step: 3, first: 2, agent: 'ag1', active: true, state: 'new', at: 1_790_000_100 },
-  { id: 'a2', n: 2, kind: 'cost', rule: 'jump', severity: 'critical', message: 'step cost per call $1.80, 56.1× the session median $0.03', step: 5, first: 5, agent: null, active: true, state: 'new', at: 1_790_000_050 },
-  { id: 'a3', n: 3, kind: 'cost', rule: 'session_usd', severity: 'warning', message: 'session spend $27.58 passed the $25.00 threshold', step: 5, first: 5, agent: null, active: true, state: 'acked', at: 1_790_000_200,
-    reasons: [{ rule: 'session_usd', severity: 'warning', message: 'session spend $27.58 passed the $25.00 threshold' },
-      { rule: 'intent_usd', severity: 'warning', message: '[CHANGE] intent cost $8.39 (threshold $5.00) over 1 step' },
-      { rule: 'jump', severity: 'warning', message: 'step cost per call $1.10' }] },
-  { id: 'a4', n: 4, kind: 'looping', rule: 'repeat_read', severity: 'warning', message: 'same .py file read 4× with the same result (file #1)', step: 1, first: 0, agent: null, active: false, state: 'acked', at: 1_790_000_000 },
+  { id: 'a1', n: 1, kind: 'looping', rule: 'retry', severity: 'warning', message: 'same failing command retried 3× with no edit in between (command #1)', step: 3, first: 2, agent: 'ag1', active: true, state: 'new', at: 1_790_000_100,
+    count: 3, triggers: [
+      { id: 't1', rule: 'repeat_read', severity: 'warning', message: 'same .py file read 4× with the same result (file #1)', step: 1, first: 0, agent: null },
+      { id: 't2', rule: 'edit_revert', severity: 'warning', message: 'edits to the same .py file undone 2× (A→B→A) (file #2)', step: 2, first: 2, agent: null },
+      { id: 't3', rule: 'retry', severity: 'warning', message: 'same failing command retried 3× with no edit in between (command #1)', step: 3, first: 2, agent: 'ag1' }] },
+  { id: 'a2', n: 2, kind: 'cost', rule: 'jump', severity: 'critical', message: 'step cost per call $1.80, 56.1× the session median $0.03', step: 5, first: 5, agent: null, active: true, state: 'new', at: 1_790_000_050,
+    count: 1, reasons: [{ rule: 'jump', severity: 'critical', message: 'step cost per call $1.80, 56.1× the session median $0.03' },
+      { rule: 'session_usd', severity: 'warning', message: 'session spend $27.58 passed the $25.00 threshold' },
+      { rule: 'intent_usd', severity: 'warning', message: '[CHANGE] intent cost $8.39 (threshold $5.00) over 1 step' }] },
+  { id: 'a3', n: 3, kind: 'off_task', rule: 'unrelated', severity: 'warning', message: '4 of the last 4 steps touched files unrelated to the current todo item', step: 7, first: 4, agent: null, active: false, state: 'acked', at: 1_790_000_200, count: 1 },
 ]
 
 const OLD_SHAPE = {
@@ -217,7 +221,7 @@ describe('tokenscope-live', () => {
     expect(await ui.findAll({ type: 'Text', text: /⚠/ })).toHaveLength(1)
   })
 
-  test('the alerts section: new alerts first, worst first, acknowledged ones dim; a new alert toasts once', async ($: any, on: any) => {
+  test('the alerts section: one row per kind, new first, worst first, acknowledged ones dim; toasts on new and escalated only', async ($: any, on: any) => {
     const clock = base(on)
     mock.store(on)
     let payload: any = COMPACT
@@ -228,25 +232,38 @@ describe('tokenscope-live', () => {
     await clock.advance(1000)
     payload = { ...COMPACT, alerts: ALERTS }
     await clock.advance(1000)
-    expect(toasts).toEqual(['▲ cost jump: step cost per call $1.80, 56.1× the session median $0.03  ▲ retry loop: same failing command retried 3× with no edit in between (command #1)'])
+    expect(toasts).toEqual(['▲ cost jump: step cost per call $1.80, 56.1× the session median $0.03  ▲ retry loop ×3: same failing command retried 3× with no edit in between (command #1)'])
     payload = { ...payload }
     await clock.advance(1000)
-    expect(toasts).toHaveLength(1) // same ids: no second toast
+    expect(toasts).toHaveLength(1) // same alerts: no second toast
+    // the looping alert fires again at the same severity: updated in place (×4), no toast, still one row
+    payload = { ...COMPACT, alerts: [{ ...ALERTS[0], count: 4, step: 4 }, ...ALERTS.slice(1)] }
+    await clock.advance(1000)
+    expect(toasts).toHaveLength(1)
     const ui = await $.ui.mount({ plugin: 'tokenscope-live', surface: 'terminal', component: 'Pane', requestId: 'tokenscope-live', props: { ...PANE_PROPS, bodyColumns: 120 } })
-    expect(await ui.find({ type: 'Text', text: /^▾ ALERTS · 2 new · 4 total ━+$/ })).toBeDefined()
-    const names = await ui.findAll({ type: 'Text', text: /^(cost jump|retry loop|read loop|session \$)$/ })
-    expect(names.map((n: any) => n.text)).toEqual(['cost jump', 'retry loop', 'session $', 'read loop'])   // new (worst first), then acked
+    expect(await ui.find({ type: 'Text', text: /^▾ ALERTS · 2 new · 3 total ━+$/ })).toBeDefined()
+    const names = await ui.findAll({ type: 'Text', text: /^(cost jump|retry loop|read loop|edit revert|off-task)$/ })
+    expect(names.map((n: any) => n.text)).toEqual(['cost jump', 'retry loop', 'off-task'])   // new (worst first), then acked
+    expect(await ui.find({ type: 'Text', text: /^ ×4$/ })).toBeDefined()   // how often the looping alert fired
     expect(await ui.find({ type: 'Text', text: /^ #2 $/ })).toBeDefined()
-    expect(await ui.find({ type: 'Text', text: /^ \+2$/ })).toBeDefined()   // a grouped alert's other reasons
+    expect(await ui.find({ type: 'Text', text: /^ \+2$/ })).toBeDefined()   // the cost alert's other reasons
     expect(await ui.find({ type: 'Text', text: /^ {2}\d\d:\d\d · step 5 · $/ })).toBeDefined()
-    expect(await ui.find({ type: 'Text', text: /^ {2}\d\d:\d\d · subagent step 2–3 · $/ })).toBeDefined()
-    expect((await ui.findAll({ type: 'Text', text: /^✓ $/ })).length).toBe(2)
+    expect(await ui.find({ type: 'Text', text: /^ {2}\d\d:\d\d · subagent step 2–4 · $/ })).toBeDefined()
+    expect((await ui.findAll({ type: 'Text', text: /^✓ $/ })).length).toBe(1)
     expect(await ui.find({ type: 'Text', text: /^ {3}\/tokenscope ack <#\|all> · dismiss <#\|all> · alerts hide$/ })).toBeDefined()
-    // the whole history as the command's output
+    await ui.unmount()
+    // the whole history as the command's output: every reason and the earlier triggers
     const res = await $.command.run({ command: 'tokenscope', args: 'alerts' })
-    expect(res.text.split('\n')[0]).toBe('tokenscope alerts: 2 new (cost 1 · loop 1) · 4 total')
-    expect(res.text).toMatch(/#3 ✓ \[warning\] session \$ · \d\d:\d\d · step 5: session spend/)
+    expect(res.text.split('\n')[0]).toBe('tokenscope alerts: 2 new (cost · loop) · 3 total')
+    expect(res.text).toMatch(/#3 ✓ \[warning\] off-task · \d\d:\d\d · step 4–7: 4 of the last 4 steps/)
+    expect(res.text).toMatch(/#1 ▲ \[warning\] retry loop ×4 · \d\d:\d\d · subagent step 2–4: same failing/)
     expect(res.text).toMatch(/\n {7}\+ intent \$: \[CHANGE\] intent cost/)
+    expect(res.text).toMatch(/\n {7}earlier: edit revert · step 2: edits to the same \.py file undone 2×[^\n]*\n {7}earlier: read loop · step 0–1: /)
+    // escalated (critical now): a toast again, the row stays the one row
+    payload = { ...COMPACT, alerts: [{ ...ALERTS[0], count: 5, severity: 'critical' }, ...ALERTS.slice(1)] }
+    await clock.advance(1000)
+    expect(toasts).toHaveLength(2)
+    expect(toasts[1]).toMatch(/^▲ retry loop ×5: /)
   })
 
   test('alerts: /tokenscope ack <#|all> and dismiss post to the server; a press on a new alert acknowledges it', async ($: any, on: any) => {
@@ -264,8 +281,8 @@ describe('tokenscope-live', () => {
     await clock.advance(1000)
     expect((await $.command.run({ command: 'tokenscope', args: 'ack 2' })).text).toBe('tokenscope: acknowledged #2 cost jump')
     expect(posts[0]).toEqual({ url: 'http://127.0.0.1:8765/api/alerts/ack', body: { ids: ['a2'] }, type: 'application/json' })
-    expect((await $.command.run({ command: 'tokenscope', args: 'dismiss #4' })).text).toBe('tokenscope: dismissed #4 read loop')
-    expect(posts[1].body).toEqual({ ids: ['a4'] })
+    expect((await $.command.run({ command: 'tokenscope', args: 'dismiss #3' })).text).toBe('tokenscope: dismissed #3 off-task')
+    expect(posts[1].body).toEqual({ ids: ['a3'] })
     expect((await $.command.run({ command: 'tokenscope', args: 'ack all' })).text).toBe('tokenscope: acknowledged every alert of this session (1)')
     expect(posts[2]).toMatchObject({ url: 'http://127.0.0.1:8765/api/alerts/ack', body: { all: true, sessions: ['sess-1'] } })
     expect((await $.command.run({ command: 'tokenscope', args: 'ack 9' })).text).toMatch(/no alert #9/)
@@ -289,7 +306,7 @@ describe('tokenscope-live', () => {
     await ui.unmount()
     ui = await mountPane($)
     expect(await ui.find({ type: 'Text', text: /^▸ ALERTS$/ })).toBeDefined()
-    expect(await ui.find({ type: 'Text', text: /^ · 2 new · cost 1 · loop 1$/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /^ · 2 new · cost · loop$/ })).toBeDefined()
     expect(await ui.find({ type: 'Text', text: /^cost jump$/ })).toBeUndefined()
     await ui.unmount()
     expect(kept.get('alertsCollapsed')).toBe(true)
@@ -316,7 +333,7 @@ describe('tokenscope-live', () => {
     await $.session.start(SESSION)
     await clock.advance(1000)
     let ui = await mountPane($)
-    expect(await ui.find({ type: 'Text', text: /^▾ ALERTS · ✓ all acknowledged · 4 total ━+$/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /^▾ ALERTS · ✓ all acknowledged · 3 total ━+$/ })).toBeDefined()
     expect(await ui.find({ type: 'Text', text: /alerts hide$/ })).toBeUndefined()
     await ui.unmount()
     payload = { ...COMPACT, alerts: [] }
@@ -609,7 +626,7 @@ describe('tokenscope-live', () => {
   }
   const mountPane = ($: any, bodyColumns = 90) => $.ui.mount({ plugin: 'tokenscope-live', surface: 'terminal', component: 'Pane', requestId: 'tokenscope-live', props: { ...PANE_PROPS, bodyColumns } })
 
-  test('intents: groups collapsed, the live group expanded, provisional label dimmed, declared footer', async ($: any, on: any) => {
+  test('intents: each intent its head, "+N other steps" and its latest step; provisional label dimmed, declared footer', async ($: any, on: any) => {
     const clock = base(on)
     on('http.fetch', () => ({ value: { status: 200, ok: true, headers: {}, text: JSON.stringify({ ...COMPACT, intents: INTENTS }) } }))
     await $.session.start(SESSION)
@@ -617,32 +634,32 @@ describe('tokenscope-live', () => {
     const ui = await mountPane($)
     expect(await ui.find({ type: 'Text', text: /^── intents ──$/ })).toBeDefined()
     expect(await ui.find({ type: 'Text', text: /^── flow ──$/ })).toBeUndefined()
-    // group 1: collapsed, one line with its step count and costs; its steps hidden
+    // group 1: its head with its step count and costs, "+1 other step" (dim), then only its latest step
     expect(await ui.find({ type: 'Text', text: /^▸1 $/ })).toBeDefined()
     expect(await ui.find({ type: 'Text', text: /^ Implement multi-warehouse stock$/ })).toBeDefined()
     expect(await ui.find({ type: 'Text', text: /^ · 2 steps · 120k · \$0\.41$/ })).toBeDefined()
+    const other = await ui.findAll({ type: 'Text', text: /^ {2}├ \+1 other step$/ })
+    expect(other.length).toBe(2)   // one per group
+    expect(other[0].props.dimColor).toBe(true)
     expect(await ui.find({ type: 'Text', text: /^ Read store and model code$/ })).toBeUndefined()
-    // …and one dim detail line listing them
-    const det = await ui.find({ type: 'Text', text: /^ {3}↳ Read store and model code · Add per-warehouse quantities$/ })
-    expect(det).toBeDefined()
-    expect(det.props.dimColor).toBe(true)
+    expect(await ui.find({ type: 'Text', text: /^ Add per-warehouse quantities$/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /^ {3}↳ Read store and model code/ })).toBeUndefined()   // no detail line
     // an ungrouped step at top level, its tools summary on its detail line
     expect(await ui.find({ type: 'Text', text: /^\[VERIFY\]$/ })).toBeDefined()
     expect(await ui.find({ type: 'Text', text: /^ Run store tests$/ })).toBeDefined()
     expect(await ui.find({ type: 'Text', text: /^ {3}↳ Bash unittest ✓$/ })).toBeDefined()
     expect(await ui.find({ type: 'Text', text: /^ · Bash unittest ✓$/ })).toBeUndefined()
     expect(await ui.find({ type: 'Text', text: /^ · 9k · \$0\.03$/ })).toBeDefined()
-    // group 2 holds the open step: expanded, its steps under it, the open one ▶ with a dim provisional label…
-    expect(await ui.find({ type: 'Text', text: /^▾2 $/ })).toBeDefined()
-    expect(await ui.find({ type: 'Text', text: /^ {2}├ $/ })).toBeDefined()
-    expect(await ui.find({ type: 'Text', text: /^ Inspect CLI entry point$/ })).toBeDefined()
-    expect(await ui.find({ type: 'Text', text: /^ {2}└ $/ })).toBeDefined()
+    // group 2 holds the open step: the same shape, its latest (open) step ▶ with a dim provisional label…
+    expect(await ui.find({ type: 'Text', text: /^▸2 $/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /^ Inspect CLI entry point$/ })).toBeUndefined()
+    expect((await ui.findAll({ type: 'Text', text: /^ {2}└ $/ })).length).toBe(2)
     expect(await ui.find({ type: 'Text', text: /^▶ $/ })).toBeDefined()
     const prov = await ui.find({ type: 'Text', text: /^ editing files · cli\.py…$/ })
     expect(prov).toBeDefined()
     expect(prov.props.dimColor).toBe(true)
     // ✎ for declared labels only, and the footer
-    expect((await ui.findAll({ type: 'Text', text: /^ ✎$/ })).length).toBe(2)   // the declared group and step
+    expect((await ui.findAll({ type: 'Text', text: /^ ✎$/ })).length).toBe(1)   // the declared group (its declared step is hidden)
     expect(await ui.find({ type: 'Text', text: /^✎ declared ×2$/ })).toBeDefined()
   })
 
@@ -673,7 +690,8 @@ describe('tokenscope-live', () => {
     expect(fold).toBeDefined()
     expect(await ui.find({ type: 'Text', text: /^ Step number 0$/ })).toBeUndefined()
     expect(await ui.find({ type: 'Text', text: /^ Step number 35$/ })).toBeDefined()   // newest ungrouped kept
-    expect(await ui.find({ type: 'Text', text: /^▾1 $/ })).toBeDefined()              // the live group, expanded
+    expect(await ui.find({ type: 'Text', text: /^▸1 $/ })).toBeDefined()              // the live group: head, +3, latest
+    expect(await ui.find({ type: 'Text', text: /^ {2}├ \+3 other steps$/ })).toBeDefined()
     expect(await ui.find({ type: 'Text', text: /^ Step number 39…$/ })).toBeDefined()
     const n = Number(String(fold.text).match(/\d+/)![0])
     expect(await ui.find({ type: 'Text', text: new RegExp('^ Step number ' + (n - 1) + '$') })).toBeUndefined()
@@ -686,18 +704,20 @@ describe('tokenscope-live', () => {
     await $.session.start(SESSION)
     await clock.advance(1000)
     let res = await $.command.run({ command: 'tokenscope', args: 'expand 1' })
-    expect(res.text).toBe('tokenscope: expanded group 1 · Implement multi-warehouse stock')
+    expect(res.text).toBe('tokenscope: expanded intent 1 · Implement multi-warehouse stock')
     res = await $.command.run({ command: 'tokenscope', args: 'collapse 2' })
-    expect(res.text).toMatch(/collapsed group 2/)
+    expect(res.text).toMatch(/collapsed intent 2/)
     await clock.advance(3000)   // polls and redraws keep the person's choice
     let ui = await mountPane($)
-    expect(await ui.find({ type: 'Text', text: /^▾1 $/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /^▾1 $/ })).toBeDefined()   // expanded: every step, no "+N other"
     expect(await ui.find({ type: 'Text', text: /^ Read store and model code$/ })).toBeDefined()
-    expect(await ui.find({ type: 'Text', text: /^▸2 $/ })).toBeDefined()   // collapsed although live
-    expect(await ui.find({ type: 'Text', text: /cli\.py…/ })).toBeUndefined()
+    expect((await ui.findAll({ type: 'Text', text: /other step/ })).length).toBe(1)
+    expect(await ui.find({ type: 'Text', text: /^▸2 $/ })).toBeDefined()   // collapsed: still its latest (live) step
+    expect(await ui.find({ type: 'Text', text: /cli\.py…/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /^ Inspect CLI entry point$/ })).toBeUndefined()
     await ui.unmount()
 
-    expect((await $.command.run({ command: 'tokenscope', args: 'expand 7' })).text).toMatch(/no group 7/)
+    expect((await $.command.run({ command: 'tokenscope', args: 'expand 7' })).text).toMatch(/no intent 7/)
     await $.command.run({ command: 'tokenscope', args: 'collapse all' })
     ui = await mountPane($)
     expect((await ui.findAll({ type: 'Text', text: /^▸\d $/ })).length).toBe(2)
@@ -801,7 +821,7 @@ describe('tokenscope-live', () => {
     expect(res.text.split('\n')).toEqual(['tokenscope top 7d by turn: $0.00 · 0 CW · 0 sessions', 'turns', '  (nothing in this window)'])
   })
 
-  test('intents: pressing a group line toggles it', async ($: any, on: any) => {
+  test('intents: pressing an intent line toggles it', async ($: any, on: any) => {
     const clock = base(on)
     on('http.fetch', () => ({ value: { status: 200, ok: true, headers: {}, text: JSON.stringify({ ...COMPACT, intents: INTENTS }) } }))
     await $.session.start(SESSION)
@@ -813,7 +833,8 @@ describe('tokenscope-live', () => {
     ui = await mountPane($)
     expect(await ui.find({ type: 'Text', text: /^▾1 $/ })).toBeDefined()
     expect(await ui.find({ type: 'Text', text: /^ Read store and model code$/ })).toBeDefined()
-    expect(await ui.find({ type: 'Text', text: /^▸2 $/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /^▾2 $/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /^ Inspect CLI entry point$/ })).toBeDefined()
     await ui.press({ key: 'group-0' })
     await ui.unmount()
     ui = await mountPane($)
@@ -828,10 +849,10 @@ describe('tokenscope-live', () => {
     const ui = await mountPane($, 30)
     const boxes = await ui.findAll({ type: 'Box' })
     for (const b of boxes.slice(1)) expect(String(b.text ?? '').length).toBeLessThanOrEqual(30)
-    expect(await ui.find({ type: 'Text', text: /^▾2 $/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /^▸2 $/ })).toBeDefined()
   })
 
-  test('intents: a detail line folds equal labels ×N, marks tested steps, and overflows as +N', async ($: any, on: any) => {
+  test('intents: a long group shows "+N other steps" and its latest step; the open step outside any group is a pending intent', async ($: any, on: any) => {
     const clock = base(on)
     const lab = ['Read store.py', 'Edit models.py', 'Edit models.py', 'Run tests', 'Read cli.py', 'Edit cli.py', 'Edit docs/README.md']
     const steps = [
@@ -842,13 +863,24 @@ describe('tokenscope-live', () => {
     on('http.fetch', () => ({ value: { status: 200, ok: true, headers: {}, text: JSON.stringify({ ...COMPACT, intents: { steps, groups, declared: { calls: 0 } } }) } }))
     await $.session.start(SESSION)
     await clock.advance(1000)
-    let ui = await mountPane($, 200)
-    expect(await ui.find({ type: 'Text', text: '   ↳ Read store.py · Edit models.py ×2 · Run tests ✓ · Read cli.py · Edit cli.py · Edit docs/README.md ✗' })).toBeDefined()
+    let ui = await mountPane($, 100)
+    expect(await ui.find({ type: 'Text', text: /^ Build it$/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /^ {2}├ \+6 other steps$/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /^ Edit docs\/README\.md$/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /^ Read store\.py$/ })).toBeUndefined()
+    // the open step, not grouped yet: under a "pending intent", never a loose line
+    expect(await ui.find({ type: 'Text', text: /^▸2 $/ })).toBeDefined()
+    const pend = await ui.find({ type: 'Text', text: /^ pending intent…$/ })
+    expect(pend).toBeDefined()
+    expect(pend.props.dimColor).toBe(true)
+    expect(await ui.find({ type: 'Text', text: /^ · 1 step · 10k · \$0\.03$/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /^ Look around…$/ })).toBeDefined()
     await ui.unmount()
-    ui = await mountPane($, 60)
-    const det = await ui.find({ type: 'Text', text: /^ {3}↳ Read store\.py · Edit models\.py ×2 · Run tests ✓ \+3$/ })
-    expect(det).toBeDefined()
-    expect(String(det.text).length).toBeLessThanOrEqual(60)
+    // expanded: every step of it
+    await $.command.run({ command: 'tokenscope', args: 'expand 1' })
+    ui = await mountPane($, 100)
+    expect((await ui.findAll({ type: 'Text', text: /^ {2}[├└] $/ })).length).toBe(8)   // 7 steps + the pending one's latest
+    expect(await ui.find({ type: 'Text', text: /other steps/ })).toBeUndefined()
   })
 
   // the live step's calls (payload ops) and one the transcript has not caught up with
@@ -906,7 +938,7 @@ describe('tokenscope-live', () => {
     expect(await ui.find({ type: 'Text', text: /declare_intent/ })).toBeUndefined()
   })
 
-  test('intents: when a new intent starts the previous live one collapses to its head and detail line', async ($: any, on: any) => {
+  test('intents: when a new intent starts the previous one keeps its head, "+N other steps" and latest step; the calls move on', async ($: any, on: any) => {
     const clock = base(on)
     const before = [step(0, 'investigate', 'Read the code', { group: 0 }),
                     step(1, 'change', 'Fix the store', { group: 0, open: true, locked: false, ops: OPS })]
@@ -918,15 +950,17 @@ describe('tokenscope-live', () => {
     await $.session.start(SESSION)
     await clock.advance(1000)
     let ui = await mountPane($)
-    expect(await ui.find({ type: 'Text', text: /^▾1 $/ })).toBeDefined()
-    expect(await ui.find({ type: 'Text', text: 'unittest 22 passed' })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /^▸1 $/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: 'unittest 22 passed' })).toBeDefined()   // the live step's calls
     expect(await ui.find({ type: 'Text', text: /^ {3}↳ / })).toBeUndefined()
     await ui.unmount()
     steps = after
     await clock.advance(1000)
     ui = await mountPane($)
     expect(await ui.find({ type: 'Text', text: /^▸1 $/ })).toBeDefined()
-    expect(await ui.find({ type: 'Text', text: '   ↳ Read the code · Fix the store' })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /^ {2}├ \+1 other step$/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /^ Fix the store$/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /^ Read the code$/ })).toBeUndefined()
     expect(await ui.find({ type: 'Text', text: 'unittest 22 passed' })).toBeUndefined()
     expect(await ui.find({ type: 'Text', text: 'Edit store.py' })).toBeDefined()
   })

@@ -660,13 +660,24 @@ def cmd_alerts(args):
     if args.json:
         print(json.dumps({"session": s.id if s else None, "alerts": got}, indent=2))
         return 0
-    print("%s: %d alert%s" % (s.id[:8] if s else "?", len(got), "" if len(got) == 1 else "s"))
-    for a in got:
-        where = "" if a["step"] is None else " step %s%s" % (
-            "%s-%s" % (a["first"], a["step"]) if a["first"] != a["step"] else a["step"], " (subagent)" if a["agent"] else "")
-        print("  [%s] %s/%s%s: %s" % (a["severity"], a["kind"], a["rule"], where, a["message"]))
+    trig = sum(a.get("count") or 1 for a in got)
+    print("%s: %d alert%s%s" % (s.id[:8] if s else "?", len(got), "" if len(got) == 1 else "s",
+                                " (one per kind; %d triggers)" % trig if trig > len(got) else ""))
+
+    def where(a):
+        if a["step"] is None:
+            return ""
+        return " step %s%s" % ("%s-%s" % (a["first"], a["step"]) if a["first"] != a["step"] else a["step"],
+                               " (subagent)" if a["agent"] else "")
+    for a in got:   # one per kind (alerts.collapse): the latest trigger leads
+        n = a.get("count") or 1
+        print("  [%s] %s/%s%s%s: %s" % (a["severity"], a["kind"], a["rule"], where(a), " \u00d7%d" % n if n > 1 else "",
+                                         a["message"]))
         for m in (a.get("reasons") or [])[1:]:   # the other alerts of the same step (alerts.group)
             print("      + [%s] %s/%s: %s" % (m["severity"], a["kind"], m["rule"], m["message"]))
+        for t in (a.get("triggers") or [])[-2::-1]:   # the earlier triggers, newest first
+            print("      earlier: [%s] %s/%s%s: %s" % (t["severity"], a["kind"], "+".join(t.get("rules") or [t["rule"]]),
+                                                       where(t), t["message"]))
     return 0
 
 

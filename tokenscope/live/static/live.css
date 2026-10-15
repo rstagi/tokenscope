@@ -202,7 +202,7 @@ body[data-page=session] header{position:static}
 .fnode .cat{font-size:10.5px;font-weight:700;flex:none}
 .fnode .fl{font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0}
 .fnode .fc{margin-left:auto;color:var(--mut);font-size:11.5px;font-variant-numeric:tabular-nums;white-space:nowrap;padding-left:8px}
-.fnode.open{border-color:#b8d8c0;box-shadow:0 0 0 3px #e9f7ec}
+.fnode.open,.fint.open{border-color:#b8d8c0;box-shadow:0 0 0 3px #e9f7ec}
 /* subagent branches under the step that launched them: parallel ones as siblings, nested ones indented again */
 .fbr+.fnode::before{content:"";position:absolute;left:12px;top:-11px;height:10px;border-left:2px solid #d5dae3}
 .fbr{margin:-4px 0 10px 22px;padding-left:12px;border-left:2px dashed #cfc6ea}
@@ -221,9 +221,26 @@ body[data-page=session] header{position:static}
 .fag .fbr{margin:-2px 0 6px 12px}
 .fag.done,.fag.idle{opacity:.85}
 .fmore{color:var(--mut);font-size:11.5px;margin:2px 0 4px}
-/* while a branch is live: finished main steps folded into one line; finished older branches as one header line */
-.ffold{margin:0 0 10px 10px;padding:2px 9px;font-size:11.5px;color:var(--mut);border-left:4px dotted #d5dae3;cursor:pointer;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.ffold:hover,.fag.foldable>.fah:hover{color:var(--acc)}
+/* intents: a header per intent, "+N other steps", its latest step (indented under it); finished older branches as one header line */
+.fint{position:relative;display:flex;align-items:center;gap:6px;margin:0 0 5px;background:#f4f6fa;border:1px solid var(--line);border-left:4px solid #ccc;border-radius:0 7px 7px 0;padding:4px 9px;font-size:12.5px;animation:fin .35s ease-out}
+.fint[title^="click"]{cursor:pointer}.fint[title^="click"]:hover .fl{color:var(--acc)}
+.fint .ftg{flex:none;width:9px;color:var(--mut);font-size:10px}
+.fint .cat{font-size:10.5px;font-weight:700;flex:none}
+.fint .fl{font-weight:700;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0}
+.fint.pending .fl{font-style:italic;font-weight:600;color:var(--mut)}
+.fint .fc{margin-left:auto;color:var(--mut);font-size:11.5px;font-variant-numeric:tabular-nums;white-space:nowrap;padding-left:8px}
+.fint .amark{flex:none;font-size:10px;color:#f08c00}.fint .amark.critical{color:#e03131}
+.fint.afocus{animation:afocus 1.6s ease-out;border-color:#3b5bdb}
+.fother{margin:0 0 4px 26px;font-size:11px;color:var(--mut);cursor:pointer;white-space:nowrap}
+.fother:hover{color:var(--acc)}
+.fsteps>.fint~.fnode{margin-left:26px;margin-bottom:8px;padding:2px 8px;font-size:12px}
+.fsteps>.fint~.fnode::before,.fsteps>.fint~.fbr+.fnode::before{display:none}
+.fsteps>.fint~.fbr{margin-left:36px}
+.fsteps>.fint:not(:first-child){margin-top:4px}
+.fag .fint{margin:0 0 4px 4px;padding:2px 8px;font-size:12px}
+.fag .fint~.fnode{margin-left:16px}
+.fag .fother{margin-left:18px}
+.fag.foldable>.fah:hover{color:var(--acc)}
 .fag.foldable>.fah{cursor:pointer}
 .fag.collapsed>.fasteps{display:none}
 .fag.live>.fah .fat{text-decoration:underline dotted #b5a6e6}
@@ -263,6 +280,10 @@ body[data-page=session] header{position:static}
 .alrow.acked{opacity:.55}.alrow.leaving{opacity:.25}
 .alrow.fresh{animation:afresh 2.4s ease-out}
 @keyframes afresh{0%{background:#fff0c2}100%{background:transparent}}
+.alrow.fresh.upd{animation:aupd 2.4s ease-out}
+@keyframes aupd{0%{background:#ffe3e3}100%{background:transparent}}
+.acount{font-size:11px;font-weight:700;padding:0 5px;border-radius:8px;background:#fff4d6;color:#8a5a00;font-variant-numeric:tabular-nums}
+.alrow.critical .acount{background:#ffe3e3;color:#c92a2a}
 .ar1{display:flex;align-items:center;gap:7px;min-width:0;white-space:nowrap}
 .asev{font-size:10px;color:#f08c00}.alrow.critical .asev{color:#e03131}
 .atime{color:var(--mut);font-variant-numeric:tabular-nums;font-size:11.5px}
@@ -283,6 +304,7 @@ body[data-page=session] header{position:static}
 .aint{color:var(--mut);font-size:11.5px;overflow:hidden;text-overflow:ellipsis;min-width:0}
 .areasons{margin:1px 0 0 17px;font-size:11.5px;color:var(--mut)}
 .areason.critical{color:#c92a2a}
+.aearlier{margin:1px 0 0 17px;font-size:11px;color:var(--mut);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 /* per-session badge: unacknowledged alerts by kind, worst severity's colour */
 .abadge{display:inline-block;font-size:11px;font-weight:700;padding:1px 7px;border-radius:9px;white-space:nowrap;background:#fff4d6;color:#8a5a00}
 .abadge.critical{background:#ffe3e3;color:#c92a2a}.abadge.info{background:#e7f5ff;color:#1864ab}

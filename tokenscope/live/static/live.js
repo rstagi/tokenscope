@@ -78,7 +78,7 @@
     if (!n) return;
     var top = Array.isArray(al.top) ? al.top : [];
     top.forEach(function (x) {
-      var c = el("span", "chip alert " + (x.severity || "warning"), "▲ " + alertName(x));
+      var c = el("span", "chip alert " + (x.severity || "warning"), "▲ " + alertName(x) + (x.count > 1 ? " ×" + x.count : ""));
       c.title = x.message || "";
       node.appendChild(c);
     });
@@ -554,7 +554,7 @@
       tile._usd = new Counter($(".usd", tile), fmtUsd);
       tile._follow = true;
       tile._nodes = {};
-      tile._open = {};   // folds / collapsed branches the user opened ("f<first step>", "a<agent id>")
+      tile._open = {};   // intents / collapsed branches the user opened ("i<scope>:<first step>", "a<agent id>")
       $(".fgoal", tile).href = SRC.sessionHref(id);
       var flow = $(".fflow", tile);
       // auto-follow: stick to the newest step until the user scrolls up; scrolling back down (or ↓) resumes it
@@ -565,7 +565,7 @@
       });
       // a tile that changes size (one added or removed) stays on its newest step
       if (window.ResizeObserver) new ResizeObserver(function () { if (tile._follow) scrollEnd(tile); }).observe(flow);
-      // ↓ latest: back to the auto view (what the user opened folds up again), following the newest step
+      // ↓ latest: back to the auto view (what the user opened closes again), following the newest step
       $(".fjump", tile).onclick = function (e) {
         e.stopPropagation();
         tile._follow = true;
@@ -573,7 +573,7 @@
         if (Object.keys(tile._open).length) { tile._open = {}; if (tile._s) updTile(tile, tile._s); }
         scrollEnd(tile);
       };
-      // opening / closing a fold or a collapsed branch: the user reads, so the tile stops following until ↓
+      // opening / closing an intent or a collapsed branch: the user reads, so the tile stops following until ↓
       tile._toggle = function (key) {
         tile._open[key] = !tile._open[key];
         tile._follow = false;
@@ -632,43 +632,95 @@
     // the step that launched them, its own subagents; reconciled by id so a poll only updates what changed
     function place(box, node, n) { if (box.children[n] !== node) box.insertBefore(node, box.children[n] || null); }
     function drop(node) { if (node && node.parentNode) node.parentNode.removeChild(node); }
-    // folds (main thread, while a branch is live): each run of finished steps is one "… N earlier steps · $X" line
-    // placed where the run starts; a click opens it (its shown steps) or closes it again
-    function syncSteps(box, steps, store, tile, folds) {
-      var n = 0, seen = {}, added = false, fp = 0, fs = store._folds || (store._folds = {});
-      folds = folds || [];
-      function foldLine(f) {
-        var key = "f" + f.first, nd = fs[key], open = !!tile._open[key];
-        if (!nd) {
-          nd = fs[key] = el("div", "ffold");
-          nd.onclick = function (e) { e.stopPropagation(); tile._toggle(key); };
-        }
-        seen[key] = 1;
-        nd.textContent = (open ? "▾ " + f.n + " step" + (f.n > 1 ? "s" : "") : "… " + f.n + " earlier step" + (f.n > 1 ? "s" : "")) +
-          " · " + fmtUsd(f.usd);
-        nd.title = fmtK(f.cw) + " CW · " + (open ? "click to fold" : "click to show the steps shown here");
-        place(box, nd, n++);
+    // intents (steps.intent_blocks; each step row's "intent"): every intent is a header line ("[CAT] label · N steps ·
+    // $X"), then "+N other steps" and only its latest step; its other steps stay hidden (their subagent branches
+    // still show, under the latest step) until a click on the header opens the intent, a second click closes it.
+    // A settled step outside any group is its own intent: the header alone. Steps without an intent (an older
+    // server) are listed as they come.
+    var SEV_N = {info: 0, warning: 1, critical: 2};
+    function intentHead(nd, b, open, al, x) {
+      var solo = b.kind === "step" && b.steps === 1, live = solo && x.open;
+      var mark = solo ? (x.tested === "pass" ? " ✓" : x.tested === "fail" ? " ✗" : "") : "";
+      var key = JSON.stringify([b.cat, b.label, b.kind, b.steps, b.usd, b.dur_s, open, al, live, mark]);
+      if (nd._k === key) return;
+      nd._k = key;
+      nd.className = "fint " + (b.kind || "group") + (open ? " opened" : "") + (live ? " open" : "");
+      nd.style.borderLeftColor = gcol(b.cat);
+      nd.innerHTML = '<span class="ftg"></span><span class="cat"></span><span class="fl"></span><span class="fc"></span>';
+      $(".ftg", nd).textContent = b.steps > 1 ? (open ? "▾" : "▸") : "";
+      var c = $(".cat", nd);
+      c.textContent = "[" + String(b.cat || "other").toUpperCase() + "]";
+      c.style.color = tcol(b.cat);
+      $(".fl", nd).textContent = (live ? "▶ " : "") + (b.label || "—") + (b.kind === "pending" ? "…" : "") + mark +
+        (b.source === "declared" ? " ✎" : "");
+      $(".fl", nd).title = b.kind === "pending" ? "the intent of these steps is not known yet" : (b.label || "");
+      $(".fc", nd).textContent = b.steps + " step" + (b.steps === 1 ? "" : "s") + " · " + fmtUsd(b.usd) +
+        (num(b.dur_s) != null ? " · " + fmtWall(b.dur_s) : "");
+      $(".fc", nd).title = fmtK(b.cw) + " CW";
+      if (al) {
+        var mk = el("span", "amark " + al, "▲");
+        mk.title = "alert in this intent (" + al + ")";
+        nd.insertBefore(mk, $(".fc", nd));
       }
+      nd.title = b.steps > 1 ? (open ? "click to show only the latest step" : "click to show all its steps") : "";
+    }
+    function syncSteps(box, steps, store, tile, intents, scope) {
+      var n = 0, seen = {}, added = false, hs = store._heads || (store._heads = {});
+      intents = intents || [];
+      var blocks = [];
       steps.forEach(function (x) {
-        while (fp < folds.length && folds[fp].first <= x.i) foldLine(folds[fp++]);
+        var b = x.intent != null ? intents[x.intent] : null, last = blocks[blocks.length - 1];
+        if (last && b && last.b === b) last.xs.push(x);
+        else blocks.push({b: b, xs: [x]});
+      });
+      function row(x, hide, hd) {
         seen[x.i] = 1;
         var e = store[x.i];
         if (!e) { e = store[x.i] = {nd: stepNode(x)}; added = true; }
-        var hide = x.fold != null && folds[x.fold] && !tile._open["f" + folds[x.fold].first];
+        e.hd = hd;
         updStep(e.nd, x);
         e.nd.style.display = hide ? "none" : "";
         place(box, e.nd, n++);
+        return e;
+      }
+      function branch(x) {
+        var e = store[x.i];
         if ((x.agents && x.agents.length) || x.agents_more) {
           if (!e.br) e.br = {el: el("div", "fbr"), ags: {}};
-          added = syncBranch(e.br, x.agents || [], x.agents_more, tile) || added;
-          e.br.el.style.display = hide ? "none" : "";
+          added = syncBranch(e.br, x.agents || [], x.agents_more, tile, scope + "/" + x.i) || added;
           place(box, e.br.el, n++);
         } else if (e.br) { drop(e.br.el); e.br = null; }
+      }
+      blocks.forEach(function (k) {
+        if (!k.b) { k.xs.forEach(function (x) { row(x, false, null); branch(x); }); return; }
+        var b = k.b, key = "i" + scope + ":" + b.first, open = !!tile._open[key], hd = hs[key];
+        if (!hd) {
+          hd = hs[key] = el("div", "fint");
+          hd.onclick = function (e) { e.stopPropagation(); if (hd._n > 1) tile._toggle(key); };
+          added = true;
+        }
+        seen[key] = 1;
+        hd._n = b.steps;
+        var al = k.xs.reduce(function (w, x) { return x._al && (SEV_N[x._al] || 0) >= (SEV_N[w] == null ? -1 : SEV_N[w]) ? x._al : w; }, null);
+        var latest = k.xs[k.xs.length - 1], other = b.steps - 1;
+        intentHead(hd, b, open, al, latest);
+        place(box, hd, n++);
+        if (open) { k.xs.forEach(function (x) { row(x, false, hd); branch(x); }); return; }
+        var okey = "o" + key, ot = hs[okey];
+        if (other > 0) {
+          if (!ot) { ot = hs[okey] = el("div", "fother"); ot.onclick = function (e) { e.stopPropagation(); tile._toggle(key); }; }
+          seen[okey] = 1;
+          ot.textContent = "+" + other + " other step" + (other > 1 ? "s" : "");
+          ot.title = "click to show " + (k.xs.length > 1 ? "them" : "the intent's steps shown here");
+          place(box, ot, n++);
+        }
+        k.xs.forEach(function (x) { if (x !== latest) row(x, true, hd); });
+        row(latest, b.kind === "step" && b.steps === 1, hd);   // a one-step intent: its header is the step
+        k.xs.forEach(function (x) { branch(x); });   // the intent's subagents stay in view
       });
-      while (fp < folds.length) foldLine(folds[fp++]);
-      Object.keys(fs).forEach(function (k) { if (!seen[k]) { drop(fs[k]); delete fs[k]; } });
+      Object.keys(hs).forEach(function (k) { if (!seen[k]) { drop(hs[k]); delete hs[k]; } });
       Object.keys(store).forEach(function (i) {
-        if (seen[i] || i === "_folds") return;
+        if (seen[i] || i === "_heads") return;
         drop(store[i].nd);
         if (store[i].br) drop(store[i].br.el);
         delete store[i];
@@ -677,7 +729,7 @@
     }
     var AG_ST = {running: "▶ running", starting: "starting…", idle: "quiet", done: "done", error: "failed"};
     // a finished branch that is not the latest is one header line (collapsed); a click on it shows its steps
-    function syncBranch(br, agents, more, tile) {
+    function syncBranch(br, agents, more, tile, scope) {
       var seen = {}, added = false, n = 0;
       agents.forEach(function (a, k) {
         var key = a.id || "pending:" + k + ":" + a.type;
@@ -700,8 +752,10 @@
         $(".fc", e.el).textContent = fmtUsd(a.usd) + (a.steps_n ? " · " + a.steps_n + " step" + (a.steps_n > 1 ? "s" : "") : "");
         $(".fc", e.el).title = fmtK(a.cw) + " CW (its own subagents included)";
         var box = $(".fasteps", e.el), steps = Array.isArray(a.steps) ? a.steps : [];
-        box.setAttribute("data-more", a.steps_n > steps.length ? "+" + (a.steps_n - steps.length) + " earlier" : "");
-        added = syncSteps(box, steps, e.store, tile) || added;
+        var early = a.intents && a.intents.length ? (a.intents_n || 0) - a.intents.length : 0;
+        box.setAttribute("data-more", early > 0 ? "+" + early + " earlier intent" + (early > 1 ? "s" : "") :
+          !a.intents && a.steps_n > steps.length ? "+" + (a.steps_n - steps.length) + " earlier" : "");
+        added = syncSteps(box, steps, e.store, tile, a.intents, scope + "/" + key) || added;
         place(br.el, e.el, n++);
       });
       Object.keys(br.ags).forEach(function (key) { if (!seen[key]) { drop(br.ags[key].el); delete br.ags[key]; } });
@@ -731,11 +785,11 @@
       var flow = $(".fsteps", tile), steps = Array.isArray(s.steps) ? s.steps : [], marks = s.alert_steps || {};
       steps.forEach(function (x) { x._al = marks[String(x.i)] || null; });
       if (window.TSAlerts) { TSAlerts.badge($(".fab", tile), s.alerts); TSAlerts.mark(tile, s.alerts); }
-      var added = syncSteps(flow, steps, tile._nodes, tile, s.folds);
+      var added = syncSteps(flow, steps, tile._nodes, tile, s.intents, "m");
       var ar = $(".fagn", tile);
       ar.textContent = s.agents_running ? s.agents_running + " subagent" + (s.agents_running > 1 ? "s" : "") + " running" : "";
-      var more = s.steps_n > steps.length ? s.steps_n - steps.length : 0;
-      flow.setAttribute("data-more", more ? "+" + more + " earlier steps" : "");
+      var more = s.intents ? s.intents_before || 0 : s.steps_n > steps.length ? s.steps_n - steps.length : 0;
+      flow.setAttribute("data-more", more ? "+" + more + " earlier " + (s.intents ? "intent" : "step") + (more > 1 ? "s" : "") : "");
       if (!steps.length) flow.setAttribute("data-more", "no steps yet");
       if (tile._follow && (added || tile._seq !== s.seq)) scrollEnd(tile);
       tile._seq = s.seq;
@@ -809,14 +863,16 @@
       tile.classList.remove("focus"); void tile.offsetWidth; tile.classList.add("focus");
       if (step == null) return true;
       var e = tile._nodes[step];
-      if (!e || e.nd.style.display === "none") return true;
+      if (!e) return true;
+      var nd = e.nd.style.display === "none" ? e.hd : e.nd;   // a step its intent hides: the intent's header
+      if (!nd) return true;
       var flow = $(".fflow", tile);
       tile._follow = false;
       $(".fjump", tile).style.display = "";
       tile._auto = true;
-      flow.scrollTop = Math.max(0, e.nd.offsetTop - flow.offsetTop - flow.clientHeight / 3);
+      flow.scrollTop = Math.max(0, nd.offsetTop - flow.offsetTop - flow.clientHeight / 3);
       setTimeout(function () { tile._auto = false; }, 50);
-      e.nd.classList.remove("afocus"); void e.nd.offsetWidth; e.nd.classList.add("afocus");
+      nd.classList.remove("afocus"); void nd.offsetWidth; nd.classList.add("afocus");
       return true;
     }
     function openSession(sid, step) {

@@ -50,7 +50,6 @@ FOLLOW_STATUS = {"working": "running"}   # follow-view tile status: running / wa
 FOLLOW_AGENTS = 12   # subagent branches one follow tile shows (active ones first; the rest counted per step)
 FOLLOW_AGENT_STEPS = 6   # latest steps shown in a subagent branch
 FOLLOW_DEPTH = 3     # nesting levels of subagent branches in a follow tile
-FOLLOW_FOLD_MIN = 2  # fewest consecutive finished main-thread steps folded into one summary line
 AGENT_CALL_S = 10 * 60   # a subagent call without its result keeps the subagent active this long (a long test run)
 
 
@@ -69,39 +68,6 @@ def follow_branches(rows):
         for a in r.get("agents", ()):
             a["collapsed"] = a["status"] in ("done", "error") and not a["live"] and a is not latest
     return live_any
-
-
-def follow_folds(steps, rows, min_run=FOLLOW_FOLD_MIN):
-    """While a subagent branch is live (follow_branches), fold the main-thread steps around it so it stays in view:
-    every run of >= min_run consecutive steps from the first shown one on that are finished and are not the
-    latest step, a step that launched a live branch, or the step that launched the latest branch becomes one
-    summary ({"first", "last": step i, "n", "usd", "cw"}; steps not shown, between an early launching step and
-    the latest ones, count too). Shown rows of a fold get "fold": its index. `steps` is the full list (i = index)."""
-    if not rows or not any(a.get("live") for r in rows for a in r.get("agents", ())):
-        return []
-    shown = {r["i"]: r for r in rows}
-    latest = next((r["i"] for r in reversed(rows) if r.get("agents")), None)
-    keep = {rows[-1]["i"], steps[-1]["i"], latest}
-    keep.update(r["i"] for r in rows if r["open"] or any(a.get("live") for a in r.get("agents", ())))
-    folds, run = [], []
-
-    def close():
-        if len(run) >= min_run:
-            for i in run:
-                if i in shown:
-                    shown[i]["fold"] = len(folds)
-            folds.append({"first": run[0], "last": run[-1], "n": len(run),
-                          "usd": round(sum(steps[i]["usd"] for i in run), 6),
-                          "cw": round(sum(steps[i]["cw"] for i in run), 1)})
-        run.clear()
-
-    for i in range(rows[0]["i"], steps[-1]["i"] + 1):
-        if i in keep or not steps[i]["closed"]:
-            close()
-        else:
-            run.append(i)
-    close()
-    return folds
 
 
 def board_order(rows):
@@ -1108,8 +1074,9 @@ class LiveState:
     def _board_alerts(self, s, now):
         """A board card's alerts: alert_counts, and the messages of the active ones not acknowledged (at most 3)."""
         al = self.alerts_public(s, now)
-        return {"alerts": dict(self.alert_counts(al), top=[{k: a[k] for k in ("id", "kind", "rule", "severity", "message")}
-                                                           for a in al if a["active"] and a["state"] == "new"][:3])}
+        keys = ("id", "kind", "rule", "severity", "message", "count")
+        return {"alerts": dict(self.alert_counts(al), top=[{k: a[k] for k in keys} for a in al
+                                                           if a["active"] and a["state"] == "new"][:3])}
 
     @staticmethod
     def alert_counts(al):
@@ -1165,24 +1132,43 @@ class LiveState:
         segmentations (steps(), agent_steps() keyed on the agent's own records), so polling stays cheap."""
         now = self.clock() if now is None else now
         status = self.status(s, now)
-        steps, _ = self.steps(s, now) if s.main.turn_steps else ([], [])
+        steps, gs = self.steps(s, now) if s.main.turn_steps else ([], [])
         ctx = self._follow_ctx(s, now) if s.agents or s.fanouts else None
         w = self._follow_now(s, now, ctx) if status == "working" else None
         tail = steps[-last_n:]
         shown = (self._follow_early(s, steps[:len(steps) - len(tail)], ctx) if ctx else []) + tail
         out = [self._follow_step(x, now, status == "working") for x in shown]
-        folds = []
         if ctx:
             self._follow_agents(s, None, shown, out, now, ctx, 0, tail[0]["ts0"])
-            if follow_branches(out):
-                folds = follow_folds(steps, out)
+            follow_branches(out)
+        intents, first_n, total_n = self._follow_intents(steps, gs, shown, out)
         return {"id": s.id, "short": s.id[:8], "project": self._project(s.project_raw),
                 "goal": s.goal["name"] if s.goal else None, "goal_source": s.goal["source"] if s.goal else None,
                 "status": "ended" if self.ended(s, now) else FOLLOW_STATUS.get(status, status),
                 "cw": round(s.totals["cw"], 1), "usd": round(s.totals["usd"], 6), "turns": s.totals["turns"],
                 "started": s.started, "last_ts": s.last_ts, "seq": s.seq, "steps_n": len(steps),
                 "agents_running": sum(ctx["active"].values()) + len(ctx["pending"]) if ctx else 0,
-                "now": w, "steps": out, "folds": folds, **self._tile_alerts(s, now)}
+                "now": w, "steps": out, "intents": intents, "intents_before": first_n, "intents_n": total_n,
+                **self._tile_alerts(s, now)}
+
+    def _follow_intents(self, steps, gs, shown, rows):
+        """The intents (steps.intent_blocks) the shown steps of a tile or branch belong to, oldest first, each row
+        tagged with its block ("intent": index in that list): the tile shows each intent's header, "+N other steps"
+        and only its latest step. Returns (blocks, blocks before the first shown one, all blocks)."""
+        blocks = stepsmod.intent_blocks(steps, gs)
+        at = {i: k for k, b in enumerate(blocks) for i in range(b["first"], b["last"] + 1)}
+        used, idx = [], {}
+        for x, r in zip(shown, rows):
+            k = at.get(x["i"])
+            if k is None:
+                continue
+            if k not in idx:
+                idx[k] = len(used)
+                used.append(k)
+            r["intent"] = idx[k]
+        out = [dict(blocks[k], label=self._lab(blocks[k]["label"]) if blocks[k]["kind"] != "pending"
+                    else blocks[k]["label"]) for k in used]
+        return out, used[0] if used else 0, len(blocks)
 
     def _tile_alerts(self, s, now):
         """A follow tile's alerts: alert_counts, and "alert_steps": {main step: worst severity of its alerts not
@@ -1307,9 +1293,10 @@ class LiveState:
 
     def _follow_agent(self, s, a, now, ctx, depth):
         active = ctx["active"].get(a["id"], False)
-        steps, _ = self.agent_steps(s, a["id"], now)
+        steps, gs = self.agent_steps(s, a["id"], now)
         shown = steps[-FOLLOW_AGENT_STEPS:]
         out = [self._follow_step(x, now, active) for x in shown]
+        intents, _, intents_n = self._follow_intents(steps, gs, shown, out)
         st = a["status"]
         if st in ("running", "starting") and not active:
             st = "idle"   # not finished, but quiet (no write, no open call) for a while
@@ -1318,7 +1305,8 @@ class LiveState:
         node = {"id": a["id"], "type": a["type"] or f.get("agent_type") or "agent",
                 "description": None if self.redact else (a.get("description") or f.get("description")),
                 "workflow": bool(a.get("workflow")), "status": "running" if active else st,
-                "cw": round(cw, 1), "usd": round(usd, 6), "turns": a["turns"], "steps_n": len(steps), "steps": out}
+                "cw": round(cw, 1), "usd": round(usd, 6), "turns": a["turns"], "steps_n": len(steps), "steps": out,
+                "intents": intents, "intents_n": intents_n}
         if depth + 1 < FOLLOW_DEPTH:
             self._follow_agents(s, a["id"], shown, out, now, ctx, depth + 1)
         return node
@@ -1327,7 +1315,8 @@ class LiveState:
         """A launched subagent that has not written its transcript yet."""
         return {"id": None, "type": f.get("agent_type") or "agent",
                 "description": None if self.redact else f.get("description"), "workflow": False,
-                "status": "starting", "cw": 0.0, "usd": 0.0, "turns": 0, "steps_n": 0, "steps": []}
+                "status": "starting", "cw": 0.0, "usd": 0.0, "turns": 0, "steps_n": 0, "steps": [], "intents": [],
+                "intents_n": 0}
 
     def follow(self, ids, now=None):
         """The follow view's payload for up to FOLLOW_MAX session ids (or unique prefixes): a tile each, in the
@@ -1564,7 +1553,8 @@ class LiveState:
 
     def alerts_public(self, s, now=None, limit=100):
         """The "alerts" payload key: the session's alert history (alertstore records not dismissed, newest first, at
-        most `limit`), each the alert as alerts.public last made it (grouped, "reasons") with "active" (in the
+        most `limit`; one per kind), each the alert as alerts.collapse last made it (the latest trigger's rule,
+        message, step and "reasons"; the worst severity; "count" and "triggers") with "active" (in the
         current run and active), "live" (in the current run), "state" (new / acked), "n", "ts" (first seen), "at"
         (its step's time) and "intent" ({"cat", "label"} of its step's intent). The current run is synced into the
         history first."""
@@ -1575,7 +1565,8 @@ class LiveState:
         for r in self.alert_store.records([s.id])[:limit]:
             a = live.get(r["id"])
             d = {k: r.get(k) for k in ("id", "kind", "rule", "severity", "message", "step", "first", "agent",
-                                       "reasons", "n", "ts", "at", "intent", "state", "raised")}
+                                       "reasons", "n", "ts", "at", "intent", "state", "raised", "triggers")}
+            d["count"] = r.get("count") or 1
             d["details"] = (a or {}).get("details") or {}
             d["active"] = bool(a and a["active"])
             d["live"] = a is not None
@@ -1583,7 +1574,8 @@ class LiveState:
         return out
 
     def _sync_alerts(self, s, now):
-        """The session's current alerts (alerts.public) with "at" / "intent", synced into the alert history."""
+        """The session's current alerts (alerts.public, with "at" / "intent", collapsed to one per kind:
+        alerts.collapse), synced into the alert history."""
         got = self.alerts(s, now)
         if not got:
             return []
@@ -1604,6 +1596,7 @@ class LiveState:
             g = next((g for g in gs if g["first"] <= x["i"] <= g["last"]), None)
             a["at"] = x.get("ts1") or x.get("ts0")
             a["intent"] = {"cat": (g or x)["cat"], "label": alertsmod.scrub(self._lab((g or x)["label"]))}
+        pub = alertsmod.collapse(pub, s.id)
         key = (s.seq, s.alerts_cache[0] if s.alerts_cache else None)
         if self.alert_synced.get(s.id) != key:
             self.alert_store.sync(s.id, pub, {"project": self._project(s.project_raw),
@@ -1654,8 +1647,9 @@ class LiveState:
             cache[sid] = {"project": self._project(s.project_raw), "goal": s.goal["name"] if s.goal else None} \
                 if s else {"project": r.get("project"), "goal": r.get("goal")}
         d = {k: r.get(k) for k in ("id", "sid", "n", "kind", "rule", "severity", "message", "step", "first", "agent",
-                                   "reasons", "ts", "at", "intent", "state", "raised", "acked_ts")}
-        d.update(short=sid[:8], **cache[sid])
+                                   "reasons", "ts", "at", "intent", "state", "raised", "acked_ts", "updated",
+                                   "triggers")}
+        d.update(short=sid[:8], count=r.get("count") or 1, **cache[sid])
         return d
 
     # ------------------------------------------------------------ idle recap (recap.py)

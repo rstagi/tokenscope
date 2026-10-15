@@ -1,6 +1,7 @@
-"""Alert grouping (alerts.group / public), the alert history (tokenscope/live/alertstore.py: dedupe by id, ack /
-dismiss, re-raise, merging a grown group, persistence across restarts) and its API (GET /api/alerts, POST
-/api/alerts/ack|dismiss|reopen), over the synthetic traces of tests/alerts_synth.py."""
+"""Alert grouping (alerts.group / public) and collapsing (alerts.collapse: one alert per kind per session), the alert
+history (tokenscope/live/alertstore.py: dedupe by id, ack / dismiss, re-raise on escalation only, migrating v2
+records, persistence across restarts) and its API (GET /api/alerts, POST /api/alerts/ack|dismiss|reopen), over the
+synthetic traces of tests/alerts_synth.py."""
 import io
 import json
 import os
@@ -71,9 +72,37 @@ class TestGrouping(unittest.TestCase):
         self.assertEqual([r["rule"] for r in al[0]["reasons"]], ["session_usd", "intent_usd"])
 
 
-def rec(id_, rule="jump", sev="warning", kind="cost", members=None, step=3, msg="m"):
+class TestCollapse(unittest.TestCase):
+    def test_one_alert_per_kind_latest_leads_worst_severity(self):
+        r1 = A.Alert("looping", "repeat_read", "critical", "read", step=3, first=1, key="r")
+        r2 = A.Alert("looping", "retry", "warning", "retry", step=9, first=7, key="t")
+        r3 = A.Alert("looping", "edit_revert", "warning", "revert", step=6, first=4, key="e")
+        c = A.Alert("cost", "jump", "warning", "j", step=5, first=5, key="jump:5")
+        got = A.collapse(A.public([r1, r2, r3, c], last_step=9), "sess-1")
+        self.assertEqual([a["kind"] for a in got], ["looping", "cost"])   # newest trigger first
+        loop = got[0]
+        self.assertEqual((loop["rule"], loop["message"], loop["step"], loop["first"]), ("retry", "retry", 9, 7))
+        self.assertEqual((loop["severity"], loop["count"]), ("critical", 3))   # the worst trigger's severity
+        self.assertEqual([t["rule"] for t in loop["triggers"]], ["repeat_read", "edit_revert", "retry"])
+        self.assertTrue(loop["active"])
+        self.assertEqual(loop["id"], A.alert_id("sess-1", "looping"))
+        # the id is per session and kind: the same as triggers come and go, another one in another session
+        self.assertEqual(A.collapse(A.public([r1]), "sess-1")[0]["id"], loop["id"])
+        self.assertNotEqual(A.collapse(A.public([r1]), "sess-2")[0]["id"], loop["id"])
+
+    def test_synthetic_traces_collapse(self):
+        on = cfg(**{"off_task.enabled": True, "off_task.use_prompt": True})
+        for name in alerts_synth.SESSIONS:
+            state, s = replay(fixture(name), redact=True, alerts_config=on)
+            al = state.alerts_public(s)
+            self.assertLessEqual(len(al), 3, name)
+            self.assertEqual(len({a["kind"] for a in al}), len(al), name)
+            self.assertEqual({a["id"] for a in al}, {A.alert_id(s.id, a["kind"]) for a in al}, name)
+
+
+def rec(id_, rule="jump", sev="warning", kind="cost", members=None, step=3, msg="m", count=1):
     return {"id": id_, "kind": kind, "rule": rule, "severity": sev, "message": msg, "step": step, "first": step,
-            "agent": None, "reasons": [], "members": members or [id_]}
+            "agent": None, "reasons": [], "members": members or [id_], "count": count, "triggers": []}
 
 
 class TestStore(unittest.TestCase):
@@ -109,28 +138,58 @@ class TestStore(unittest.TestCase):
         self.assertEqual(st2.ack(None, ["s1"]), 2)   # ack all of a session
         self.assertEqual(st2.summary("s1")["new"], 0)
 
-    def test_worse_comes_back(self):
+    def test_only_escalation_comes_back(self):
         st = self.store()
-        st.sync("s", [rec("a", members=["m1"])])
+        st.sync("s", [rec("a")])
         st.ack(["a"])
-        self.assertEqual(st.sync("s", [rec("a", members=["m1"], msg="m2")]), [])   # only the text changed
-        self.assertEqual(st.get("a")["state"], "acked")
-        self.assertEqual(st.sync("s", [rec("a", members=["m1", "m2"])]), ["a"])   # a new reason joined
-        self.assertEqual((st.get("a")["state"], st.get("a")["raised"]), ("new", 1))
+        # a new trigger at the same severity: updated in place (count, message, step), still acknowledged
+        self.assertEqual(st.sync("s", [rec("a", msg="m2", step=7, count=2)]), [])
+        r = st.get("a")
+        self.assertEqual((r["state"], r["count"], r["message"], r["step"], r["n"]), ("acked", 2, "m2", 7, 1))
+        # a lower severity never lowers it; the count never drops
+        st.sync("s", [rec("a", sev="info", msg="m3", count=1)])
+        self.assertEqual((st.get("a")["severity"], st.get("a")["count"], st.get("a")["state"]), ("warning", 2, "acked"))
+        # escalation: back as new
+        self.assertEqual(st.sync("s", [rec("a", sev="critical", count=3)]), ["a"])
+        self.assertEqual((st.get("a")["state"], st.get("a")["raised"], st.get("a")["severity"]), ("new", 1, "critical"))
         st.dismiss(["a"])
-        self.assertEqual(st.sync("s", [rec("a", members=["m1", "m2"], sev="critical")]), ["a"])   # severity up
-        self.assertEqual(st.get("a")["state"], "new")
+        self.assertEqual(st.sync("s", [rec("a", sev="critical", count=4)]), [])   # critical again: stays dismissed
+        self.assertEqual((st.get("a")["state"], st.get("a")["count"]), ("dismissed", 4))
         st.reopen(["a"])
+        self.assertEqual(st.get("a")["state"], "new")
+        self.assertEqual(len(st.records(["s"])), 1)   # never a second row
 
-    def test_a_grown_group_takes_over_its_members_records(self):
+    def test_v2_records_are_merged_per_session_and_kind(self):
+        os.makedirs(os.path.dirname(self.path))
+        v2 = [rec("c1", step=3, msg="old jump"), rec("c2", rule="intent_usd", sev="critical", step=9, msg="newest"),
+              rec("l1", kind="looping", rule="retry", step=5), rec("x1", kind="looping", rule="retry", step=2)]
+        meta = [("s1", 1, "acked", 100), ("s1", 2, "new", 200), ("s1", 3, "acked", 150), ("s2", 1, "dismissed", 50)]
+        with open(self.path, "w", encoding="utf-8") as f:
+            for r, (sid, n, state, ts) in zip(v2, meta):
+                del r["count"], r["triggers"]
+                r.update(sid=sid, n=n, state="new", ts=ts, raised=0)
+                f.write(json.dumps({"op": "put", "rec": r}) + "\n")
+                if state != "new":
+                    f.write(json.dumps({"op": "ack" if state == "acked" else "dismiss", "ids": [r["id"]], "ts": ts}) + "\n")
         st = self.store()
-        st.sync("s", [rec("x", kind="looping", rule="retry")])
-        st.ack(["x"])
-        st.sync("s", [rec("g", kind="looping", rule="retry", members=["x", "y"])])
-        self.assertIsNone(st.get("x"))
-        g = st.get("g")
-        self.assertEqual((g["n"], g["state"], g["members"]), (1, "new", ["x", "y"]))   # worse: new again
-        self.assertEqual([r["id"] for r in self.store().records()], ["g"])   # the drop is on disk too
+        cost, loop = st.get(A.alert_id("s1", "cost")), st.get(A.alert_id("s1", "looping"))
+        self.assertEqual((cost["count"], cost["severity"], cost["message"], cost["step"], cost["state"], cost["n"]),
+                         (2, "critical", "newest", 9, "new", 1))   # one was new: the merged one is
+        self.assertEqual([t["id"] for t in cost["triggers"]], ["c1", "c2"])
+        self.assertEqual((loop["count"], loop["state"], loop["n"]), (1, "acked", 2))
+        self.assertEqual(st.get(A.alert_id("s2", "looping"))["state"], "dismissed")
+        self.assertEqual(len(st.recs), 3)
+        with open(self.path, encoding="utf-8") as f:   # rewritten as v3 records
+            lines = [json.loads(x) for x in f]
+        self.assertEqual(sorted(x["rec"]["id"] for x in lines), sorted(st.recs))
+        self.assertTrue(all(x["rec"]["v"] == 3 for x in lines))
+        # the live model's collapsed alert lands on the merged record, keeping its number and state
+        st2 = self.store()
+        self.assertEqual(st2.sync("s1", [rec(A.alert_id("s1", "looping"), kind="looping", rule="retry", count=2)]), [])
+        r = st2.get(A.alert_id("s1", "looping"))
+        self.assertEqual((r["n"], r["state"], r["count"]), (2, "acked", 2))
+        self.assertEqual(st2.sync("s1", [rec("new-kind", kind="off_task", rule="unrelated")]), ["new-kind"])
+        self.assertEqual(st2.get("new-kind")["n"], 3)
 
     def test_compaction_and_bad_lines(self):
         st = self.store()
@@ -173,24 +232,58 @@ class TestStateHistory(unittest.TestCase):
         on = cfg(**{"off_task.enabled": True, "off_task.use_prompt": True})
         state, s = replay(fixture("showcase"), redact=True, alerts_config=on)
         al = state.alerts_public(s)
-        self.assertEqual([a["n"] for a in al], [1, 2, 3, 4, 5])
+        self.assertEqual(sorted(a["n"] for a in al), [1, 2, 3])   # one per kind
         self.assertTrue(all(a["at"] and a["intent"]["cat"] for a in al))
         state.alert_store.ack([al[0]["id"]])
         state.alert_store.dismiss([al[1]["id"]])
         al2 = state.alerts_public(s)
-        self.assertEqual([(a["id"], a["state"]) for a in al2],
-                         [(al[0]["id"], "acked")] + [(a["id"], "new") for a in al[2:]])
+        self.assertEqual([(a["id"], a["state"]) for a in al2], [(al[0]["id"], "acked"), (al[2]["id"], "new")])
         row = state.board_row(s, time.time())["alerts"]
-        self.assertEqual((row["n"], row["new"]), (4, 3))
+        self.assertEqual((row["n"], row["new"]), (2, 1))
         self.assertNotIn(al[0]["id"], [t["id"] for t in row["top"]])   # acked: no longer on the card
         tile = state.follow_tile(s)
-        self.assertEqual(tile["alerts"]["new"], 3)
-        self.assertEqual(set(tile["alert_steps"]), {str(a["step"]) for a in al[2:]})
+        self.assertEqual(tile["alerts"]["new"], 1)
+        self.assertEqual(set(tile["alert_steps"]), {str(al[2]["step"])})   # the latest trigger's step
         h = state.alert_history()
-        self.assertEqual(h["new"], 3)
+        self.assertEqual(h["new"], 1)
         self.assertEqual(h["sessions"][0]["id"], s.id)
-        self.assertEqual(len(h["alerts"]), 4)
-        self.assertEqual(len(state.alert_history(states=("new", "acked", "dismissed"))["alerts"]), 5)
+        self.assertEqual(len(h["alerts"]), 2)
+        self.assertEqual(len(state.alert_history(states=("new", "acked", "dismissed"))["alerts"]), 3)
+
+    def test_a_live_session_keeps_one_row_per_kind_as_triggers_arrive(self):
+        """The showcase written in two halves: the looping alert fires, is acknowledged, fires again (same
+        severity: count and latest step move, it stays acknowledged)."""
+        d = tempfile.mkdtemp()
+        try:
+            alerts_synth.write_all(d)
+            path = os.path.join(d, "-demo-showcase", alerts_synth.SESSIONS["showcase"] + ".jsonl")
+            lines = open(path, encoding="utf-8").read().splitlines(True)
+            cut = next(k for k, x in enumerate(lines) if "npm" in x or "lint" in x)   # before the retry loop
+            live = os.path.join(d, "live")
+            os.makedirs(os.path.join(live, "-demo-showcase"))
+            dst = os.path.join(live, "-demo-showcase", os.path.basename(path))
+            with open(dst, "w", encoding="utf-8") as f:
+                f.writelines(lines[:cut])
+            L = server.Live(live, since_minutes=10 ** 7, hooks=False, xhints=False)
+            L.poll_once()
+            s = next(iter(L.state.sessions.values()))
+            first = {a["kind"]: a for a in L.state.alerts_public(s)}
+            loop = first["looping"]
+            L.state.alert_store.ack([loop["id"]])
+            with open(dst, "a", encoding="utf-8") as f:
+                f.writelines(lines[cut:])
+            L.poll_once()
+            after = {a["kind"]: a for a in L.state.alerts_public(s)}
+            loop2 = after["looping"]
+            self.assertEqual(loop2["id"], loop["id"])
+            self.assertEqual(len([a for a in L.state.alerts_public(s) if a["kind"] == "looping"]), 1)
+            self.assertGreater(loop2["count"], loop["count"])
+            self.assertGreater(loop2["step"], loop["step"])
+            self.assertEqual(loop2["rule"], "retry")
+            self.assertEqual(loop2["state"], "acked")   # same severity: not raised again
+            L.stop.set()
+        finally:
+            shutil.rmtree(d, ignore_errors=True)
 
 
 class TestApi(unittest.TestCase):
@@ -349,8 +442,11 @@ class TestBrowser(unittest.TestCase):
             pg.wait_for_selector(".ftile .abadge", timeout=10000)
             self.assertGreaterEqual(pg.locator(".ftile .fnode .amark").count(), 1)
             pg.wait_for_selector("#fside .alrow", timeout=10000)
-            pg.locator("#fside .alrow", has_text="read loop").first.click()
-            pg.wait_for_selector(".ftile .fnode.afocus", timeout=5000)
+            loop = pg.locator("#fside .alrow", has_text="retry loop").filter(has_text=show)   # its latest trigger
+            self.assertEqual(loop.count(), 1)
+            self.assertIn("earlier: ", loop.inner_text())
+            loop.first.click()
+            pg.wait_for_selector(".ftile .fnode.afocus, .ftile .fint.afocus", timeout=5000)
             self.assertTrue(pg.locator(".ftile .fjump").is_visible())   # stopped following
             # "needs attention" on a session not followed yet pins it
             pg.locator("#fside .asess-chip", has_text=alerts_synth.SESSIONS["retry-loop"][:8]).click()

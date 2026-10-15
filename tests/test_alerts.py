@@ -521,7 +521,10 @@ class TestSyntheticTraces(unittest.TestCase):
         for name, want in EXPECTED.items():
             state, s = replay(fixture(name), redact=True, alerts_config=on)
             got = state.alerts_public(s)
-            self.assertEqual({(a["kind"], m["rule"]) for a in got for m in a["reasons"]}, want, name)
+            # one alert per kind; every trigger of it (each with its reasons) is listed on it
+            self.assertEqual({(a["kind"], r) for a in got for t in a["triggers"] for r in t["rules"]}, want, name)
+            self.assertEqual(len(got), len({a["kind"] for a in got}), name)
+            self.assertTrue(all(a["count"] == len(a["triggers"]) for a in got), name)
             self.assertTrue(all(a["step"] is not None for a in got), name)
         state, s = replay(fixture("off-task"), redact=True)   # default config: off-task stays off
         self.assertEqual(state.alerts_public(s), [])
@@ -543,20 +546,21 @@ class TestSyntheticTraces(unittest.TestCase):
             now = s.last_ts + 5
             compact = state.session_compact(s, now)
             flow = state.session_flow(s, now)
-            self.assertEqual(len(compact["alerts"]), 5)
+            self.assertEqual(len(compact["alerts"]), 3)   # cost, off-task, looping: one each
             self.assertEqual(flow["alerts"], compact["alerts"])
             self.assertEqual({"id", "kind", "rule", "severity", "message", "step", "first", "agent", "details",
-                              "active", "reasons", "n", "ts", "at", "intent", "state", "raised", "live"},
-                             set(compact["alerts"][0]))
+                              "active", "reasons", "n", "ts", "at", "intent", "state", "raised", "live", "count",
+                              "triggers"}, set(compact["alerts"][0]))
             self.assertEqual({a["state"] for a in compact["alerts"]}, {"new"})
-            # the newest ones (retry at the last step, the read loop just before it) are active
-            act = {a["rule"] for a in compact["alerts"] if a["active"]}
-            self.assertIn("retry", act)
-            self.assertNotIn("edit_revert", act)
+            loop = next(a for a in compact["alerts"] if a["kind"] == "looping")
+            # the looping alert: three triggers, the latest (retry at the last step) leads and makes it active
+            self.assertEqual((loop["count"], loop["rule"], loop["active"]), (3, "retry", True))
+            self.assertEqual([t["rule"] for t in loop["triggers"]], ["edit_revert", "repeat_read", "retry"])   # by latest step
+            self.assertEqual(loop["id"], A.alert_id(s.id, "looping"))
             row = state.board_row(s, now)
-            self.assertEqual((row["alerts"]["n"], row["alerts"]["worst"]), (5, "warning"))
+            self.assertEqual((row["alerts"]["n"], row["alerts"]["worst"]), (3, "warning"))   # worst active one
             self.assertTrue(row["alerts"]["top"])
-            self.assertEqual(state.follow_tile(s, now)["alerts"]["n"], 5)
+            self.assertEqual(state.follow_tile(s, now)["alerts"]["n"], 3)
             # "intent" is the step's label as the views show it (redaction-aware), not alert text
             blob = json.dumps([{k: v for k, v in a.items() if k != "intent"} for a in compact["alerts"]]) + \
                 json.dumps(row["alerts"])
@@ -581,7 +585,9 @@ class TestSyntheticTraces(unittest.TestCase):
             self.assertEqual(cli.main(["alerts", "a1e70008", "--root", FIXTURES, "--off-task",
                                        "--alert", "off_task.use_prompt=true"]), 0)
         text = out.getvalue()
-        self.assertIn("a1e70008: 5 alerts", text)
+        self.assertIn("a1e70008: 3 alerts (one per kind; 5 triggers)", text)
+        self.assertIn("  [warning] looping/retry step 23 \u00d73: same failing command retried 3\u00d7", text)
+        self.assertIn("      earlier: [warning] looping/edit_revert step ", text)
         out = io.StringIO()
         with redirect_stdout(out):
             self.assertEqual(cli.main(["alerts", "a1e70002", "--root", FIXTURES]), 0)   # one step, two reasons
@@ -645,17 +651,18 @@ class TestApi(unittest.TestCase):
     def test_endpoints(self):
         sid = alerts_synth.SESSIONS["showcase"]
         d = self.get("/api/session/%s/alerts" % sid[:8])
-        self.assertEqual(len(d["alerts"]), 5)
+        self.assertEqual(len(d["alerts"]), 3)   # one per kind
+        self.assertEqual(sum(a["count"] for a in d["alerts"]), 5)
         self.assertTrue(d["config"]["off_task"]["enabled"])
         self.assertEqual(self.get("/api/session/%s/compact" % sid[:8])["alerts"], d["alerts"])
         self.assertEqual(self.get("/api/session/%s/flow" % sid[:8])["alerts"], d["alerts"])
         board = {r["id"]: r for r in self.get("/api/board")["sessions"]}
-        self.assertEqual(board[sid]["alerts"]["n"], 5)
+        self.assertEqual(board[sid]["alerts"]["n"], 3)
         self.assertEqual(board[alerts_synth.SESSIONS["clean"]]["alerts"], {"n": 0, "active": 0, "worst": None,
                                                                            "by_kind": {}, "top": [], "new": 0,
                                                                            "new_by_kind": {}, "new_worst": None})
         follow = self.get("/api/follow?s=" + sid[:8])
-        self.assertEqual(follow["sessions"][0]["alerts"]["n"], 5)
+        self.assertEqual(follow["sessions"][0]["alerts"]["n"], 3)
 
 
 def _playwright():
@@ -682,7 +689,7 @@ class TestBrowser(TestApi):
             pg.goto(self.base + "/s/" + sid[:8])
             pg.wait_for_selector(".react-flow__node-intent .amark", timeout=10000)
             marks = pg.locator(".react-flow__node-intent .ihd .amark")
-            self.assertGreaterEqual(marks.count(), 4)
+            self.assertGreaterEqual(marks.count(), 3)   # one alert per kind, on its latest trigger's node
             tips = "\n".join(marks.nth(k).get_attribute("data-tip") for k in range(marks.count()))
             for name in ("cost jump", "retry loop", "read loop", "edit revert", "off-task"):
                 self.assertIn(name, tips)

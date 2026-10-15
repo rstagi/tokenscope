@@ -8,11 +8,13 @@ Endpoints (see docs/live-spec.md):
   GET /api/board                 all sessions in a stable order (state.board_order: by start, ended ones last;
                                  idle > 6 h dropped)
   GET /api/follow?s=<id>,...     the follow view's tiles (state.follow): up to 4 sessions' latest steps with $,
-                                 totals and status in one request; subagent branches, and while one runs "folds"
-                                 of finished main steps (state.follow_branches / follow_folds)
+                                 totals and status in one request; the intents those steps belong to
+                                 (steps.intent_blocks: "intents", each row's "intent"), subagent branches
+                                 (state.follow_branches)
   GET /api/session/<id>          full session model (+ "seq"); ?since=<seq> -> only new / updated steps
-  GET /api/session/<id>/alerts   the session's alert history (tokenscope/alerts.py, grouped; alertstore.py: "state"
-                                 new / acked, "active", "n", "ts", "intent") plus the config in use
+  GET /api/session/<id>/alerts   the session's alert history (tokenscope/alerts.py: one alert per kind, "count" and
+                                 "triggers"; alertstore.py: "state" new / acked, "active", "n", "ts", "intent") plus
+                                 the config in use
   GET /api/alerts                the alert history across sessions (state.alert_history): ?s=<id>,... only those,
                                  ?state=all also the dismissed ones, &limit=N; "sessions": who needs attention
   POST /api/alerts/ack           acknowledge: {"ids": [...]} or {"all": true[, "sessions": [<id>, ...]]}

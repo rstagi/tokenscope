@@ -1,20 +1,26 @@
 """Alert history: every alert the live server saw, per session, with its acknowledgement state, kept on disk so it
 survives page reloads and server restarts.
 
-A record is one (grouped) alert of a session (tokenscope.alerts.public), keyed by its stable id:
+A record is a session's one alert of a kind (tokenscope.alerts.collapse: at most one cost, one off-task and one
+looping alert per session), keyed by its stable id alerts.alert_id(session, kind):
 
-    {"id", "sid", "n" (1, 2, ... per session, in the order first seen: the pane's "#n"), "kind", "rule", "severity",
-     "message", "step", "first", "agent", "reasons", "members", "ts" (first seen, server clock), "at" (the step's
-     time in the transcript), "updated", "intent" ({"cat", "label"} of the step), "project", "goal",
-     "state": "new" | "acked" | "dismissed", "acked_ts", "dismissed_ts", "raised" (times it came back)}
+    {"id", "sid", "n" (1, 2, 3 per session, in the order first seen: the pane's "#n"), "kind", "rule", "severity",
+     "message", "step", "first", "agent", "reasons", "members", "count" (triggers so far), "triggers", "ts" (first
+     seen, server clock), "at" (the latest trigger's step time in the transcript), "updated", "intent" ({"cat",
+     "label"} of that step), "project", "goal", "state": "new" | "acked" | "dismissed", "acked_ts", "dismissed_ts",
+     "raised" (times it came back), "v": 3}
 
-An acknowledged or dismissed alert comes back ("new" again, "raised" + 1) when it gets worse: a new reason joins
-its group or its severity rises. A record whose members another group now holds is merged into that group.
+A new trigger of the same kind updates the record in place: the latest trigger's rule, message, step and reasons,
+"count", and a severity that only ever rises. An acknowledged or dismissed alert comes back ("new" again, "raised"
++ 1) only when its severity rises; a trigger at the same (or a lower) severity updates it and leaves it acknowledged.
 
 Storage: JSON lines, append-only ({"op": "put", "rec": {...}} | {"op": "ack" | "dismiss", "ids": [...], "ts"} |
-{"op": "drop", "ids": [...]}), replayed at load and compacted (one put per record) when mostly superseded. Default
-file: $TOKENSCOPE_ALERTS_HISTORY, else $TOKENSCOPE_CACHE_DIR/alerts-history.jsonl (~/.cache/tokenscope/). Messages
-are the alerts' own privacy-safe text (alerts.scrub ran over them); labels are as the server showed them.
+{"op": "drop", "ids": [...]}), replayed at load and compacted (one put per record) when mostly superseded. Records
+of an older history (v2: one per kind, thread and step) are merged at load into one per session and kind (count:
+how many there were; the worst severity; the newest one's message and step; "new" if any was) and the file is
+rewritten. Default file: $TOKENSCOPE_ALERTS_HISTORY, else $TOKENSCOPE_CACHE_DIR/alerts-history.jsonl
+(~/.cache/tokenscope/). Messages are the alerts' own privacy-safe text (alerts.scrub ran over them); labels are as
+the server showed them.
 """
 import json
 import os
@@ -22,7 +28,7 @@ import sys
 import threading
 import time
 
-from ..alerts import SEV_RANK
+from ..alerts import SEV_RANK, alert_id
 
 STATES = ("new", "acked", "dismissed")
 MAX_RECORDS = 5000   # oldest dismissed, then oldest acknowledged records go first beyond this
@@ -36,7 +42,8 @@ def default_path():
     return os.path.join(d, "alerts-history.jsonl")
 
 
-FIELDS = ("kind", "rule", "severity", "message", "step", "first", "agent", "reasons", "members")
+FIELDS = ("kind", "rule", "message", "step", "first", "agent", "reasons", "members", "triggers")
+VERSION = 3
 
 
 class AlertStore:
@@ -45,7 +52,6 @@ class AlertStore:
     def __init__(self, path=None, clock=time.time, max_records=MAX_RECORDS):
         self.path, self.clock, self.max_records = path, clock, max_records
         self.recs = {}          # id -> record
-        self.by_member = {}     # member alert id -> record id
         self.by_sid = {}        # session id -> {record id}
         self.seq = {}           # sid -> last "n" given
         self.version = 0        # bumps on every change (board / SSE signatures)
@@ -69,8 +75,47 @@ class AlertStore:
                     continue   # a line cut short by a crash
                 self._lines += 1
                 self._apply(op)
-        if self._lines > 2 * len(self.recs) + 200:
+        if self._migrate() or self._lines > 2 * len(self.recs) + 200:
             self._compact()
+
+    def _migrate(self):
+        """Merge older records (v2: one per kind, thread and step) into one per session and kind. Returns whether
+        any were merged (the file is then rewritten)."""
+        old = {}
+        for r in self.recs.values():
+            if r.get("v") != VERSION:
+                old.setdefault((r["sid"], r.get("kind") or "?"), []).append(r)
+        if not old:
+            return False
+        for sid in {k[0] for k in old}:
+            self.seq.pop(sid, None)
+        for (sid, kind), rs in sorted(old.items(), key=lambda kv: min(r.get("ts") or 0 for r in kv[1])):
+            rid = alert_id(sid, kind)
+            cur = self.recs.get(rid) if self.recs.get(rid, {}).get("v") == VERSION else None
+            allr = rs + ([cur] if cur else [])
+            allr.sort(key=lambda r: (r.get("step") if r.get("step") is not None else -1, r.get("ts") or 0))
+            lead = allr[-1]
+            states = {r.get("state", "new") for r in allr}
+            m = dict(lead, id=rid, v=VERSION,
+                     severity=max((r.get("severity") for r in allr), key=lambda v: SEV_RANK.get(v, 0)),
+                     count=sum(r.get("count") or 1 for r in allr),
+                     triggers=[t for r in allr for t in r.get("triggers") or [
+                         {k: r.get(k) for k in ("id", "rule", "severity", "message", "step", "first", "agent")}]],
+                     members=[i for r in allr for i in r.get("members") or [r["id"]]],
+                     ts=min(r.get("ts") or 0 for r in allr), updated=max(r.get("updated") or 0 for r in allr),
+                     raised=max(r.get("raised") or 0 for r in allr),
+                     state="new" if "new" in states else "acked" if "acked" in states else "dismissed")
+            m.pop("n", None)
+            for r in rs:
+                self._unindex(r["id"])
+            self._index(m)
+        for sid in {k[0] for k in old}:   # renumber: #1.. in the order first seen
+            for n, rid in enumerate(sorted(self.by_sid.get(sid, ()), key=lambda i: (self.recs[i].get("ts") or 0,
+                                                                                     i)), 1):
+                self.recs[rid]["n"] = n
+            self.seq[sid] = len(self.by_sid.get(sid, ()))
+        self.version += 1
+        return True
 
     def _apply(self, op):
         kind = op.get("op")
@@ -87,14 +132,8 @@ class AlertStore:
                 self._unindex(i)
 
     def _index(self, r):
-        old = self.recs.get(r["id"])
-        if old is not None:
-            for m in old.get("members") or ():
-                self.by_member.pop(m, None)
         self.recs[r["id"]] = r
         self.by_sid.setdefault(r["sid"], set()).add(r["id"])
-        for m in r.get("members") or ():
-            self.by_member[m] = r["id"]
         if r.get("n"):
             self.seq[r["sid"]] = max(self.seq.get(r["sid"], 0), r["n"])
 
@@ -102,9 +141,6 @@ class AlertStore:
         r = self.recs.pop(rid, None)
         if r is not None:
             self.by_sid.get(r["sid"], set()).discard(rid)
-        for m in (r or {}).get("members") or ():
-            if self.by_member.get(m) == rid:
-                self.by_member.pop(m, None)
 
     @staticmethod
     def _set_state(r, state, ts):
@@ -156,8 +192,8 @@ class AlertStore:
 
     # ------------------------------------------------------------ sync from the live model
     def sync(self, sid, alerts, meta=None):
-        """Upsert a session's current public alerts (each may carry "at" and "intent"); meta: {"project", "goal"}.
-        Returns the ids of new or re-raised records."""
+        """Upsert a session's current collapsed alerts (alerts.collapse: one per kind, each may carry "at" and
+        "intent"); meta: {"project", "goal"}. Returns the ids of new or re-raised records."""
         meta = meta or {}
         now = self.clock()
         ops, fresh = [], []
@@ -165,42 +201,28 @@ class AlertStore:
             for a in alerts:
                 rid = a["id"]
                 r = self.recs.get(rid)
-                members = list(a.get("members") or [rid])
-                absorbed = []
-                if r is None:   # a group that grew: take over the records of its members
-                    absorbed = sorted({self.by_member[m] for m in members if m in self.by_member} - {rid},
-                                      key=lambda i: self.recs[i].get("ts") or 0)
-                old = [self.recs[i] for i in absorbed]
-                base = r or (old[0] if old else None)
-                if base is None:
+                if r is None:
                     n = self.seq.get(sid, 0) + 1
                     self.seq[sid] = n
                     r = {"id": rid, "sid": sid, "n": n, "ts": now, "state": "new", "acked_ts": None,
-                         "dismissed_ts": None, "raised": 0}
-                    changed = True
+                         "dismissed_ts": None, "raised": 0, "v": VERSION, "severity": a["severity"], "count": 0}
                     fresh.append(rid)
+                    changed = True
                 else:
-                    if r is None:
-                        r = dict(base, id=rid)
-                        if any(x.get("state") == "new" for x in old):
-                            r["state"] = "new"
-                    prev = set(base.get("members") or ()) | {m for x in old for m in x.get("members") or ()}
-                    worse = bool(set(members) - prev) or \
-                        SEV_RANK.get(a["severity"], 0) > SEV_RANK.get(r.get("severity"), 0)
-                    changed = bool(old) or any(r.get(k) != a.get(k) for k in FIELDS)
-                    if worse and r.get("state") != "new":
-                        r.update(state="new", raised=(r.get("raised") or 0) + 1)
-                        fresh.append(rid)
+                    changed = any(r.get(k) != a.get(k) for k in FIELDS) or (a.get("count") or 1) > (r.get("count") or 0)
+                worse = SEV_RANK.get(a["severity"], 0) > SEV_RANK.get(r.get("severity"), 0)
+                if worse and r.get("state") != "new":   # escalated: back as new
+                    r.update(state="new", raised=(r.get("raised") or 0) + 1)
+                    fresh.append(rid)
+                changed = changed or worse
                 if not changed and (a.get("intent") is None or r.get("intent") == a.get("intent")):
                     continue
-                r.update({k: a.get(k) for k in FIELDS}, members=members, updated=now,
+                r.update({k: a.get(k) for k in FIELDS}, updated=now,
+                         severity=a["severity"] if worse else r["severity"],
+                         count=max(r.get("count") or 0, a.get("count") or 1),
                          at=a.get("at") if a.get("at") is not None else r.get("at"),
                          intent=a.get("intent") or r.get("intent"),
                          project=meta.get("project", r.get("project")), goal=meta.get("goal", r.get("goal")))
-                for i in absorbed:
-                    self._unindex(i)
-                if absorbed:
-                    ops.append({"op": "drop", "ids": absorbed})
                 self._index(r)
                 ops.append({"op": "put", "rec": r})
             self._write(ops)

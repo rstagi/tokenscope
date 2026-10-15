@@ -25,6 +25,9 @@ html,body{height:100%;margin:0}
 .irow{display:flex;gap:6px;align-items:baseline;height:19px;font-size:11.5px;white-space:nowrap;min-width:0}
 .irow .cat{font-size:9.5px}.irow .rl{overflow:hidden;text-overflow:ellipsis;min-width:0}
 .irow.open .rl{font-weight:700}
+.irow.iother{font-size:10.5px;padding-left:2px}
+.irow:not(.iother){padding-left:10px}
+.inode.pending .sl{font-style:italic}
 .irow .rn{margin-left:auto;color:#6b7280;padding-left:6px;font-variant-numeric:tabular-nums;flex:none}
 .anode{box-sizing:border-box;background:#fffbea;border:1px solid #f0d77a;border-radius:9px;padding:5px 10px;font-size:12px;cursor:pointer;overflow:hidden;animation:nodein .4s ease-out}
 .anode.live{box-shadow:0 0 0 2px rgba(212,160,23,.45)}

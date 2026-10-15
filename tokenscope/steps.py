@@ -531,6 +531,48 @@ def groups(steps, model_groups=None, prior=None):
     return [_stats(g, steps) for g in sorted(out, key=lambda g: g["first"]) if g["last"] < n]
 
 
+PENDING_LABEL = "pending intent"
+
+
+def intent_blocks(steps, gs):
+    """The intents a flow view lists, in step order, each with its steps: an intent group; a run of steps whose
+    label is not settled yet (not locked: open, or waiting for the model) outside any group, as one "pending" block
+    (its intent is not known yet); a settled step outside any group, as its own one-step intent. Every step is in
+    exactly one block. [{"kind": "group" | "pending" | "step", "group" (index in gs, else None), "first", "last",
+    "label", "cat", "source", "steps" (count), "cw", "usd", "dur_s", "skills"}]."""
+    gi = {i: n for n, g in enumerate(gs) for i in range(g["first"], g["last"] + 1)}
+    out, cur = [], None
+    for x in steps:
+        n = gi.get(x["i"])
+        key = ("group", n) if n is not None else ("pending", None) if not x.get("locked") else ("step", x["i"])
+        if cur is not None and cur[0] == key and cur[1][-1]["i"] == x["i"] - 1:
+            cur[1].append(x)
+            continue
+        cur = (key, [x])
+        out.append(cur)
+    blocks = []
+    for (kind, ref), xs in out:
+        if kind == "group":
+            g = gs[ref]
+            b = {"label": g["label"], "cat": g["cat"], "source": g["source"], "steps": g["steps"], "cw": g["cw"],
+                 "usd": g["usd"], "dur_s": g.get("dur_s"), "skills": g.get("skills") or [], "first": g["first"],
+                 "last": g["last"]}
+        else:
+            last = xs[-1]
+            ts = [t for x in xs for t in (x.get("ts0"), x.get("ts1"), x.get("drive_ts1")) if t]
+            skills = []
+            for x in xs:
+                skills += [k for k in x.get("skills") or () if k not in skills]
+            b = {"label": PENDING_LABEL if kind == "pending" else last["label"], "cat": last["cat"],
+                 "source": None if kind == "pending" else last.get("source"), "steps": len(xs),
+                 "cw": round(sum(x["cw"] for x in xs), 1), "usd": round(sum(x["usd"] for x in xs), 6),
+                 "dur_s": duration(min(ts), max(ts)) if ts else None, "skills": skills, "first": xs[0]["i"],
+                 "last": last["i"]}
+        b.update(kind=kind, group=ref if kind == "group" else None)
+        blocks.append(b)
+    return blocks
+
+
 class Labeller:
     """Locked step and group labels. A closed step is labelled once (signals, else a model label, else -- after
     finalize(no_model=True) -- its rule label) and never renamed; open / pending steps show the rule label."""

@@ -1,5 +1,6 @@
 // tokenscope live — the alerts section shared by the board, the follow view and the session canvas: the alert
-// history from GET /api/alerts (every alert of the sessions, grouped per step, with its state), "needs attention"
+// history from GET /api/alerts (at most one alert per kind per session: a new trigger updates it in place, with a
+// count, its latest message and step, a severity that only rises; with its state), "needs attention"
 // (the sessions with alerts not acknowledged, worst first), ack / dismiss per alert and "ack all" (POST
 // /api/alerts/ack|dismiss), and a collapsed state kept in localStorage. Also the per-session badge (unacknowledged
 // counts by kind in the worst severity's colour) the board cards and follow tiles draw.
@@ -54,7 +55,8 @@
     }
   };
 
-  // "▲ cost 2 · loop 1" in the worst unacknowledged severity's colour; nothing when all is acknowledged.
+  // "▲ cost · loop" (the kinds with an alert not acknowledged: one alert per kind) in the worst unacknowledged
+  // severity's colour; nothing when all is acknowledged.
   // c: a board / follow "alerts" counts object ({new, new_by_kind, new_worst, n})
   function badge(node, c, before) {
     var b = node.querySelector(".abadge");
@@ -62,8 +64,9 @@
     if (!n) { if (b) b.parentNode.removeChild(b); return null; }
     if (!b) { b = el("span", "abadge"); node.insertBefore(b, before || null); }
     var by = c.new_by_kind || {}, parts = [];
-    ["cost", "off_task", "looping"].forEach(function (k) { if (by[k]) parts.push(KIND[k] + " " + by[k]); });
-    Object.keys(by).forEach(function (k) { if (!KIND[k]) parts.push(k + " " + by[k]); });
+    function part(k) { return (KIND[k] || k) + (by[k] > 1 ? " " + by[k] : ""); }   // > 1: an older history
+    ["cost", "off_task", "looping"].forEach(function (k) { if (by[k]) parts.push(part(k)); });
+    Object.keys(by).forEach(function (k) { if (!KIND[k]) parts.push(part(k)); });
     b.className = "abadge " + (c.new_worst || "warning");
     b.textContent = "▲ " + parts.join(" · ");
     b.title = n + " alert" + (n > 1 ? "s" : "") + " not acknowledged (" + (c.new_worst || "warning") + ")" +
@@ -125,15 +128,20 @@
     };
 
     function row(a, fresh) {
-      var r = el("div", "alrow " + (a.severity || "warning") + " " + (a.state || "new") + (fresh ? " fresh" : ""));
+      var r = el("div", "alrow " + (a.severity || "warning") + " " + (a.state || "new") + (fresh ? " fresh" + (fresh === "upd" ? " upd" : "") : ""));
       r.setAttribute("data-id", a.id);
       var top = el("div", "ar1");
       top.appendChild(el("span", "asev", a.severity === "critical" ? "▲▲" : "▲"));
       top.appendChild(el("span", "atime", clock(a.at != null ? a.at : a.ts)));
-      top.lastChild.title = "step time " + clock(a.at) + " · first seen " + clock(a.ts);
+      top.lastChild.title = "latest trigger's step time " + clock(a.at) + " · first seen " + clock(a.ts);
       top.appendChild(el("span", "akind k-" + a.kind, KIND_LONG[a.kind] || a.kind));
       var name = el("b", "arule", ruleName(a));
       top.appendChild(name);
+      if (a.count > 1) {
+        var cn = el("span", "acount", "×" + a.count);
+        cn.title = "fired " + a.count + " times in this session: this row is updated in place (latest trigger shown)";
+        top.appendChild(cn);
+      }
       var rs = Array.isArray(a.reasons) ? a.reasons : [];
       if (rs.length > 1) top.appendChild(el("span", "amore", "+" + (rs.length - 1) + " reason" + (rs.length > 2 ? "s" : "")));
       var sub = el("div", "ar2");
@@ -178,6 +186,13 @@
         });
         r.appendChild(ul);
       }
+      var ts = Array.isArray(a.triggers) ? a.triggers.slice(0, -1).reverse() : [];
+      if (ts.length) {
+        var er = el("div", "aearlier", "earlier: " + ts.slice(0, 3).map(function (t) { return ruleName(t) + (t.step != null ? " " + where(t) : ""); }).join(" · ") +
+          (ts.length > 3 ? " · +" + (ts.length - 3) + " more" : ""));
+        er.title = ts.map(function (t) { return "[" + t.severity + "] " + ruleName(t) + " " + where(t) + ": " + t.message; }).join("\n");
+        r.appendChild(er);
+      }
       r.onclick = function () { if (opts.onJump) opts.onJump(a, false); };
       r.title = "click to show where it fired";
       return r;
@@ -208,12 +223,14 @@
     function render(d, force) {
       data = d;
       var list = (d.alerts || []).filter(function (a) { return filter === "all" || a.state === "new"; });
-      var key = JSON.stringify([filter, list.map(function (a) { return [a.id, a.state, a.severity, a.message, a.step, (a.reasons || []).length]; }),
+      var key = JSON.stringify([filter, list.map(function (a) { return [a.id, a.state, a.severity, a.message, a.step, a.count, (a.reasons || []).length]; }),
         (d.sessions || []).map(function (x) { return [x.id, x.new, x.worst, x.project]; })]);
+      // fresh: an alert not seen yet, or one updated in place (fired again, escalated, back after an ack)
       var fresh = {};
-      if (seen) (d.alerts || []).forEach(function (a) { if (!seen[a.id] && a.state === "new") fresh[a.id] = 1; });
+      function sig(a) { return [a.count, a.severity, a.raised, a.step].join("|"); }
+      if (seen) (d.alerts || []).forEach(function (a) { if (a.state === "new" && seen[a.id] !== sig(a)) fresh[a.id] = seen[a.id] ? "upd" : "new"; });
       seen = seen || {};
-      (d.alerts || []).forEach(function (a) { seen[a.id] = 1; });
+      (d.alerts || []).forEach(function (a) { seen[a.id] = sig(a); });
       var newN = (d.alerts || []).filter(function (a) { return a.state === "new"; }).length, total = (d.alerts || []).length;
       var nsess = (d.sessions || []).filter(function (x) { return x.new > 0; }).length;
       var sum = root.querySelector(".asum");
@@ -231,7 +248,7 @@
       var box = root.querySelector(".alist");
       box.innerHTML = "";
       if (!list.length) box.appendChild(el("div", "aempty", filter === "new" && total ? "every alert is acknowledged (see history)" : "no alerts yet"));
-      list.forEach(function (a) { box.appendChild(row(a, fresh[a.id])); });
+      list.forEach(function (a) { box.appendChild(row(a, fresh[a.id])); });   // one row per alert, updated in place
       if (Object.keys(fresh).length) {
         root.classList.remove("ping"); void root.offsetWidth; root.classList.add("ping");
         if (opts.onFresh) opts.onFresh((d.alerts || []).filter(function (a) { return fresh[a.id]; }));

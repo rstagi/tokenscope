@@ -659,5 +659,30 @@ class CLI(unittest.TestCase):
             shutil.rmtree(d, ignore_errors=True)
 
 
+class TestIntentBlocks(unittest.TestCase):
+    """steps.intent_blocks: what the flow views list (every step under an intent, never loose)."""
+
+    def test_groups_pending_and_settled_steps(self):
+        def x(i, locked=True, cat="change", label=None):
+            return {"i": i, "cat": cat, "label": label or "step %d" % i, "source": "rule", "locked": locked,
+                    "cw": 10.0, "usd": 0.5, "ts0": 100.0 + i, "ts1": 100.5 + i, "skills": []}
+        steps = [x(0), x(1), x(2), x(3), x(4), x(5, locked=False), x(6, locked=False, cat="verify")]
+        gs = [{"label": "Fix the tax", "source": "todo", "first": 1, "last": 3, "cat": "change", "cw": 30.0,
+               "usd": 1.5, "steps": 3, "dur_s": 2.5, "skills": []}]
+        got = sp.intent_blocks(steps, gs)
+        self.assertEqual([(b["kind"], b["first"], b["last"], b["steps"], b["label"]) for b in got],
+                         [("step", 0, 0, 1, "step 0"), ("group", 1, 3, 3, "Fix the tax"), ("step", 4, 4, 1, "step 4"),
+                          ("pending", 5, 6, 2, sp.PENDING_LABEL)])
+        self.assertEqual(got[1]["group"], 0)
+        self.assertEqual((got[3]["cat"], got[3]["usd"], got[3]["source"]), ("verify", 1.0, None))   # its latest step
+        # pending runs join up to the next group or settled step; nothing is left out
+        steps[0]["locked"] = steps[4]["locked"] = False
+        got = sp.intent_blocks(steps, gs)
+        self.assertEqual([(b["kind"], b["first"], b["last"]) for b in got],
+                         [("pending", 0, 0), ("group", 1, 3), ("pending", 4, 6)])
+        self.assertEqual(sum(b["steps"] for b in got), len(steps))
+        self.assertEqual(sp.intent_blocks([], []), [])
+
+
 if __name__ == "__main__":
     unittest.main()

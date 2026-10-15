@@ -43,18 +43,6 @@ function stepSummary(x) {
   const sum = String(x.summary || "");
   return x.skills && x.skills.length ? sum.split(" · ").filter((p) => p.indexOf("✦") !== 0).join(" · ") : sum;
 }
-// "Read store.py · Edit models.py ×2 · Run tests ✓" (the pane's ↳ line)
-function stepsDetail(steps) {
-  const parts = [];
-  steps.forEach((x) => {
-    const mark = x.tested === "pass" ? " ✓" : x.tested === "fail" ? " ✗" : "", label = String(x.label || "").replace(/…$/, "");
-    const last = parts[parts.length - 1];
-    if (last && last.label === label && last.mark === mark) last.n++;
-    else parts.push({label, mark, n: 1});
-  });
-  return parts.map((p) => p.label + (p.n > 1 ? " ×" + p.n : "") + p.mark).join(" · ");
-}
-
 // ---------- alerts (tokenscope/alerts.py; payload key "alerts") ----------
 // An alert points at a step of a lane (agent null: the main thread) and the range it covers (first..step). Its marker
 // sits on the node holding that step; the node's tooltip lists every alert whose step it holds.
@@ -64,8 +52,13 @@ const ALERT_NAMES = {session_usd: "session $", intent_usd: "intent $", jump: "co
 const SEV = {info: 0, warning: 1, critical: 2};
 const alertName = (a) => ALERT_NAMES[a.rule] || String(a.rule || a.kind || "alert").replace(/_/g, " ");
 const worst = (as) => as.reduce((w, a) => (SEV[a.severity] || 0) > (SEV[w] || 0) ? a.severity : w, "info");
-const alertTip = (as) => as.map((a) => "▲ " + alertName(a) + (a.step != null ? " · step " + (a.first != null && a.first !== a.step ? a.first + "–" : "") + a.step : "") + "\n" + a.message +
-  (a.reasons || []).slice(1).map((m) => "\n  · " + alertName(m) + ": " + m.message).join("")).join("\n\n");
+const stepRange = (a) => a.step != null ? "step " + (a.first != null && a.first !== a.step ? a.first + "–" : "") + a.step : "";
+const times = (a) => (a.count > 1 ? " ×" + a.count : "");
+// one alert per kind (alerts.collapse): the latest trigger leads, the earlier ones follow
+const alertTip = (as) => as.map((a) => "▲ " + alertName(a) + times(a) + (a.step != null ? " · " + stepRange(a) : "") + "\n" + a.message +
+  (a.reasons || []).slice(1).map((m) => "\n  · " + alertName(m) + ": " + m.message).join("") +
+  (Array.isArray(a.triggers) && a.triggers.length > 1 ? "\n  earlier: " + a.triggers.slice(0, -1).reverse().slice(0, 4)
+    .map((t) => alertName(t) + (t.step != null ? " " + stepRange(t) : "")).join(", ") + (a.triggers.length > 5 ? ", …" : "") : "")).join("\n\n");
 // the alerts still needing attention: an acknowledged one stays in the alerts drawer (static/alerts.js), not on nodes
 const openAlerts = (C) => (Array.isArray(C.alerts) ? C.alerts : []).filter((a) => a && a.state !== "acked");
 function alertsByLane(C) {
@@ -94,33 +87,42 @@ function Tip({tip}) {
 }
 
 // ---------- graph model: lanes of slots ----------
-// A slot is one node of a lane: an intent group, or a step outside any group, keyed by its first step index (a step
-// that later joins a group keeps the group's slot: the node stays where it is and grows).
-const NODE_W = 340, HEAD_H = 70, ROW_H = 19, MAX_ROWS = 6, AGENT_H = 46, GAP_Y = 26, GAP_X = 60;
+// A slot is one node of a lane: an intent (as steps.intent_blocks): an intent group; a run of steps outside any group
+// whose label is not settled yet (open, or waiting for the model): "pending intent"; else a settled step outside any
+// group, its own intent. Keyed by its first step index (a step that later joins a group keeps the slot: the node stays
+// where it is and grows). A node shows the intent, "+N other steps" and its latest step; the side panel all of them.
+const NODE_W = 340, HEAD_H = 70, ROW_H = 19, AGENT_H = 46, GAP_Y = 26, GAP_X = 60;
 const COL_W = NODE_W + GAP_X;
+const PENDING = "pending intent";
 
 function slotsOf(it, lane) {
-  const out = [], byFirst = {}, stepSlot = {};
+  const out = [], stepSlot = {};
   if (!it || !Array.isArray(it.steps)) return {slots: out, stepSlot};
   const groups = Array.isArray(it.groups) ? it.groups : [];
+  let cur = null;
   it.steps.forEach((x) => {
-    const g = x.group != null ? groups[x.group] : null, first = g ? g.first : x.i;
-    stepSlot[x.i] = first;
-    let sl = byFirst[first];
-    if (!sl) {
-      sl = byFirst[first] = {key: lane + ":" + first, lane, first, group: g, groupIndex: g ? x.group : null, steps: [],
+    const g = x.group != null ? groups[x.group] : null;
+    const kind = g ? "group" : x.locked ? "step" : "pending", ref = g ? x.group : kind === "step" ? x.i : null;
+    if (!(cur && cur.kind === kind && cur.ref === ref && cur.steps[cur.steps.length - 1].i === x.i - 1)) {
+      const first = g ? g.first : x.i;
+      cur = {key: lane + ":" + first, lane, first, kind, ref, group: g, groupIndex: g ? x.group : null, steps: [],
         ts0: x.ts0 != null ? x.ts0 : null};
-      out.push(sl);
+      out.push(cur);
     }
-    sl.steps.push(x);
-    if (sl.ts0 == null && x.ts0 != null) sl.ts0 = x.ts0;
+    cur.steps.push(x);
+    stepSlot[x.i] = cur.first;
+    if (cur.ts0 == null && x.ts0 != null) cur.ts0 = x.ts0;
+  });
+  out.forEach((sl) => {
+    const last = sl.steps[sl.steps.length - 1];
+    sl.cat = sl.group ? sl.group.cat : last.cat;
+    sl.label = sl.group ? sl.group.label : sl.kind === "pending" ? PENDING : last.label;
   });
   return {slots: out, stepSlot};
 }
+const slotSteps = (sl) => (sl.group ? sl.group.steps : sl.steps.length);
 function slotHeight(sl) {
-  if (!sl.group) return HEAD_H;
-  const n = sl.steps.length;
-  return HEAD_H + ROW_H * Math.min(n, MAX_ROWS) + (n > MAX_ROWS ? ROW_H : 0) + 4;
+  return slotSteps(sl) > 1 ? HEAD_H + 2 * ROW_H + 4 : HEAD_H;
 }
 const running = (a) => a && (a.status === "running" || a.status === "starting");
 
@@ -216,30 +218,39 @@ const HANDLES = <>
   <Handle type="target" position={Position.Left} id="l" isConnectable={false} />
 </>;
 
+function slotCost(sl) {
+  const g = sl.group, xs = sl.steps;
+  if (g) return {cw: g.cw, usd: g.usd, dur_s: g.dur_s};
+  const sum = (k) => xs.reduce((n, x) => n + (+x[k] || 0), 0);
+  const t0 = xs[0].ts0, t1 = xs[xs.length - 1].ts1;
+  return {cw: sum("cw"), usd: sum("usd"), dur_s: xs.length === 1 ? xs[0].dur_s : num(t0) != null && num(t1) != null ? t1 - t0 : null};
+}
 function IntentNode({data}) {
-  const {sl, live, selected, n, alerts} = data, g = sl.group, x = sl.steps[0];
-  const cat = g ? g.cat : x.cat, provisional = !g && x.open && !x.locked;
-  const label = g ? g.label : x.label + (provisional ? "…" : "");
-  const meta = g ? (g.steps + (g.steps === 1 ? " step · " : " steps · ")) + costText(g.cw, g.usd, g.dur_s) : costText(x.cw, x.usd, x.dur_s);
-  const detail = g ? stepsDetail(sl.steps) : stepSummary(x);
-  const al = alerts || [];
-  return <div className={"inode" + (live ? " live" : "") + (selected ? " sel" : "") + (al.length ? " alerted " + worst(al) : "")} style={{borderLeftColor: gcol(cat), height: data.h}}>
+  const {sl, live, selected, n, alerts} = data, g = sl.group, last = sl.steps[sl.steps.length - 1];
+  const pending = sl.kind === "pending", single = slotSteps(sl) === 1 && !pending;
+  const provisional = single && last.open && !last.locked;
+  const label = sl.label + (provisional || pending ? "…" : "");
+  const c = slotCost(sl), k = slotSteps(sl);
+  const meta = (k + (k === 1 ? " step · " : " steps · ")) + costText(c.cw, c.usd, c.dur_s);
+  const detail = single ? stepSummary(last) : null;
+  const al = alerts || [], other = k - 1;
+  const src = single ? last : g;
+  return <div className={"inode" + (live ? " live" : "") + (selected ? " sel" : "") + (pending ? " pending" : "") + (al.length ? " alerted " + worst(al) : "")} style={{borderLeftColor: gcol(sl.cat), height: data.h}}>
     {HANDLES}
     <div className="ihd">
       {n != null ? <span className="gn">{n}</span> : null}
-      <CatTag cat={cat} />
-      <span className={"sl" + (provisional ? " prov" : "")} title={label + ((g || x).source ? "  (" + (g || x).source + " label)" : "")}>{live ? "▶ " : ""}{label}</span>
-      <Marks x={g || x} />
+      <CatTag cat={sl.cat} />
+      <span className={"sl" + (provisional || pending ? " prov" : "")} title={pending ? "the intent of these steps is not known yet" : label + (src && src.source ? "  (" + src.source + " label)" : "")}>{live && single ? "▶ " : ""}{label}</span>
+      {src ? <Marks x={src} /> : null}
       <AlertMark as={al} />
     </div>
     <div className="imeta">{meta}</div>
-    {detail ? <div className="idet" title={detail}>↳ {detail}</div> : <div className="idet mut"> </div>}
-    {g ? <div className="irows">
-      {sl.steps.slice(0, MAX_ROWS).map((s) => <div key={s.i} className={"irow" + (s.open ? " open" : "")}>
-        <CatTag cat={s.cat} /><span className="rl" title={s.label}>{s.label}</span><Marks x={s} /><AlertMark as={al.filter((a) => a.step === s.i)} /><span className="rn">{costText(s.cw, null, s.dur_s)}</span>
-      </div>)}
-      {sl.steps.length > MAX_ROWS ? <div className="irow mut">+{sl.steps.length - MAX_ROWS} more steps<AlertMark as={al.filter((a) => sl.steps.slice(MAX_ROWS).some((s) => s.i === a.step))} /></div> : null}
-    </div> : null}
+    {single ? (detail ? <div className="idet" title={detail}>↳ {detail}</div> : <div className="idet mut"> </div>) : <div className="irows">
+      {other > 0 ? <div className="irow mut iother" title="click the node to see every step">+{other} other step{other > 1 ? "s" : ""}<AlertMark as={al.filter((a) => a.step !== last.i)} /></div> : null}
+      <div className={"irow" + (last.open ? " open" : "")}>
+        <CatTag cat={last.cat} /><span className="rl" title={last.label}>{live ? "▶ " : ""}{last.label}</span><Marks x={last} /><AlertMark as={al.filter((a) => a.step === last.i)} /><span className="rn">{costText(last.cw, null, last.dur_s)}</span>
+      </div>
+    </div>}
   </div>;
 }
 function AgentNode({data}) {
@@ -284,7 +295,7 @@ function StepBlock({x, live}) {
 function AlertList({as}) {
   if (!as || !as.length) return null;
   return <div className="palerts">{as.map((x) => <div key={x.id} className={"palert " + x.severity}>
-    <b>▲ {alertName(x)}</b> <span className="mut">{x.step != null ? "step " + (x.first != null && x.first !== x.step ? x.first + "–" : "") + x.step : ""}</span>
+    <b>▲ {alertName(x)}{times(x)}</b> <span className="mut">{stepRange(x)}</span>
     <div>{x.message}</div></div>)}</div>;
 }
 function Panel({sel, onClose}) {
@@ -298,11 +309,11 @@ function Panel({sel, onClose}) {
       {!a.intents ? <div className="mut small">no transcript yet</div> : null}
     </aside>;
   }
-  const g = sl.group, x = sl.steps[0], last = sl.steps[sl.steps.length - 1];
+  const g = sl.group, last = sl.steps[sl.steps.length - 1], c = slotCost(sl), k = slotSteps(sl);
   return <aside className="panel"><button className="pclose" onClick={onClose} title="close">×</button>
     {a ? <div className="pmeta">in subagent <b>{a.type}</b>{a.description ? " · " + a.description : ""}</div> : null}
-    <div className="ptitle"><CatTag cat={g ? g.cat : x.cat} /> <b>{g ? g.label : x.label}</b> <Marks x={g || x} /></div>
-    <div className="pmeta">{g ? g.steps + (g.steps === 1 ? " step · " : " steps · ") + costText(g.cw, g.usd, g.dur_s) : costText(x.cw, x.usd, x.dur_s)}</div>
+    <div className="ptitle"><CatTag cat={sl.cat} /> <b>{sl.label}{sl.kind === "pending" ? "…" : ""}</b> {g || k === 1 ? <Marks x={g || last} /> : null}</div>
+    <div className="pmeta">{k + (k === 1 ? " step · " : " steps · ") + costText(c.cw, c.usd, c.dur_s)}</div>
     <AlertList as={sel.alerts} />
     {sl.steps.map((s) => <StepBlock key={s.i} x={s} live={live && s === last} />)}
   </aside>;
@@ -362,7 +373,7 @@ function Head({C, elapsed, open, setOpen, conn, replay, onRestart}) {
       {sk.length ? <><span className="hl">SKILLS</span><span className="hv skm">✦ {sk.map((s) => s.name + " ×" + (s.count || 1)).join(" · ")}</span></> : null}
       {openAlerts(C).length ? <><span className="hl">ALERTS</span><span className="hv hvw">{openAlerts(C).slice(0, 6).map((a) =>
         <span key={a.id} className={"chip alert " + a.severity + (a.active ? " on" : "")} title={alertTip([a])}
-          onMouseEnter={(e) => showTip({text: alertTip([a]), sev: a.severity, x: e.clientX, y: e.clientY})} onMouseLeave={() => showTip(null)}>▲ {alertName(a)}{a.step != null ? " · " + a.step : ""}</span>)}
+          onMouseEnter={(e) => showTip({text: alertTip([a]), sev: a.severity, x: e.clientX, y: e.clientY})} onMouseLeave={() => showTip(null)}>▲ {alertName(a)}{times(a)}{a.step != null ? " · " + a.step : ""}</span>)}
         {openAlerts(C).length > 6 ? <span className="mut"> +{openAlerts(C).length - 6}</span> : null}</span></> : null}
       {(H.flags || []).length ? <><span className="hl">FLAGS</span><span className="hv">{H.flags.map((f, k) => <span key={k} className="chip warn">{String(f.flag).replace(/_/g, " ")}{f.count > 1 ? " ×" + f.count : ""}</span>)}</span></> : null}
     </div> : null}
@@ -477,7 +488,7 @@ function Canvas() {
         const idx = new Set(sl.steps.map((s) => s.i));
         const alerts = (byLane[L.id] || []).filter((x) => idx.has(x.step));
         nodes.push({id: sl.key, type: "intent", position: pos, draggable: false, width: NODE_W, height: heights[sl.key],
-          data: {sl, live, selected: selKey === sl.key, h: heights[sl.key], n: L.id === "m" && sl.group ? ++groupN : null, alerts}});
+          data: {sl, live, selected: selKey === sl.key, h: heights[sl.key], n: L.id === "m" && sl.kind !== "step" ? ++groupN : null, alerts}});
         if (prev) edges.push({id: "e:" + prev + ">" + sl.key, source: prev, target: sl.key, sourceHandle: "b", targetHandle: "t",
           type: "smoothstep", style: {stroke: a ? gcol("delegate") : "#c3cad6", strokeWidth: 1.5}});
         prev = sl.key;
@@ -573,7 +584,7 @@ function Canvas() {
       <Background gap={22} size={1} color="#dde2ea" />
       <Controls position="bottom-left" showInteractive={false} onFitView={() => setFollow(false)} onZoomIn={() => setFollow(false)} onZoomOut={() => setFollow(false)} />
       <MiniMap position="bottom-right" pannable zoomable nodeColor={(n) => n.type === "agent" ? gcol("delegate") :
-        gcol(n.data.sl.group ? n.data.sl.group.cat : n.data.sl.steps[0].cat)} nodeStrokeColor={(n) => n.data && n.data.alerts && n.data.alerts.length ? "#e03131" : "transparent"}
+        gcol(n.data.sl.cat)} nodeStrokeColor={(n) => n.data && n.data.alerts && n.data.alerts.length ? "#e03131" : "transparent"}
         nodeStrokeWidth={6} maskColor="rgba(240,242,246,.7)" />
     </ReactFlow>
     <Head C={C} elapsed={elapsed} open={headOpen} setOpen={setHeadOpen} conn={err ? "○ offline" : conn} replay={C.replay} onRestart={() => { setFollow(true); restartReplay(); }} />

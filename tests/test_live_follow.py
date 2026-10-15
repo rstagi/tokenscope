@@ -85,7 +85,14 @@ class TestFollowPayload(LiveFixture):
         self.assertTrue(t["steps"])
         self.assertEqual(len(t["steps"]), t["steps_n"])
         for x in t["steps"]:   # + the subagents a step launched (the fixture's Explore survey)
-            self.assertEqual(set(x) - {"agents"}, {"i", "cat", "label", "cw", "usd", "open", "tested", "dur_s"})
+            self.assertEqual(set(x) - {"agents"}, {"i", "cat", "label", "cw", "usd", "open", "tested", "dur_s",
+                                                   "intent"})
+        # every step is in one intent (steps.intent_blocks), the intents in step order
+        self.assertEqual(sorted({x["intent"] for x in t["steps"]}), list(range(len(t["intents"]))))
+        self.assertEqual(sum(b["steps"] for b in t["intents"]), t["steps_n"])
+        self.assertEqual((t["intents_before"], t["intents_n"]), (0, len(t["intents"])))
+        for b in t["intents"]:
+            self.assertIn(b["kind"], ("group", "pending", "step"))
         self.assertEqual([a["type"] for x in t["steps"] for a in x.get("agents", ())], ["Explore"])
         # per-step $ of the main thread; the running total adds subagents and the final answer
         self.assertTrue(0 < sum(x["usd"] for x in t["steps"]) <= t["usd"])
@@ -338,25 +345,21 @@ class TestFollowSubagents(LiveFixture):
         self.assertEqual([a["id"] for a in rows[0]["agents"]], ["p1", "p2"])
         self.assertTrue(all(a["live"] and not a["collapsed"] for a in rows[0]["agents"]))
         last = rows[-1]["i"]
-        # the finished steps between the launching step and the latest one: one summary line
-        self.assertEqual(len(tile["folds"]), 1)
-        f = tile["folds"][0]
-        self.assertEqual((f["first"], f["last"], f["n"]), (1, last - 1, last - 1))
-        self.assertAlmostEqual(f["usd"], sum(x["usd"] for x in rows[1:-1]), places=5)
-        self.assertEqual([x.get("fold") for x in rows], [None] + [0] * (last - 1) + [None])
-        # the launching step is older than the tile's latest steps: still shown, the steps between counted
+        # every row is in an intent; the launching step's intent comes first
+        self.assertEqual(rows[0]["intent"], 0)
+        self.assertTrue(all(x["intent"] is not None for x in rows))
+        # the launching step is older than the tile's latest steps: still shown, with its intent
         tile = self.state.follow_tile(s, self.at(t), last_n=3)
         self.assertEqual([x["i"] for x in tile["steps"]], [0, last - 2, last - 1, last])
         self.assertEqual([a["id"] for a in tile["steps"][0]["agents"]], ["p1", "p2"])
-        self.assertEqual(tile["folds"], [f])
+        self.assertEqual(tile["intents"][tile["steps"][0]["intent"]]["first"], 0)
         json.dumps(tile)
-        # every agent finishes: nothing to pin, no folds, no early step
+        # every agent finishes: nothing to pin, no early step
         self.agent("p2", None, result(40, "p2t1"), assistant(41, "p2m2", [{"type": "text", "text": "ok"}], stop="end_turn"))
         self.agent("n1", None, assistant(42, "n1m2", [{"type": "text", "text": "ok"}], stop="end_turn"))
         self.agent("p1", None, result(43, "p1t2"), assistant(44, "p1m3", [{"type": "text", "text": "ok"}], stop="end_turn"))
         s = self.step()
         tile = self.state.follow_tile(s, self.at(50), last_n=3)
-        self.assertEqual(tile["folds"], [])
         self.assertEqual([x["i"] for x in tile["steps"]], [last - 2, last - 1, last])
 
     def test_finished_branches_collapse_unless_latest(self):
@@ -374,32 +377,24 @@ class TestFollowSubagents(LiveFixture):
         t = self.state.follow_tile(s, self.at(18))
         p1, p2 = self.spawning(t)["agents"]
         self.assertEqual([(a["live"], a["collapsed"]) for a in (p1, p2)], [(False, True), (False, False)])   # p2: latest
-        self.assertEqual(t["folds"], [])
+        self.assertTrue(all(isinstance(a["intents"], list) for a in (p1, p2)))   # a branch lists intents too
 
-    def test_fold_and_branch_rules(self):
+    def test_branch_rules(self):
         def step(i, closed=True, agents=()):
-            return {"i": i, "usd": 0.5, "cw": 10.0, "closed": closed}, \
-                {"i": i, "open": not closed, "agents": [dict(a, steps=a.get("steps", [])) for a in agents]}
+            return {"i": i, "open": not closed, "agents": [dict(a, steps=a.get("steps", [])) for a in agents]}
         live = {"status": "running"}
         done = {"status": "done"}
-        pairs = [step(0), step(1, agents=[live]), step(2), step(3, closed=False), step(4), step(5), step(6),
-                 step(7, agents=[done, done]), step(8), step(9)]
-        steps, rows = [p[0] for p in pairs], [p[1] for p in pairs]
+        rows = [step(0), step(1, agents=[live]), step(2), step(3, closed=False), step(4), step(5), step(6),
+                step(7, agents=[done, done]), step(8), step(9)]
         self.assertTrue(st.follow_branches(rows))
         self.assertEqual([(a["live"], a["collapsed"]) for a in rows[7]["agents"]], [(False, True), (False, False)])
-        folds = st.follow_folds(steps, rows)
-        # step 0 alone, 2 alone (open 3 between), 4-6, 8 alone (latest-branch step 7, latest step 9): only 4-6
-        self.assertEqual(folds, [{"first": 4, "last": 6, "n": 3, "usd": 1.5, "cw": 30.0}])
-        self.assertEqual([r.get("fold") for r in rows], [None] * 4 + [0, 0, 0] + [None] * 3)
         # nested: a running agent under a finished one keeps it expanded and live
         outer = {"status": "done", "steps": [{"i": 0, "open": False, "agents": [{"status": "running", "steps": []}]}]}
         rows = [{"i": 0, "open": False, "agents": [outer, {"status": "done", "steps": []}]}]
         self.assertTrue(st.follow_branches(rows))
         self.assertEqual((outer["live"], outer["collapsed"]), (True, False))
-        # nothing live: nothing folds
-        rows = [step(i)[1] for i in range(5)]
+        rows = [step(i) for i in range(5)]
         self.assertFalse(st.follow_branches(rows))
-        self.assertEqual(st.follow_folds([step(i)[0] for i in range(5)], rows), [])
 
     def test_launched_subagent_without_a_transcript_yet(self):
         s = self.launch()
@@ -650,9 +645,12 @@ class TestFollowUi(unittest.TestCase):
         follow = js[js.index("// ---------- follow ----------"):js.index("// ---------- session ----------")]
         for x in ("syncBranch", "agents_more", "agents_running", "w.agent"):   # subagent branches in a tile
             self.assertIn(x, follow)
-        for x in ("s.folds", "a.collapsed", "a.live", "pinScrollTop", '"ffold"'):   # live branches stay pinned
+        for x in ("a.collapsed", "a.live", "pinScrollTop"):   # live branches stay pinned
             self.assertIn(x, follow)
-        for sel in (".ffold", ".fag.collapsed>.fasteps", ".fag.foldable"):
+        for x in ("s.intents", "a.intents", '"fint', '"fother"', " other step"):   # intent headers, latest step only
+            self.assertIn(x, follow)
+        self.assertNotIn("folds", follow)
+        for sel in (".fint", ".fother", ".fint.pending", ".fag.collapsed>.fasteps", ".fag.foldable"):
             self.assertIn(sel, css)
         for sel in (".fbr", ".fag", ".fah", ".fasteps", ".fmore", ".fth .fagn"):
             self.assertIn(sel, css)

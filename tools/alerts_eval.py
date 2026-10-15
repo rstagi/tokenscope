@@ -10,9 +10,10 @@ per-session `llm_request` / `invoke` events (another harness's trace export: usa
 error + result size per call), turned into transcript records first; no prompts there, and a call's result is only
 known by its size, so "same result" means "same size".
 
-Prints per trace (--per-trace) and in total the alerts per kind and rule: per rule every reason (the alerts as the
-detectors fire them), per kind also the grouped alerts the views show (alerts.group: one per kind, thread and step). Traces are named by an ordinal and their
-session id prefix, never by project or path; messages are the alerts' own (already privacy-safe) text. --sample N
+Prints per trace (--per-trace) and in total the alerts per kind and rule, at three levels: "raw" (every reason: the
+alerts as the detectors fire them), "triggers" (alerts.group: one per kind, thread and step, what v2 showed) and
+"shown" (alerts.collapse: one per kind and session, what the views show now). Traces are named by an ordinal and
+their session id prefix, never by project or path; messages are the alerts' own (already privacy-safe) text. --sample N
 prints up to N alerts per rule with their step and details, for hand-checking.
 """
 import argparse
@@ -164,9 +165,14 @@ def _defaults(overrides, off_task):
     return cfg
 
 
+def triggers(x):
+    """The triggers (grouped alerts) a collapsed alert holds: [{"rule", "rules", "severity", "message", "step", ...}]."""
+    return x.get("triggers") or [dict(x, rules=[m["rule"] for m in x.get("reasons") or [x]])]
+
+
 def reasons(x):
-    """The detector alerts a (grouped) alert holds."""
-    return x.get("reasons") or [x]
+    """The detector alerts (rules) a collapsed alert holds, one per reason of each trigger."""
+    return [{"rule": r} for t in triggers(x) for r in t["rules"]]
 
 
 def report(rows, a, cfg):
@@ -176,9 +182,10 @@ def report(rows, a, cfg):
         by_src[r["trace"].split("#")[0]].append(r)
     print("alerts eval: off_task %s; %d traces" % ("on" if cfg["off_task"]["enabled"] else "off", len(rows)))
     if a.per_trace:
-        print("\n%-12s %-9s %6s %5s %9s  %s" % ("trace", "session", "steps", "agts", "usd", "  ".join(kinds)))
+        print("\n%-12s %-9s %6s %5s %9s  %s   (triggers per kind)" % ("trace", "session", "steps", "agts", "usd",
+                                                                        "  ".join(kinds)))
         for r in rows:
-            c = Counter(x["kind"] for x in r["alerts"])
+            c = Counter(x["kind"] for x in r["alerts"] for _ in triggers(x))
             rules = Counter(m["rule"] for x in r["alerts"] for m in reasons(x))
             print("%-12s %-9s %6d %5d %9.2f  %s   %s" % (
                 r["trace"], r["sid"], r["steps"], r["agents"], r["usd"],
@@ -195,19 +202,25 @@ def report(rows, a, cfg):
             for x in r["alerts"]:
                 for m in reasons(x):
                     per[(x["kind"], m["rule"])][1] += 1
+        tot3 = [0, 0, 0]
         for kind in kinds:
             sub = {k: v for k, v in per.items() if k[0] == kind}
-            tot = sum(v[1] for v in sub.values())
-            grouped = sum(1 for r in rs for x in r["alerts"] if x["kind"] == kind)
-            ses = sum(1 for r in rs if any(x["kind"] == kind for x in r["alerts"]))
-            print("  %-9s %4d alerts, %4d grouped, in %3d traces  %s" % (kind, tot, grouped, ses, "  ".join(
+            raw = sum(v[1] for v in sub.values())
+            trig = sum(len(triggers(x)) if x.get("triggers") is not None else x.get("count") or 1
+                       for r in rs for x in r["alerts"] if x["kind"] == kind)
+            shown = sum(1 for r in rs for x in r["alerts"] if x["kind"] == kind)
+            tot3 = [tot3[0] + raw, tot3[1] + trig, tot3[2] + shown]
+            print("  %-9s %4d raw, %4d triggers, %4d shown  %s" % (kind, raw, trig, shown, "  ".join(
                 "%s %d (%d traces)" % (k[1], v[1], v[0]) for k, v in sorted(sub.items()))))
+        print("  %-9s %4d raw, %4d triggers, %4d shown" % ("total", *tot3))
     if a.sample:
         rnd = random.Random(a.seed)
         pool = defaultdict(list)
         for r in rows:
             for x in r["alerts"]:
-                pool[(x["kind"], x["rule"])].append((r, x))
+                for t in triggers(x):
+                    pool[(x["kind"], t["rule"])].append((r, dict(t, details=x.get("details") or {}
+                                                                 if t["id"] == triggers(x)[-1]["id"] else {})))
         print("\nsample (up to %d per rule):" % a.sample)
         for key in sorted(pool):
             got = pool[key]

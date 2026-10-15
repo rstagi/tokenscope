@@ -922,6 +922,39 @@ def public(alerts, last_step=None, agents_live=(), active_steps=3):
     return out
 
 
+TRIGGERS_MAX = 50   # triggers listed on one collapsed alert (the newest; "count" counts them all)
+
+
+def alert_id(sid, kind):
+    """The stable id of a session's one alert of `kind` (collapse): the same whatever fires it, and as it fires again."""
+    return hashlib.blake2b(("alert|%s|%s" % (sid, kind)).encode(), digest_size=5).hexdigest()
+
+
+def collapse(pub, sid):
+    """public() alerts collapsed to one per kind (at most one cost, one off-task, one looping alert per session), in
+    the order of their kind's newest trigger. Each grouped alert is a trigger; the collapsed alert has the worst
+    severity of them, the latest trigger's (the newest step's) rule, message, details, step range, reasons, "at" and
+    "intent", "count" (triggers so far) and "triggers" ({"id", "rule", "rules", "severity", "message", "step",
+    "first", "agent"}, oldest first, at most TRIGGERS_MAX), "active" when any trigger is. Id: alert_id(sid, kind)."""
+    by = {}
+    for a in pub:
+        by.setdefault(a["kind"], []).append(a)
+    out = []
+    for kind, ts in by.items():
+        ts.sort(key=lambda a: (a["step"] if a["step"] is not None else -1, a.get("at") or 0,
+                               SEV_RANK.get(a["severity"], 0)))
+        lead = ts[-1]
+        d = dict(lead, id=alert_id(sid, kind), count=len(ts),
+                 severity=max((a["severity"] for a in ts), key=lambda s: SEV_RANK.get(s, 0)),
+                 active=any(a.get("active") for a in ts), members=[a["id"] for a in ts],
+                 triggers=[{"id": a["id"], "rule": a["rule"], "rules": [m["rule"] for m in a.get("reasons") or [a]],
+                            "severity": a["severity"], "message": a["message"], "step": a["step"],
+                            "first": a["first"], "agent": a["agent"]} for a in ts[-TRIGGERS_MAX:]])
+        out.append(d)
+    out.sort(key=lambda d: (d["rule"] != "session_usd", -(d["step"] if d["step"] is not None else -1), d["kind"]))
+    return out
+
+
 def counts(alerts):
     """{"n", "active", "worst", "by_kind": {kind: n}} of public alert dicts (board cards)."""
     by = {}

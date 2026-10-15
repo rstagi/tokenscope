@@ -20,7 +20,6 @@ const SPARK_CHARS = 16
 const CTX_LIMIT = 200_000
 const LABEL_W = 7 // "ASKED  "
 const MAX_OPS = 12   // operation rows under the live intent
-const DETAIL_LABEL = 28   // a step label in an intent's one-line detail
 const MAX_HINTS = 3   // recap hints shown
 
 // What the server last answered (null: local mode) and its text, to spot changes
@@ -186,6 +185,12 @@ function normalizeAlerts(v) {
     at: numOrNull(a.at) != null ? a.at : numOrNull(a.ts),
     reasons: (Array.isArray(a.reasons) ? a.reasons : []).filter((m) => m && typeof m === 'object' && m.rule)
       .map((m) => ({ rule: String(m.rule), severity: String(m.severity || ''), message: String(m.message || '') })),
+    // one alert per kind per session: how often it fired, and its earlier triggers (oldest first)
+    count: Math.max(1, Number(a.count) || 1),
+    raised: Number(a.raised) || 0,
+    triggers: (Array.isArray(a.triggers) ? a.triggers : []).filter((t) => t && typeof t === 'object' && t.rule)
+      .map((t) => ({ rule: String(t.rule), severity: String(t.severity || ''), message: String(t.message || ''),
+        step: numOrNull(t.step), first: numOrNull(t.first), agent: t.agent ? String(t.agent) : null })),
   })).filter((a) => a.state !== 'dismissed')
 }
 
@@ -242,10 +247,43 @@ function normalizeIntents(it) {
     dur: numOrNull(g && g.dur_s),
     skills: skillList(g && g.skills),
   }))
-  // the number shown on a group line (▸2): its place in step order
-  ;[...groups].sort((a, b) => a.first - b.first).forEach((g, n) => (g.n = n + 1))
   const declared = it.declared && typeof it.declared === 'object' ? Number(it.declared.calls) || 0 : 0
-  return { steps, groups, declared }
+  const blocks = intentBlocksOf(steps, groups)
+  // the number shown on an intent line (▸2): its place in step order (a one-step intent has none)
+  let n = 0
+  for (const b of blocks) if (b.kind !== 'step') b.g.n = ++n
+  return { steps, groups, declared, blocks }
+}
+
+export const PENDING_LABEL = 'pending intent'
+
+// The intents the list shows, oldest first (as steps.intent_blocks on the server): a group; a run of steps outside
+// any group whose label is not settled yet (open, or waiting for the model) as one "pending intent"; a settled step
+// outside any group, its own intent. Every step is in exactly one. -> [{ kind, first, g, steps }], g the group (a
+// pending one gets its own: label, cat of its latest step, cost and wall time summed)
+export function intentBlocksOf(steps, groups) {
+  const byIdx = new Map(groups.map((g) => [g.idx, g]))
+  const out = []
+  for (const s of steps) {
+    const g = s.group != null ? byIdx.get(s.group) : null
+    const kind = g ? 'group' : s.locked ? 'step' : 'pending'
+    const last = out[out.length - 1]
+    if (last && last.kind === kind && kind !== 'step' && (kind === 'pending' || last.g === g) && last.steps[last.steps.length - 1].i === s.i - 1) {
+      last.steps.push(s)
+      continue
+    }
+    out.push({ kind, first: g ? g.first : s.i, g, steps: [s] })
+  }
+  for (const b of out) {
+    if (b.kind !== 'pending') continue
+    const last = b.steps[b.steps.length - 1]
+    const sum = (k) => b.steps.reduce((n, x) => n + (x[k] || 0), 0)
+    const durs = b.steps.map((x) => x.dur).filter((d) => d != null)
+    b.g = { idx: null, first: b.first, label: PENDING_LABEL, source: '', cat: last.cat, cw: sum('cw'),
+      usd: b.steps.some((x) => x.usd != null) ? sum('usd') : null, steps: b.steps.length,
+      dur: durs.length ? durs.reduce((a, d) => a + d, 0) : null, skills: [], pending: true }
+  }
+  return out
 }
 
 // declare_intent (any server's) is the label source, not work: never an operation row
@@ -726,14 +764,12 @@ function unplacedAgents(r) {
 
 // --- intent list (payload.intents) -----------------------------------------
 
-// A group is expanded when it holds the open step, unless the person said otherwise (per group, or "all").
-function groupExpanded(g, live) {
+// An intent shows its head, "+N other steps" and its latest step; it lists every step only when the person
+// expanded it (per intent, or "all")
+function groupExpanded(g) {
   if (groupOpen.has(g.first)) return groupOpen.get(g.first)
-  if (allMode) return allMode === 'expanded'
-  return live
+  return allMode === 'expanded'
 }
-
-const groupIsLive = (it, g) => it.steps.some((s) => s.open && s.group === g.idx)
 
 // " · 63k · $0.22 · 1m12s": tokens, $ and (when known) wall time
 function costText(cw, usd, dur) {
@@ -783,42 +819,13 @@ function groupSegs(g, expanded, live, width) {
   ]
   const marks = [g.source === 'declared' && { text: ' ✎', dimColor: true }, skillMark(g.skills)].filter(Boolean)
   const tail = [{ text: ' · ' + g.steps + (g.steps === 1 ? ' step' : ' steps') + costText(g.cw, g.usd, g.dur), dimColor: true }]
-  return fitLabel(fixed, { text: g.label, bold: live }, marks, tail, width)
+  const label = g.pending ? { text: g.label + '…', dimColor: true, italic: true } : { text: g.label, bold: live }
+  return fitLabel(fixed, label, marks, tail, width)
 }
 
 // The step that is happening now: the open one, or the one the server sent calls for (a test run closes a step
 // before the next turn opens one)
 const isLive = (s) => s.open || s.ops != null
-
-// "Read store.py": a step label cut to fit an intent's detail line
-function shortLabel(label) {
-  return fit(String(label).replace(/…$/, ''), DETAIL_LABEL)
-}
-
-// "↳ Read store.py · Edit models.py ×2 · Run tests ✓": equal neighbours fold into ×N, what does not fit is "+N"
-export function stepsDetail(steps, width) {
-  const parts = []
-  for (const s of steps) {
-    const mark = s.tested === 'pass' ? ' ✓' : s.tested === 'fail' ? ' ✗' : ''
-    const label = shortLabel(s.label)
-    const last = parts[parts.length - 1]
-    if (last && last.label === label && last.mark === mark) last.n += 1
-    else parts.push({ label, mark, n: 1 })
-  }
-  const text = (p) => p.label + (p.n > 1 ? ' ×' + p.n : '') + p.mark
-  let out = ''
-  for (let k = 0; k < parts.length; k++) {
-    const next = (out ? out + ' · ' : '') + text(parts[k])
-    const rest = parts.length - k - 1
-    // keep room for " +N" while parts remain
-    if (next.length + (rest > 0 ? (' +' + rest).length : 0) > width) {
-      const more = parts.length - k
-      return out ? out + ' +' + more : fit(text(parts[k]), width - (' +' + (more - 1)).length) + (more > 1 ? ' +' + (more - 1) : '')
-    }
-    out = next
-  }
-  return out
-}
 
 const DETAIL_PREFIX = '   ↳ '
 
@@ -874,18 +881,16 @@ function opRows(Box, Text, width, s, prefix, extra) {
   return ops.map((o, j) => line(Box, Text, 'op-' + s.i + '-' + j, opSegs(o, prefix, width), width))
 }
 
-// Groups (collapsed to one line unless expanded) and ungrouped steps, oldest first, as blocks of rows. A block
-// that is not live has a dim detail line under its head (dropped first when rows are short); the live block shows
-// its step's calls instead, one row each.
+// The intents (intentBlocksOf), oldest first, as blocks of rows. A group or pending intent: its head, then (unless
+// expanded) "+N other steps" and its latest step; the live step's calls under it, one row each. A one-step intent is
+// the step's own line, with a dim detail line when it is not live (dropped first when rows are short).
 function intentBlocks(Box, Text, Button, width, it, $, r) {
-  const byIdx = new Map(it.groups.map((g) => [g.idx, g]))
-  const done = new Set()
   const blocks = []
   const liveStep = [...it.steps].reverse().find(isLive)
   const extra = liveStep ? pendingOps(r) : []
-  for (const s of it.steps) {
-    const g = s.group != null ? byIdx.get(s.group) : null
-    if (!g) {
+  for (const k of it.blocks) {
+    if (k.kind === 'step') {
+      const s = k.steps[0]
       const live = s === liveStep
       const head = line(Box, Text, 'step-' + s.i, stepSegs(s, live ? '' : '  ', width, false), width)
       const ops = live ? opRows(Box, Text, width, s, '   ', extra) : []
@@ -893,32 +898,34 @@ function intentBlocks(Box, Text, Button, width, it, $, r) {
       blocks.push({ live, head, detail, rows: [head, ...ops] })
       continue
     }
-    if (done.has(g.idx)) continue
-    done.add(g.idx)
-    const kids = it.steps.filter((x) => x.group === g.idx)
-    const live = kids.includes(liveStep) || groupIsLive(it, g)
-    const expanded = groupExpanded(g, live)
+    const g = k.g
+    const live = k.steps.includes(liveStep) || k.steps.some((s) => s.open)
+    const expanded = groupExpanded(g)
     const head = Box({ key: 'group-' + g.first, flexDirection: 'row', children: [Button({
       key: 'group-' + g.first, plain: true, onPress: () => toggleGroup($, g.first),
       children: texts(Text, groupSegs(g, expanded, live, width), width),
     })] })
-    const rows = []
-    if (expanded) {
+    const stepRows = (kids, more) => {
+      const rows = []
+      if (more > 0) rows.push(line(Box, Text, 'other-' + g.first, [{ text: '  ├ +' + more + ' other step' + (more > 1 ? 's' : ''), dimColor: true }], width))
       kids.forEach((x, j) => {
         const end = j === kids.length - 1
         rows.push(line(Box, Text, 'step-' + x.i, stepSegs(x, end ? '  └ ' : '  ├ ', width, true), width))
         if (x === liveStep) rows.push(...opRows(Box, Text, width, x, end ? '      ' : '  │   ', extra))
       })
+      return rows
     }
-    const summary = detailRow(Box, Text, 'detail-g' + g.first, stepsDetail(kids, Math.max(1, width - DETAIL_PREFIX.length)), width)
-    blocks.push({ live, group: true, head, summary, detail: expanded ? null : summary, rows: [head, ...rows] })
+    const latest = k.steps[k.steps.length - 1]
+    const short = [head, ...stepRows([latest], g.steps - 1)]
+    const rows = expanded ? [head, ...stepRows(k.steps, g.steps - k.steps.length)] : short
+    blocks.push({ live, group: true, head, short, detail: null, rows })
   }
   return blocks
 }
 
-// Newest at the bottom, each block its head, rows and detail line. Over `budget`: older expanded groups collapse
-// first, then the oldest blocks lose their detail lines, then fold into "… N earlier"; the live block always stays
-// (cut to its newest rows if it alone is too tall).
+// Newest at the bottom. Over `budget`: older expanded intents go back to head / "+N other steps" / latest step,
+// then the oldest one-step intents lose their detail lines, then the oldest blocks fold into "… N earlier"; the live
+// block always stays (cut to its newest rows if it alone is too tall).
 function intentList(Box, Text, Button, width, it, budget, $, r) {
   const blocks = intentBlocks(Box, Text, Button, width, it, $, r)
   if (!blocks.length) return []
@@ -927,7 +934,7 @@ function intentList(Box, Text, Button, width, it, budget, $, r) {
   const size = () => (from > 0 ? 1 : 0) + blocks.slice(from).reduce((n, b) => n + rowsOf(b).length, 0)
   for (let i = 0; i < blocks.length && size() > budget; i++) {
     const b = blocks[i]
-    if (b.group && !b.live && b.rows.length > 1) (b.rows = [b.head]), (b.detail = b.summary)
+    if (b.group && !b.live) b.rows = b.short
   }
   for (let i = 0; i < blocks.length && size() > budget; i++) if (!blocks[i].live) blocks[i].detail = null
   while (size() > budget && from < blocks.length - 1 && !blocks[from].live) from++
@@ -945,9 +952,9 @@ function intentList(Box, Text, Button, width, it, budget, $, r) {
 
 function toggleGroup($, first) {
   const it = remote && remote.intents
-  const g = it && it.groups.find((x) => x.first === first)
-  if (!g) return
-  groupOpen.set(first, !groupExpanded(g, groupIsLive(it, g)))
+  const b = it && it.blocks.find((x) => x.kind !== 'step' && x.g.first === first)
+  if (!b) return
+  groupOpen.set(first, !groupExpanded(b.g))
   void $.ui.invalidate('ui.render')
 }
 
@@ -1060,11 +1067,12 @@ export function alertCounts(alerts) {
   for (const a of fresh) by[a.kind] = (by[a.kind] || 0) + 1
   const worst = fresh.reduce((w, a) => (w && sevRank(w) >= sevRank(a) ? w : a), null)
   const kinds = ['cost', 'off_task', 'looping', ...Object.keys(by).filter((k) => !KIND_SHORT[k])]
-    .filter((k) => by[k]).map((k) => (KIND_SHORT[k] || k) + ' ' + by[k]).join(' · ')
+    .filter((k) => by[k]).map((k) => (KIND_SHORT[k] || k) + (by[k] > 1 ? ' ' + by[k] : '')).join(' · ')
   return { fresh: fresh.length, total: alerts.length, worst: worst ? worst.severity : null, kinds }
 }
 
 const alertNo = (a, i) => '#' + (a.n != null ? a.n : i + 1)
+const alertTimes = (a) => (a.count > 1 ? ' ×' + a.count : '')
 const alertWhere = (a) => a.step == null ? '' : (a.agent ? 'subagent step ' : 'step ') +
   (a.first != null && a.first !== a.step ? a.first + '–' : '') + a.step
 
@@ -1097,6 +1105,7 @@ function alertRows(Box, Text, Button, width, r, $) {
       { text: ' ' + alertNo(a, al.indexOf(a)) + ' ', dimColor: true },
       fresh ? { text: a.severity === 'critical' ? '▲▲ ' : '▲ ', color: col, bold: true } : { text: '✓ ', color: 'green', dimColor: true },
       { text: alertName(a), color: col, bold: fresh, dimColor: !fresh },
+      a.count > 1 && { text: alertTimes(a), color: col, bold: fresh, dimColor: !fresh },
       more && { text: more, color: col, dimColor: true },
       { text: '  ' + where + (where ? ' · ' : ''), dimColor: true },
       { text: a.message, dimColor: !fresh },
@@ -1173,8 +1182,10 @@ export function alertsText(alerts) {
   alertOrder(alerts).forEach((a) => {
     const where = [hhmm(a.at), alertWhere(a)].filter(Boolean).join(' · ')
     lines.push('  ' + alertNo(a, alerts.indexOf(a)) + ' ' + (a.state === 'new' ? '▲' : '✓') + ' [' + a.severity + '] ' +
-      alertName(a) + (where ? ' · ' + where : '') + ': ' + a.message)
+      alertName(a) + alertTimes(a) + (where ? ' · ' + where : '') + ': ' + a.message)
     a.reasons.slice(1).forEach((m) => lines.push('       + ' + alertName(m) + ': ' + m.message))
+    a.triggers.slice(0, -1).reverse().forEach((t) => lines.push('       earlier: ' + alertName(t) +
+      (alertWhere(t) ? ' · ' + alertWhere(t) : '') + ': ' + t.message))
   })
   return lines.join('\n')
 }
@@ -1266,11 +1277,14 @@ function toastNewWarnings($, warnings) {
   if (fresh.length) $.ui.toast(fresh.map((w) => '⚠ ' + w.text).join('  '))
 }
 
+// A toast for an alert seen for the first time, or back after an acknowledgement (it escalated); a trigger that
+// only updates an alert in place (same severity) does not toast again
 function toastNewAlerts($, alerts) {
-  const fresh = seenAlerts ? alertOrder(alerts).filter((a) => a.state === 'new' && !seenAlerts.has(a.id)) : []
-  if (!seenAlerts) seenAlerts = new Set()
-  for (const a of alerts) seenAlerts.add(a.id)
-  if (fresh.length) $.ui.toast(fresh.slice(0, 2).map((a) => '▲ ' + alertName(a) + ': ' + a.message).join('  '))
+  const sig = (a) => a.severity + '|' + a.raised
+  const fresh = seenAlerts ? alertOrder(alerts).filter((a) => a.state === 'new' && seenAlerts.get(a.id) !== sig(a)) : []
+  if (!seenAlerts) seenAlerts = new Map()
+  for (const a of alerts) seenAlerts.set(a.id, sig(a))
+  if (fresh.length) $.ui.toast(fresh.slice(0, 2).map((a) => '▲ ' + alertName(a) + alertTimes(a) + ': ' + a.message).join('  '))
 }
 
 async function poll($) {
@@ -1371,13 +1385,13 @@ function runView(verb, arg) {
   if (arg === 'all') {
     groupOpen.clear()
     allMode = open ? 'expanded' : 'collapsed'
-    return 'tokenscope: ' + (open ? 'expanded' : 'collapsed') + ' all groups'
+    return 'tokenscope: ' + (open ? 'expanded' : 'collapsed') + ' all intents'
   }
   const n = Number(arg)
-  const g = remote && remote.intents && remote.intents.groups.find((x) => x.n === n)
-  if (!g) return 'tokenscope: no group ' + (arg || '') + ' (the number after ▸ / ▾)'
-  groupOpen.set(g.first, open)
-  return 'tokenscope: ' + (open ? 'expanded' : 'collapsed') + ' group ' + n + ' · ' + g.label
+  const b = remote && remote.intents && remote.intents.blocks.find((x) => x.kind !== 'step' && x.g.n === n)
+  if (!b) return 'tokenscope: no intent ' + (arg || '') + ' (the number after ▸ / ▾)'
+  groupOpen.set(b.g.first, open)
+  return 'tokenscope: ' + (open ? 'expanded' : 'collapsed') + ' intent ' + n + ' · ' + b.g.label
 }
 
 function flush($) {
