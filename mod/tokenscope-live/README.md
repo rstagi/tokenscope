@@ -14,9 +14,11 @@ FILES  edited 3: invoice.py, money.py, tax.py
 COST   ⣀⣤⣶⣿ 182k CW · $0.41 · ctx ▕███░░░░░░░▏ 34%
 ── intents ──
 ▸1 [CHANGE] Implement multi-warehouse stock · 3 steps · 120k · $0.41
+  ├ +2 other steps
+  └ [CHANGE] Add per-warehouse quantities · Edit ×3 · 40k · $0.14
   [VERIFY] Run store tests · Bash unittest ✓ · 9k · $0.03
-▾2 [CHANGE] Wire warehouses into CLI ✎ · 2 steps · 20k · $0.06
-  ├ [INVESTIGATE] Inspect CLI entry point ✎ · Read ×2 · 10k · $0.03
+▸2 [CHANGE] Wire warehouses into CLI ✎ · 2 steps · 20k · $0.06
+  ├ +1 other step
   └ ▶ [CHANGE] editing files · cli.py… · Edit ×2 · 10k · $0.03
 ⚠ same error ×3, no edits since — try a different approach
 ✎ declared ×2
@@ -32,19 +34,22 @@ COST   ⣀⣤⣶⣿ 182k CW · $0.41 · ctx ▕███░░░░░░░▏
 - **FILES**: the files edited so far (or `edited N files` when the server redacts names)
 - **COST**: a cyan braille sparkline of cumulative CW per turn, CW, cost, and a context gauge
   against 200k tokens (yellow above 50%, red above 75%)
-- **intents** (when the server sends `intents`, see `docs/intents-spec.md`): steps and intent
-  groups, newest at the bottom. A group is one line, `▸N [CAT] <label> · N steps · CW · $`;
-  the group holding the open step is expanded (`▾N`) with its steps under it (`├` / `└`).
-  Steps outside a group are one line each: `[CAT] <label> · <summary> · CW · $`, the summary
-  cut to fit. The open step is marked `▶`; while its label is still provisional (not locked)
-  it is dim with a trailing `…`. The tag takes the category colour (below); a dim `✎` marks a
-  label from `declare_intent`, and `✎ declared ×N` closes the list when it was used. When
-  rows run short, older expanded groups collapse, then the oldest items fold into
-  `… N earlier`; the live item never folds.
-  Expand / collapse: `/tokenscope expand <n|all>`, `/tokenscope collapse <n|all>` (`n` is the
-  number after `▸` / `▾`), or press a group line (Enter on it once the pane holds the focus,
-  or a click). The choice holds across redraws, and a group you collapsed stays collapsed
-  while live. `/tokenscope view phases` switches to the phase tree below, `view intents` back
+- **intents** (when the server sends `intents`, see `docs/intents-spec.md`): the session as
+  intents, newest at the bottom, never loose steps (README "Intents in the flows"). An intent
+  is its head line `▸N [CAT] <label> · N steps · CW · $`, then a dim `├ +N other steps` and its
+  latest step (`└ [CAT] <label> · <summary> · CW · $`, the summary cut to fit); the live step
+  has its calls under it, one row each. Steps outside any group whose label is not settled yet
+  (the open step, or steps the model has not labelled yet) are under a dim `pending intent…`
+  head; a settled step outside every group is its own one-step intent, one line
+  `[CAT] <label> · <summary> · CW · $` with its tools summary on a dim `↳` line. The open step is
+  marked `▶`; while its label is still provisional (not locked) it is dim with a trailing `…`.
+  The tag takes the category colour (below); a dim `✎` marks a label from `declare_intent`,
+  and `✎ declared ×N` closes the list when it was used. When rows run short, older expanded
+  intents go back to head / `+N other steps` / latest step, then the oldest one-step intents
+  lose their `↳` lines, then the oldest items fold into `… N earlier`; the live item never folds.
+  Expand (every step of an intent under it, `├` / `└`) / collapse: `/tokenscope expand <n|all>`,
+  `/tokenscope collapse <n|all>` (`n` is the number after `▸` / `▾`), or press an intent line
+  (Enter on it once the pane holds the focus, or a click). The choice holds across redraws. `/tokenscope view phases` switches to the phase tree below, `view intents` back
 - **flow** (an older server without `intents`, or `view phases`): the goal as root, then phases: runs of consecutive turns with the same intent
   group, named `GROUP · <dominant intent>` (most turns, ties to the latest). Under a phase,
   consecutive calls of one tool fold into one line with up to 3 targets (`+N` more) and `×N`;
@@ -73,19 +78,20 @@ COST   ⣀⣤⣶⣿ 182k CW · $0.41 · ctx ▕███░░░░░░░▏
 - **alerts** (from the server's `alerts`: the session's alert history, see the repository README
   "Alerts") are a section right under the header, above the recap: `▾ ALERTS · 2 new · 3 total ━━━`
   in the worst new alert's colour (bright red critical, bright yellow warning; green
-  `✓ all acknowledged` once none is new), then one row per alert, new ones first (worst, then
-  newest), acknowledged ones dim with `✓`:
-  `#3 ▲ edit revert  10:25 · step 8–14 · edits to the same .py file undone 3× …` (`▲▲` critical,
-  `+2` when the step fired more reasons, the time of its step, the step or step range,
-  `subagent step` for a subagent's), at most 5 and `+N more · /tokenscope alerts`, then the
-  commands. `#n` is the alert's number in the session, stable as new ones arrive. An alert stays
-  until it is acknowledged (it then stays dim) or dismissed (it leaves). Press a new alert's row
-  to acknowledge it, or `/tokenscope ack <#|all>`; `/tokenscope dismiss <#|all>` removes it
-  (both go to the server, so the web views agree). `/tokenscope alerts` prints the whole history
-  (with every reason) as the command's output. Collapse the section to its head line
-  (`▸ ALERTS · 2 new · loop 2 · 3 total`) by pressing it or with `/tokenscope alerts hide`
-  (`show` brings it back); the choice is kept in the mod's store, across sessions. Each new alert
-  also raises one toast
+  `✓ all acknowledged` once none is new), then one row per alert, at most one per kind (cost,
+  off-task, looping), new ones first (worst, then newest), acknowledged ones dim with `✓`:
+  `#2 ▲ retry loop ×3  10:25 · step 7 · same failing command retried 3× …` (`▲▲` critical,
+  `×3` when its kind fired 3 times, `+2` when its latest trigger had more reasons, the time of
+  that trigger's step, the step or step range, `subagent step` for a subagent's), then the
+  commands. A new trigger of a kind updates its row in place. `#n` is the alert's number in the
+  session, stable as new ones arrive. An alert stays until it is acknowledged (it then stays
+  dim) or dismissed (it leaves); it comes back as new only when its severity rises. Press a new
+  alert's row to acknowledge it, or `/tokenscope ack <#|all>`; `/tokenscope dismiss <#|all>`
+  removes it (both go to the server, so the web views agree). `/tokenscope alerts` prints the
+  whole history (with every reason and the earlier triggers) as the command's output. Collapse
+  the section to its head line (`▸ ALERTS · 2 new · cost · loop · 3 total`) by pressing it or
+  with `/tokenscope alerts hide` (`show` brings it back); the choice is kept in the mod's store,
+  across sessions. A new alert raises one toast, and so does one that escalated
 - **warnings** are rare and come only from the server's `warnings`: one yellow line each,
   `⚠ <text> — <hint>`. A warning rule that appears after the first payload also raises one
   toast. A session without warnings shows no `⚠` anywhere

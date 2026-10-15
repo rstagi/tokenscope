@@ -109,27 +109,40 @@ off-task (opt-in, `unrelated`) and looping (`repeat_*`, `retry`, `edit_revert`).
 facts (`_facts[k]`: kind, hashed identity, hashed result, failure, polling, edit / write hashes; never emitted).
 `LiveState.alerts(s)` builds an `alerts.Context` (main-thread steps with cost, todo / declared intent and request;
 every thread's calls; subagents are segmented only when they have an alert) and runs the registered detectors,
-cached on (seq, open step). `alerts.public` groups them: the alerts of one kind firing at the same step of one
-thread (a cost alert's step; a loop's first step) are one alert with "reasons" (the worst leads; a cost group's id
-is its step, so reasons joining later keep it). Every grouped alert goes into the alert history
-(`tokenscope/live/alertstore.py`, `LiveState.alert_store`): records keyed by id with a per-session ordinal "n",
-first-seen "ts", the step's time "at", its intent ("intent": {cat, label}), and "state" new / acked / dismissed;
-an acknowledged or dismissed alert comes back as new when it gets worse (a new reason, a higher severity), and a
-record a grown group now holds is merged into it. The server keeps it on disk (`--alerts-history FILE`, default
+cached on (seq, open step). `alerts.public` groups them into triggers: the alerts of one kind firing at the same step
+of one thread (a cost alert's step; a loop's first step) are one trigger with "reasons" (the worst leads).
+`alerts.collapse` then makes one alert per kind per session (at most 3): id `alerts.alert_id(session, kind)`, the
+worst severity of its triggers, the latest trigger's (newest step's) rule / message / step range / reasons / "at" /
+"intent", "count" (triggers) and "triggers" ([{"id","rule","rules","severity","message","step","first","agent"}],
+oldest first, at most 50). That alert goes into the alert history (`tokenscope/live/alertstore.py`,
+`LiveState.alert_store`): one record per (session, kind), with a per-session ordinal "n" (1-3), first-seen "ts",
+"count", and "state" new / acked / dismissed. A new trigger updates the record in place (latest message and step,
+count never drops, severity never drops). An acknowledged or dismissed alert comes back as new ("raised" + 1) only
+when its severity rises; a trigger at the same severity updates it and leaves it acknowledged. Records of an older
+history (v2: one per kind, thread and step; no `"v": 3`) are merged at load into one per session and kind (count =
+how many, worst severity, newest one's message and step, new if any was) and the file is rewritten. The server keeps
+it on disk (`--alerts-history FILE`, default
 `$TOKENSCOPE_ALERTS_HISTORY`, else `$TOKENSCOPE_CACHE_DIR` or `~/.cache/tokenscope` / `alerts-history.jsonl`; JSON
-lines `{"op": "put", "rec"}` / `{"op": "ack"|"dismiss", "ids", "ts"}` / `{"op": "drop", "ids"}`, compacted when
+lines `{"op": "put", "rec"}` / `{"op": "ack"|"dismiss", "ids", "ts"}` / `{"op": "drop", "ids"}` (older files), compacted when
 mostly superseded; `--no-alerts-history`: memory only) and syncs changed sessions into it from its poll loop (at
 most once a second), so alerts are kept while nobody watches. Payload: `alerts: [{"id","n","kind","rule",
 "severity","message","step","first","agent","reasons","details","active","live","state","ts","at","intent",
-"raised"}]` (the history, not dismissed, newest first) in compact / flow; `alerts: {"n","active","worst","by_kind",
+"raised","count","triggers"}]` (the history, not dismissed, newest first, at most one per kind) in compact / flow; `alerts: {"n","active","worst","by_kind",
 "new","new_by_kind","new_worst","top"}` on board rows (top: active and not acknowledged), the same without top
-plus `alert_steps` ({step: worst severity not acknowledged}) on follow tiles; `GET /api/session/<id>/alerts`;
+plus `alert_steps` ({latest trigger's main step: worst severity not acknowledged}) on follow tiles; `GET /api/session/<id>/alerts`;
 `GET /api/alerts[?s=<ids>][&state=all][&limit=N]` (every session: "alerts" with sid / short / project / goal, and
 "sessions": per session new / acked / total / by_kind / worst, those needing attention first); `POST
 /api/alerts/ack|dismiss` (`{"ids"}` or `{"all": true, "sessions"?}`) and `/api/alerts/reopen` (`{"ids"}`), JSON
 only. Messages never name files, commands or prompts (ordinal labels such as "file #2"); the intent label is the
-step's own label as the views show it (redaction-aware). `tools/alerts_eval.py` replays trees offline (per rule:
-every reason; per kind also the grouped count).
+step's own label as the views show it (redaction-aware). `tools/alerts_eval.py` replays trees offline (per kind: raw
+detector alerts, triggers, alerts shown; per rule: every reason).
+
+Intents in the flows (README "Intents in the flows"): `steps.intent_blocks(steps, groups)` splits a thread's steps
+into intents, each step in exactly one: an intent group ("group"); a run of steps outside any group whose label is not
+locked yet (open, or waiting for the model labeller) as one "pending" intent labelled `pending intent`; a locked step
+outside every group as its own one-step intent ("step"). The follow tiles, the canvas (`slotsOf` in
+web/canvas/src/main.jsx) and the pane (`intentBlocksOf` in mod/tokenscope-live/hooks/register.js) apply the same rule
+and show each intent as its header, `+N other steps` (N > 0) and its latest step only; all steps on expansion.
 
 Status (per session): `working` if the last event is a user prompt / tool_result / assistant tool_use, or a hook
 says PreToolUse/UserPromptSubmit after the last Stop, and the last event is < 90 s old; `waiting` (for the user)
@@ -185,11 +198,13 @@ ThreadingHTTPServer bound to 127.0.0.1 by default. Background thread runs the ta
   "cw","usd" (session totals, subagents included),"turns","started","last_ts","seq","steps_n","now": {"tool","target",
   "since_s","agent"? (the subagent type when the call is a subagent's: the main thread only waits on it)} while running
   else null,"agents_running","steps": [the latest 40 main-thread steps: {"i","cat","label","cw","usd" (subagents it
-  launched included, nested ones too),"open","tested","dur_s","agents"? (the subagents this step launched, parallel
+  launched included, nested ones too),"open","tested","dur_s","intent" (index in "intents"),"agents"? (the subagents this step launched, parallel
   ones as siblings: [{"id" (null: launched, no transcript yet),"type","description" (redacted: null),"workflow",
   "status": running|starting|idle|done|error,"cw","usd" (with its own subagents),"turns","steps_n","steps": [its
-  latest 6 steps, same shape, nested "agents" up to 3 levels]}]),"agents_more"? (launched by this step, not shown)}]}]}
-  in the order asked; an unknown id -> {"id", "missing": true}. At most 12 subagent branches per tile (active ones
+  latest 6 steps, same shape, nested "agents" up to 3 levels],"intents","intents_n"}]),"agents_more"? (launched by
+  this step, not shown)}],"intents": [the intents those steps belong to (steps.intent_blocks), oldest first:
+  {"kind": group|pending|step,"group","first","last","label","cat","source","steps" (all of it, shown or not),"cw",
+  "usd","dur_s","skills"}],"intents_before" (intents before the first shown),"intents_n"}]} in the order asked; an unknown id -> {"id", "missing": true}. At most 12 subagent branches per tile (active ones
   first, then the newest; newer steps first), shown in launch order. A subagent's steps are segmented once per change
   to its own transcript, so polling stays cheap with hundreds of workflow agents.
 - `GET /api/session/<id>` -> full session model (as above, steps of main + agents), plus "seq" (max).

@@ -36,10 +36,11 @@ truncation handled) and shows:
   4 of them side by side as live step flows, subagents included. See
   [Many sessions at once](#many-sessions-at-once-the-board-and-the-follow-view) below.
 - **Session view** (`/s/<id>`): the session as an infinite canvas (pan, zoom, minimap, fit view). One node per
-  intent group or step ([CATEGORY] label, CW, $, wall time, a one-line summary, ✦ skills, ✎ declared), top-down in
+  intent ([CATEGORY] label, steps, CW, $, wall time, ✦ skills, ✎ declared): the intent always heads the node, then
+  `+N other steps` and only its latest step (see [Intents in the flows](#intents-in-the-flows)), top-down in
   time order; each subagent branches off the step that launched it as its own flow of intents (parallel fan-outs side
   by side, nested ones further right) and rejoins the main flow when it returns. Click a node for its steps and tool
-  calls (target, CW, time, ✓ / ✗, test counts) in a side panel. The view follows the live node; pan or zoom and it
+  calls (target, CW, time, ✓ / ✗, test counts) in a side panel: every step of the intent. The view follows the live node; pan or zoom and it
   stops, "follow live" resumes. Overlays (collapsible): ASKED / NOW / TESTS / FILES / SKILLS rows with totals and a
   context gauge, and the idle recap (costliest and slowest intent, up to 3 hints, cross-session ones marked) while the
   session waits for you. `?replay=1` replays a recorded session server-side as if it were live (about 90 s;
@@ -116,21 +117,34 @@ step (or step range) it is about:
 Severity: `warning`, or `critical` for a session / intent at >= 2x its threshold, a jump at >= 4x `cost.jump_ratio`,
 a repeat or retry at >= 2x its count, and edits undone >= 2x `looping.edit_revert_n` + 1 times.
 
-**Grouped per step.** Alerts of one kind that fire at the same step of one thread are one alert with several
-reasons: one expensive step that passes the session and intent thresholds and is a jump shows as one critical
-`cost jump +2` (reasons: `intent $`, `session $`), not three. The worst reason leads (then session $, intent $, jump);
-the alert takes the worst severity and the widest step range. A cost alert points at the step it fired at
-(`intent_usd`: the step that took the intent over its threshold), a loop at the step it began at.
+**One alert per kind per session.** A session has at most one cost, one off-task and one looping alert, so at most
+three. Each firing is a *trigger*; a new trigger of a kind the session already has updates that alert in place, and
+never adds a row:
+
+- its severity escalates to the worst trigger's and never goes down;
+- it shows the latest trigger's rule, message, step range and reasons, and links to the latest step;
+- it counts its triggers (`retry loop ×4`) and lists the earlier ones (`earlier: read loop step 5 · edit revert step
+  8–14`).
+
+The alert's id is stable per (session, kind). Within one trigger, alerts of one kind that fire at the same step of
+one thread are still one trigger with several reasons: one expensive step that passes the session and intent
+thresholds and is a jump is one critical `cost jump +2` (reasons: `intent $`, `session $`). The worst reason leads
+(then session $, intent $, jump). A cost trigger points at the step it fired at (`intent_usd`: the step that took
+the intent over its threshold), a loop at the step it began at.
 
 Messages are privacy-safe in every mode: no paths, file names, commands, patterns, prompt text, user names, e-mails
 or keys; files and commands are named by kind and a per-session ordinal (`same .py file read 6× (file #2)`,
 `same failing command retried 3× (command #1)`), and a last scrub removes anything path-, e-mail- or key-like.
 
 **History and acknowledgement.** Every alert of every session is kept until you acknowledge it (it stays in the
-history, dimmed, no longer counted as needing attention) or dismiss it (it leaves the history). Acknowledged or
-dismissed alerts come back when they get worse (a new reason at the step, a higher severity). The server keeps the
-history and its states on disk, deduplicated by the alert's stable id, so it survives page reloads and server
-restarts: `~/.cache/tokenscope/alerts-history.jsonl` (`$TOKENSCOPE_CACHE_DIR`, or `$TOKENSCOPE_ALERTS_HISTORY`, or
+history, dimmed, no longer counted as needing attention) or dismiss it (it leaves the history). Ack and dismiss
+apply to the one alert of a kind. An acknowledged or dismissed alert comes back as new only when it **escalates**
+(its severity rises). A new trigger at the same or a lower severity still updates its count, message and latest
+step, but leaves it acknowledged (or dismissed), so a loop that keeps going does not keep asking for attention. The
+server keeps the history and its states on disk, one record per (session, kind), so it survives page reloads and
+server restarts. A history written by an older version (one record per kind, thread and step) is merged into one
+record per session and kind when it loads: its count is the number of old records, it takes their worst severity
+and the newest one's message and step, and it is new if any of them was. The file is then rewritten. Location: `~/.cache/tokenscope/alerts-history.jsonl` (`$TOKENSCOPE_CACHE_DIR`, or `$TOKENSCOPE_ALERTS_HISTORY`, or
 `--alerts-history FILE`; `--no-alerts-history` keeps it in memory only). It holds the alerts' privacy-safe messages,
 the session id, and the project / goal / step labels as the server showed them (masked unless `--no-redact`). The
 server records alerts from its poll loop, whether or not a view is open.
@@ -139,9 +153,10 @@ server records alerts from its poll loop, whether or not a view is open.
 
 Where they show:
 
-- **Web (board, follow view, session canvas)**: an **Alerts** section with the history across sessions, newest
-  first: time, severity, kind (cost / off-task / looping), rule (`+N reasons` for a grouped one, listed under
-  it), session, step and the intent at that step, message; `✓` acknowledges, `×` dismisses, `✓ ack all` and
+- **Web (board, follow view, session canvas)**: an **Alerts** section with the history across sessions, one row per
+  session and kind, newest first: time, severity, kind (cost / off-task / looping), rule (`×N` triggers, `+N reasons`
+  listed under it), session, latest step and the intent at that step, message, and the earlier triggers. A row
+  that updates in place flashes; `✓` acknowledges, `×` dismisses, `✓ ack all` and
   `clear acked` act on all shown; `new` / `history` filters. **Needs attention** lists the sessions with alerts not
   acknowledged, worst first, each with its counts by kind; click one to jump to its card (board) or tile (follow
   view; a session not followed yet is pinned). Click an alert to jump to it: the board scrolls to the card, the
@@ -149,20 +164,24 @@ Where they show:
   step; the `step N ↗` link opens the canvas on that step (`/s/<id>#step=N`). The section collapses to its header
   line (`▾` / `▸`); the choice and the filter are kept per page in the browser (localStorage). On the board it sits
   above the cards, in the follow view it is a column next to the tiles (collapsed: a narrow strip), on the canvas a
-  drawer at the bottom left. Every **board card** and **follow tile** carries a badge with its unacknowledged
-  alerts by kind (`▲ cost 1 · loop 2`) and an edge in the worst one's colour (red critical, amber warning); a
-  tile marks alerted steps with `▲`. The canvas marks the node holding each alert's step (▲, coloured by severity;
-  hover for the alerts, click for the side panel) and lists them in an ALERTS row; acknowledged ones leave the
-  nodes and stay in the drawer.
+  drawer at the bottom left. Every **board card** and **follow tile** carries a badge with the kinds it has
+  unacknowledged alerts of (`▲ cost · loop`) and an edge in the worst one's colour (red critical, amber warning); a
+  tile marks each alert's latest step with `▲` (on the intent header while that step is hidden). The canvas marks
+  the node holding each alert's latest step (▲, coloured by severity; hover for the alert and its earlier
+  triggers, click for the side panel) and lists them in an ALERTS row (`retry loop ×3 · 23`); acknowledged ones
+  leave the nodes and stay in the drawer.
 - **Pane** (Claude Code mod): an alerts section under its header with the session's alerts, new ones first,
   acknowledged ones dim with `✓`, each numbered `#n`; press a row or `/tokenscope ack <#|all>` to acknowledge,
   `/tokenscope dismiss <#|all>` to dismiss, `/tokenscope alerts` prints the whole history, `/tokenscope alerts
-  hide|show` (or a press on its head) collapses it to one line, kept across sessions. Each new alert raises a toast.
+  hide|show` (or a press on its head) collapses it to one line, kept across sessions. A row shows `×N` when its
+  kind fired more than once; `/tokenscope alerts` lists the earlier triggers too. A new alert raises a toast, and
+  so does an escalated one; an in-place update at the same severity does not.
   See `mod/tokenscope-live/README.md`.
 
-API: `"alerts"` in `/api/session/<id>/compact` and `/flow` (the session's history, not dismissed:
-`[{id, n, kind, rule, severity, message, step, first, agent, reasons, details, active, live, state, ts, at,
-intent, raised}]`), counts in `/api/board` and `/api/follow` (`n`, `active`, `worst`, `by_kind`, and not
+API: `"alerts"` in `/api/session/<id>/compact` and `/flow` (the session's history, not dismissed, at most one per
+kind: `[{id, n, kind, rule, severity, message, step, first, agent, reasons, details, active, live, state, ts, at,
+intent, raised, count, triggers}]`, `triggers` = `[{id, rule, rules, severity, message, step, first, agent}]`,
+oldest first), counts in `/api/board` and `/api/follow` (`n`, `active`, `worst`, `by_kind`, and not
 acknowledged: `new`, `new_by_kind`, `new_worst`), `GET /api/session/<id>/alerts` (the list, its counts and the
 config in use), `GET /api/alerts[?s=<id>,...][&state=all][&limit=N]` (the history across sessions plus
 `sessions`: who needs attention), and `POST /api/alerts/ack`, `/dismiss` (`{"ids": [...]}` or `{"all": true,
@@ -170,7 +189,8 @@ config in use), `GET /api/alerts[?s=<id>,...][&state=all][&limit=N]` (the histor
 
 Offline: `tokenscope alerts SESSION [--json]` replays one transcript and prints its alerts;
 `python3 tools/alerts_eval.py --root DIR [--events FILE] [--off-task] [--per-trace] [--sample N]` runs the detectors
-over a whole tree and prints counts per kind and rule (traces named by ordinal and session id prefix only).
+over a whole tree and prints, per kind, the raw detector alerts, the triggers (grouped per step) and the alerts
+shown (one per kind and session), plus counts per rule (traces named by ordinal and session id prefix only).
 `tests/alerts_synth.py` writes synthetic sessions that trigger each alert (committed under `tests/fixtures/alerts/`).
 
 **Config**: `~/.config/tokenscope/alerts.toml` (or `$TOKENSCOPE_ALERTS_CONFIG`, or `--alerts-config FILE`; TOML or
@@ -243,9 +263,10 @@ them, and their cost adds up into that step and the tile total.*
   another running one. Pins are kept in the browser (localStorage) and in the URL (`/follow?s=a,b,c,d`), and the URL
   wins when it names sessions, so a follow view can be bookmarked.
 - **Follow view** (`/follow`): the pinned sessions in a 2x2 grid that adapts to 1-3. Each tile is a compact live flow
-  of the session's latest steps (step title with its [CATEGORY], $ and wall time per step) under a header with the
-  running total $ and the status (running / waiting / idle / ended), plus the call running now. It auto-scrolls to
-  the newest step; scroll up to stop, `↓ latest` resumes. The goal line opens the session's canvas (`/s/<id>`). One
+  of the session's latest intents: each intent's header ([CATEGORY] label, steps, $ and wall time), `+N other steps`
+  and its latest step, under a header with the running total $ and the status (running / waiting / idle / ended),
+  plus the call running now. Click an intent's header (or its `+N other steps`) to list all its steps, again to
+  close it. It auto-scrolls to the newest step; scroll up to stop, `↓ latest` resumes (and closes what you opened). The goal line opens the session's canvas (`/s/<id>`). One
   `/api/follow` request feeds all tiles.
 - **Subagents, live**: a step that launched subagents (Agent / Task, Workflow, Explore, …) carries them as branches,
   each labelled with its type and description (type only when redacted) and showing its latest steps and status
@@ -253,10 +274,27 @@ them, and their cost adds up into that step and the tile total.*
   hang under the subagent step that launched them (up to 3 levels). A branch's cost, its own subagents included,
   rolls into the launching step and the tile total. The tile stays *running* (and a SessionEnd does not show it as
   ended) while any subagent still works, even when the main thread only waits; the NOW line then shows the latest
-  subagent call. While a branch runs it stays pinned in view: the finished main-thread steps around it fold into
-  `… N earlier steps · $X` lines, finished older branches collapse to one header line (click either to open it,
-  which stops following until `↓ latest`), and the tile scrolls so the running branches and the latest step both
-  show.
+  subagent call. A branch lists its intents the same way (header, `+N other steps`, latest step). The subagents of
+  an intent's hidden steps still show, under its latest step. While a branch runs it stays pinned in view: finished
+  older branches collapse to one header line (click to open it, which stops following until `↓ latest`), and the
+  tile scrolls so the running branches and the latest step both show.
+
+### Intents in the flows
+
+The follow tiles, the session canvas and the pane list a session as **intents**, never as loose steps. Each intent is
+a header line, then a muted `+N other steps` line when it has more than one step, then only its latest step:
+
+```
+[CHANGE] Fix tax rounding in invoice totals · 6 steps · $0.22 · 54s
+  +5 other steps
+  [CHANGE] editing files · …/59d.css · $0.03 · 2s
+```
+
+An intent is an intent group (a todo item, a declared intent, or a run of steps the model named). Steps outside any
+group whose label is not settled yet (the open step, or steps waiting for the model labeller) go under one
+**pending intent** (`pending intent…`, dimmed) until they get one. A settled step outside every group is its own
+one-step intent, shown as its header alone. Expanding an intent shows all its steps: a click on the header in the
+follow view, the side panel on the canvas, and `/tokenscope expand <n|all>` (or a press on the header) in the pane.
 
 Goal labels come from the first prompt. One that reads oddly as a label (long, multi-line, filler, paths, code) gets
 a cleaned-up name; `--haiku-odd` asks Haiku for just those (see the options above).
@@ -274,9 +312,9 @@ prompt.*
   toggles a side pane in the terminal: ASKED (the goal from the first prompt, plus a `↳ now:` line for the latest
   follow-up, including ones typed while the agent works), NOW (the current call, or `N subagents working` with what
   the latest one is doing), TESTS (main-thread runs; `subagents:` when only subagents ran tests), edited files, a cost
-  sparkline with CW / $ / context, and an intent list: labelled steps and intent groups (collapsed to one line, the
-  live group expanded; `/tokenscope expand|collapse <n|all>` or a press on a group line), with the open step's
-  provisional label dimmed. Every operation, step and group line ends with its wall time
+  sparkline with CW / $ / context, and an intent list: each intent its header, `+N other steps` and its latest step
+  (the live one with its calls; see [Intents in the flows](#intents-in-the-flows); `/tokenscope expand|collapse
+  <n|all>` or a press on an intent line lists all its steps), with the open step's provisional label dimmed. Every operation, step and group line ends with its wall time
   (`✓ unittest 22 passed · 3k · 4s`, `[CHANGE] Add X · 63k · $0.22 · 1m12s`; a narrow pane cuts the label, never the
   numbers). Skills show as `✦`: Skill-tool calls (`✦ skill:pr-review · 2k · 3s`), slash-command skills, a `✦ <name>`
   mark on the steps and groups they drove and a SKILLS row (`tools/skills_stats.py --root DIR` counts both kinds per

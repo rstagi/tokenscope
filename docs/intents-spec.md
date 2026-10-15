@@ -76,7 +76,9 @@ Consecutive steps get a parent intent label once the purpose is clear:
 - otherwise the model proposes groups over closed, ungrouped consecutive steps (>= 2 steps each), source `haiku`;
 - groups never cross a user-prompt boundary; a group only wraps whole steps; its label is locked when created;
   a todo/declared group may keep growing while its item is active.
-Ungrouped steps stay top-level. Group tag = the category with most CW among its steps; a declared group with a
+Ungrouped steps are not shown loose: the flow views (follow tiles, canvas, pane) put a run of them whose labels are
+not locked yet under one "pending intent", and show a locked one as its own one-step intent (`steps.intent_blocks`;
+README "Intents in the flows"). Group tag = the category with most CW among its steps; a declared group with a
 `kind` uses it instead (investigate / plan / change / verify -> that category; other -> the CW-dominant one).
 
 ## 3. declare_intent (opt-in experiment; live pane, new sessions only)
@@ -123,16 +125,17 @@ no step, so the step total is a little below the session CW.
 
 ## 6. Live pane
 
-Every intent line (a collapsed group or a top-level step) has one dim detail line under it: a group's step labels
-("↳ Read store.py · Edit models.py ×2 · Run tests ✓", equal neighbours folded, cut with "+N"), a step's tools
-summary. The live step (the open one, or the last one while the session works) carries `ops` in the payload: its
+Every intent (a group, or a "pending intent" run) is its head line, a dim "├ +N other steps" (N > 0) and its latest
+step ("└ [CAT] label · summary · CW · $"); expanded (`/tokenscope expand`), every step. A one-step intent is the
+step's line with one dim detail line under it: its tools summary. The live step (the open one, or the last one while the session works) carries `ops` in the payload: its
 last 12 calls, `{"tool", "target", "cw" (the turn's CW split over its calls), "err" (null while running), "dur_s",
 "test" ({"ok","passed","failed"}, test runs only), "skill" (Skill calls only)}`, tool / target redaction-aware as in
 "now". Steps and groups carry `dur_s` and `skills`. The pane draws one row per call ("▶ Edit store.py · 4k · 2s",
 "✓ unittest 22 passed · 3k · 4s", "✦ skill:pr-review · 2k · 3s") plus the in-process calls the transcript has not
 caught up with (their elapsed time from the mod's own clock); step / group lines end with "· CW · $ · 1m12s". The
-label is cut to fit, never the numbers. Short of rows: older expanded groups collapse, then the oldest intents lose their detail lines, then fold
-into "… N earlier"; the live intent always stays.
+label is cut to fit, never the numbers. Short of rows: older expanded intents go back to head / "+N other steps" /
+latest step, then the oldest one-step intents lose their detail lines, then fold into "… N earlier"; the live intent
+always stays.
 
 ## 7. Idle recap
 
