@@ -90,7 +90,8 @@ def _prefilter(args):
     if getattr(args, "sessions", None):
         from .compare import read_ids
         only = [i.strip() for i in read_ids(args.sessions) if i.strip()]
-    found = [s for s in discover(args.root) if only is None or any(s.id.startswith(i) for i in only)]
+    found = [s for s in discover(getattr(args, "root", None), harness=getattr(args, "harness", None))
+             if only is None or any(s.id.startswith(i) for i in only)]
     n = getattr(args, "sample", None)
     if n and n < len(found):
         keep = set(random.Random(SAMPLE_SEED).sample(range(len(found)), n))
@@ -117,7 +118,7 @@ def _work(job):
     path, slug, args, since, what = job
     set_cache(not args.no_cache)
     before = dict(STATS)
-    s = Session(path, slug).load()
+    s = Session(path, slug, harness=getattr(args, "harness", None)).load()
     stats = {k: STATS[k] - before[k] for k in STATS}
     if not _keep(s, args, since):
         return None, None, stats
@@ -316,7 +317,7 @@ def print_summary(a):
 
 
 def cmd_analyze(args):
-    s = _load_one(args.session, args.root)
+    s = _load_one(args.session, getattr(args, "root", None), harness=getattr(args, "harness", None))
     if s is None:
         return 2
     a = analyze_session(s)
@@ -328,9 +329,9 @@ def cmd_analyze(args):
     return 0
 
 
-def _load_one(sid, root):
+def _load_one(sid, root, harness=None):
     try:
-        return find_session(sid, root)
+        return find_session(sid, root, harness=harness)
     except LookupError as e:
         print("error: %s" % e, file=sys.stderr)
         return None
@@ -349,7 +350,7 @@ def cmd_report(args):
     from . import report
     from . import understand as un
     if args.session:
-        s = _load_one(args.session, args.root)
+        s = _load_one(args.session, getattr(args, "root", None), harness=getattr(args, "harness", None))
         if s is None:
             return 2
         a = analyze_session(s)
@@ -446,7 +447,7 @@ def cmd_fixes(args):
         print("error: --overlay needs --emit-config DIR", file=sys.stderr)
         return 2
     if args.session:
-        s = _load_one(args.session, args.root)
+        s = _load_one(args.session, getattr(args, "root", None), harness=getattr(args, "harness", None))
         if s is None:
             return 2
         a = analyze_session(s)
@@ -501,7 +502,7 @@ def cmd_compare(args):
             if not ids:
                 print("error: no session ids in %s" % spec, file=sys.stderr)
                 return 2
-            side[k] = [_load_one(i, args.root) for i in ids]
+            side[k] = [_load_one(i, getattr(args, "root", None), harness=getattr(args, "harness", None)) for i in ids]
             if any(s is None for s in side[k]):
                 return 2
         d = compare.compare_sets(side["A"], side["B"], **{k: v for k, v in goal_opts(args).items()
@@ -514,7 +515,8 @@ def cmd_compare(args):
         if not (args.a and args.b):
             print("error: give two sessions (A B) or --a-sessions FILE|ID,ID --b-sessions FILE|ID,ID", file=sys.stderr)
             return 2
-        sa, sb = _load_one(args.a, args.root), _load_one(args.b, args.root)
+        sa = _load_one(args.a, getattr(args, "root", None), harness=getattr(args, "harness", None))
+        sb = _load_one(args.b, getattr(args, "root", None), harness=getattr(args, "harness", None))
         if sa is None or sb is None:
             return 2
         d = _redact(args, compare.compare_data(analyze_session(sa), analyze_session(sb)))
@@ -537,7 +539,7 @@ def cmd_compare(args):
 def cmd_goals(args):
     from . import understand as un
     if args.session:
-        s = _load_one(args.session, args.root)
+        s = _load_one(args.session, getattr(args, "root", None), harness=getattr(args, "harness", None))
         if s is None:
             return 2
         sessions, analyses, per_session = [s], [analyze_session(s)], None
@@ -651,7 +653,7 @@ def cmd_alerts(args):
     from .live.replay import find_transcript, replay
     try:
         cfg = alerts.from_args(args)
-        path = find_transcript(args.session, resolve_root(getattr(args, "root", None)))
+        path = find_transcript(args.session, resolve_root(getattr(args, "root", None), harness=getattr(args, "harness", None)))
     except (LookupError, OSError, ValueError) as e:
         print(str(e), file=sys.stderr)
         return 1
@@ -686,7 +688,7 @@ def cmd_intents(args):
     from .live.replay import find_transcript
     from .steps import summary
     try:
-        path = find_transcript(args.session, resolve_root(getattr(args, "root", None)))
+        path = find_transcript(args.session, resolve_root(getattr(args, "root", None), harness=getattr(args, "harness", None)))
     except LookupError as e:
         print(str(e), file=sys.stderr)
         return 1
@@ -761,9 +763,11 @@ def top_lines(r):
 
 def cmd_top(args):
     from .top import parse_now, top_spenders
+    from .parse import resolve_root
     try:
         now = parse_now(args.now) if args.now else None
-        r = top_spenders(args.window, now=now, root=args.index_root, limit=args.limit, by=args.by)
+        root = args.index_root or resolve_root(harness=getattr(args, "harness", None))
+        r = top_spenders(args.window, now=now, root=root, limit=args.limit, by=args.by)
     except ValueError as e:
         raise argparse.ArgumentTypeError(str(e))
     if args.json:
@@ -774,11 +778,13 @@ def cmd_top(args):
 
 
 def main(argv=None):
-    p = argparse.ArgumentParser(prog="tokenscope", description="Explain where Claude Code tokens go.")
+    p = argparse.ArgumentParser(prog="tokenscope", description="Explain where agent tokens go (Claude Code, Google Antigravity).")
     p.add_argument("--version", action="version", version="tokenscope " + __version__)
     root_parent = argparse.ArgumentParser(add_help=False)
     root_parent.add_argument("--root", default=argparse.SUPPRESS,
-                             help="transcripts root (default ~/.claude/projects or $TOKENSCOPE_ROOT)")
+                             help="transcripts root (default ~/.claude/projects, ~/.gemini/antigravity-cli/brain or $TOKENSCOPE_ROOT)")
+    root_parent.add_argument("--harness", choices=["claude", "antigravity", "auto"], default=None,
+                             help="agent harness (claude, antigravity, or auto-detect)")
     goal_parent = argparse.ArgumentParser(add_help=False)
     goal_parent.add_argument("--goal-threshold", type=float, metavar="F",
                              help="similarity at which requests merge into one goal (default %.2f)" % GOAL_THRESHOLD)
@@ -907,7 +913,9 @@ def main(argv=None):
     ap = sub.add_parser("alerts", help="cost / off-task / looping alerts of one session (replays its transcript)")
     ap.add_argument("session", help="transcript path (.jsonl) or session id / unique prefix")
     ap.add_argument("--root", default=argparse.SUPPRESS,
-                    help="transcripts root (default ~/.claude/projects or $TOKENSCOPE_ROOT)")
+                    help="transcripts root (default ~/.claude/projects, ~/.gemini/antigravity-cli/brain or $TOKENSCOPE_ROOT)")
+    ap.add_argument("--harness", choices=["claude", "antigravity", "auto"], default=None,
+                    help="agent harness (claude, antigravity, or auto-detect)")
     ap.add_argument("--json", action="store_true")
     from .alerts import add_arguments as alert_arguments
     alert_arguments(ap)
@@ -916,7 +924,9 @@ def main(argv=None):
     ip = sub.add_parser("intents", help="steps and intent groups of one session (replays its transcript)")
     ip.add_argument("session", help="transcript path (.jsonl) or session id / unique prefix")
     ip.add_argument("--root", default=argparse.SUPPRESS,
-                    help="transcripts root (default ~/.claude/projects or $TOKENSCOPE_ROOT)")
+                    help="transcripts root (default ~/.claude/projects, ~/.gemini/antigravity-cli/brain or $TOKENSCOPE_ROOT)")
+    ip.add_argument("--harness", choices=["claude", "antigravity", "auto"], default=None,
+                    help="agent harness (claude, antigravity, or auto-detect)")
     ip.add_argument("--haiku", action="store_true",
                     help="label steps without own signals with `claude -p --model haiku` (masked text, cached)")
     ip.add_argument("--json", action="store_true")
@@ -928,7 +938,9 @@ def main(argv=None):
                     help="rank sessions, goals (labelled user goals, across turns and resumed sessions), turns (one "
                          "per user prompt) or intents (default: sessions, intents and steps)")
     tp.add_argument("--index-root", default=None, metavar="DIR",
-                    help="transcripts to rank (default $TOKENSCOPE_INDEX_ROOT, else ~/.claude/projects)")
+                    help="transcripts to rank (default $TOKENSCOPE_INDEX_ROOT, else default harness root)")
+    tp.add_argument("--harness", choices=["claude", "antigravity", "auto"], default=None,
+                    help="agent harness (claude, antigravity, or auto-detect)")
     tp.add_argument("--now", metavar="ISO", help="end of the window (default: now), e.g. 2026-10-12T09:00:00Z")
     tp.add_argument("--limit", type=int, default=10, metavar="N", help="rows per section (default 10)")
     tp.add_argument("--json", action="store_true")

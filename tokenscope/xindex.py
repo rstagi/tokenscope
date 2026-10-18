@@ -160,9 +160,13 @@ def cache_dir():
 
 
 def index_root(arg=None):
-    """--index-root, else $TOKENSCOPE_INDEX_ROOT, else ~/.claude/projects."""
-    return os.path.abspath(os.path.expanduser(arg or os.environ.get("TOKENSCOPE_INDEX_ROOT")
-                                              or os.path.join("~", ".claude", "projects")))
+    """--index-root, else $TOKENSCOPE_INDEX_ROOT, else default root from harness."""
+    if arg:
+        return os.path.abspath(os.path.expanduser(arg))
+    if os.environ.get("TOKENSCOPE_INDEX_ROOT"):
+        return os.path.abspath(os.path.expanduser(os.environ["TOKENSCOPE_INDEX_ROOT"]))
+    from .parse import resolve_root
+    return os.path.abspath(resolve_root())
 
 
 # ---------------------------------------------------------------- signatures
@@ -493,7 +497,10 @@ def index_transcript(path):
 
 def _key(path):
     st = os.stat(path)
-    sub = os.path.join(os.path.dirname(path), os.path.basename(path)[:-len(".jsonl")], "subagents")
+    if os.path.basename(path) == "transcript.jsonl":
+        sub = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(path))), "subagents")
+    else:
+        sub = os.path.join(os.path.dirname(path), os.path.basename(path)[:-len(".jsonl")], "subagents")
     n = size = 0
     if os.path.isdir(sub):
         for p in glob.glob(os.path.join(sub, "**", "agent-*.jsonl"), recursive=True):
@@ -537,7 +544,12 @@ class XIndex:
         t0 = time.time()
         old = self._load()
         files, todo = {}, []
-        for path in sorted(glob.glob(os.path.join(self.root, "*", "*.jsonl"))):
+        from .harness import get_harness
+        h = get_harness(root=self.root)
+        candidates = set(h.tail_candidates(self.root, "*"))
+        for p in glob.glob(os.path.join(self.root, "*", "*.jsonl")):
+            candidates.add(p)
+        for path in sorted(candidates):
             try:
                 k = _key(path)
             except OSError:

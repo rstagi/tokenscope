@@ -507,6 +507,21 @@ class LiveState:
         if not tf.agent_id:
             s.path = tf.path
         agent_id = tf.agent_id
+        is_ag = tf.path.endswith("transcript.jsonl") or (bool(records) and records[0].get("step_index") is not None)
+        if is_ag:
+            from ..harness import get_harness
+            ag = get_harness("antigravity")
+            if s.goal is None:
+                meta = ag.load_summaries().get(s.id)
+                if meta and meta.get("preview"):
+                    s.goal = {"name": meta["preview"], "source": "summary", "prompt_chars": len(meta["preview"])}
+                if meta and meta.get("project") and not s.project_from_cwd:
+                    s.project_raw = meta["project"]
+                    s.project_from_cwd = True
+            converted = []
+            for r in records:
+                converted.extend(ag.normalize_record(r, s))
+            records = converted
         if agent_id:
             branch = self._agent_branch(s, agent_id, tf.load_meta() or {})
             if s.agents[agent_id].get("workflow") is None:

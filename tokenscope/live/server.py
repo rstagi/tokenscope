@@ -431,7 +431,8 @@ def make_server(live, host="127.0.0.1", port=8765):
 
 
 def add_arguments(p):
-    p.add_argument("--root", default=argparse.SUPPRESS, help="transcripts root (default ~/.claude/projects or $TOKENSCOPE_ROOT)")
+    p.add_argument("--root", default=argparse.SUPPRESS, help="transcripts root (default ~/.claude/projects, ~/.gemini/antigravity-cli/brain or $TOKENSCOPE_ROOT)")
+    p.add_argument("--harness", choices=["claude", "antigravity", "auto"], default=None, help="agent harness (default auto)")
     p.add_argument("--port", type=int, default=8765)
     p.add_argument("--host", default="127.0.0.1")
     p.add_argument("--no-redact", action="store_true",
@@ -472,7 +473,8 @@ def main(args=None):
     except (OSError, ValueError) as e:
         print("tokenscope live: %s" % (e,), file=sys.stderr)
         return 2
-    live = Live(resolve_root(getattr(args, "root", None)), redact=not args.no_redact,
+    root = resolve_root(getattr(args, "root", None), harness=getattr(args, "harness", None))
+    live = Live(root, redact=not args.no_redact,
                 since_minutes=args.since_minutes, project=args.project, haiku=args.haiku,
                 xhints=not args.no_xhints, index_root=args.index_root, skills_dirs=args.skills_dir,
                 cached_labels=True, odd_goals=getattr(args, "haiku_odd", False), cached_goals=True,

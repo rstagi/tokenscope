@@ -107,38 +107,50 @@ def mcp_parts(name):
 
 
 def tool_kind(name):
-    if name == "Read":
+    if name in ("Read", "view_file"):
         return "file_read"
-    if name == "Bash":
+    if name in ("Bash", "run_command"):
         return "bash"
+    if name in ("Edit", "Write", "MultiEdit", "NotebookEdit", "write_to_file", "replace_file_content", "multi_replace_file_content"):
+        return "edit"
     if mcp_parts(name):
         return "mcp"
-    if name in ("Agent", "Task"):
+    if name in ("Agent", "Task", "invoke_subagent", "manage_subagents", "send_message"):
         return "subagent_result"
-    if name in ("Grep", "Glob", "WebSearch", "WebFetch", "ToolSearch"):
+    if name in ("Grep", "Glob", "WebSearch", "WebFetch", "ToolSearch", "grep_search", "search_web", "read_url_content", "list_dir", "list_directory"):
         return "search"
     return "other"
 
 
 def tool_target(name, inp, cwd):
     inp = inp if isinstance(inp, dict) else {}
-    if name == "Bash":
-        cmd = " ".join(str(inp.get("command", "")).split())
+    if name in ("Bash", "run_command"):
+        cmd = inp.get("command") or inp.get("CommandLine") or ""
+        cmd = " ".join(str(cmd).split())
         return cmd[:117] + "..." if len(cmd) > 120 else cmd
-    if name in ("Read", "Edit", "Write", "MultiEdit", "NotebookEdit"):
-        return relpath(inp.get("file_path") or inp.get("notebook_path") or "", cwd)
-    if name == "Grep":
-        return str(inp.get("pattern", ""))[:120]
-    if name == "Glob":
-        return str(inp.get("pattern", ""))[:120]
+    if name in ("Read", "Edit", "Write", "MultiEdit", "NotebookEdit", "view_file", "write_to_file", "replace_file_content", "multi_replace_file_content"):
+        path = inp.get("file_path") or inp.get("AbsolutePath") or inp.get("TargetFile") or inp.get("notebook_path") or ""
+        return relpath(path, cwd)
+    if name in ("Grep", "grep_search"):
+        pat = inp.get("pattern") or inp.get("query") or ""
+        return str(pat)[:120]
+    if name in ("Glob", "list_dir", "list_directory"):
+        pat = inp.get("pattern") or inp.get("dir_path") or inp.get("path") or ""
+        return str(pat)[:120]
     if name in ("Agent", "Task"):
         return str(inp.get("subagent_type") or "general-purpose")
+    if name in ("invoke_subagent", "manage_subagents", "send_message"):
+        subs = inp.get("Subagents")
+        if isinstance(subs, list) and subs:
+            roles = [s.get("Role") or s.get("TypeName") for s in subs if isinstance(s, dict)]
+            return ", ".join(filter(None, roles))[:120] or "subagent"
+        return str(inp.get("Role") or inp.get("TypeName") or inp.get("Action") or "subagent")
     if name == "Skill":
         return str(inp.get("skill") or inp.get("name") or inp.get("command") or "")
     mp = mcp_parts(name)
     if mp:
         return "%s/%s" % mp
-    for k in ("url", "query", "path", "description"):
+    for k in ("url", "Url", "query", "path", "description", "question"):
         if inp.get(k):
             return str(inp[k])[:120]
     return ""
@@ -147,9 +159,9 @@ def tool_target(name, inp, cwd):
 def tool_label(name, target):
     if not target:
         return name
-    if name == "Bash":
+    if name in ("Bash", "run_command"):
         return "Bash: " + target
-    if name in ("Agent", "Task"):
+    if name in ("Agent", "Task", "invoke_subagent", "manage_subagents", "send_message"):
         return "Subagent result (%s)" % target
     if mcp_parts(name):
         return "MCP " + target
