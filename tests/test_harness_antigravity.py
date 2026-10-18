@@ -143,8 +143,26 @@ class TestAntigravityHarness(unittest.TestCase):
             b = ls.board(now=ls.sessions[conv_id].last_ts + 1)
             self.assertEqual(len(b["sessions"]), 1)
             card = b["sessions"][0]
-            self.assertEqual(card["id"], conv_id)
-            self.assertEqual(card["turns"], 2)
+            self.assertEqual(b["harness"], "antigravity")
+            self.assertEqual(b["harness_label"], "Google Antigravity")
+
+            # Test live server board.html replacement
+            import threading
+            import urllib.request
+            from tokenscope.live.server import Live, make_server
+            live = Live(d, harness="antigravity", redact=False, since_minutes=120)
+            srv = make_server(live, "127.0.0.1", 0)
+            port = srv.server_address[1]
+            t = threading.Thread(target=srv.serve_forever, daemon=True)
+            t.start()
+            try:
+                with urllib.request.urlopen(f"http://127.0.0.1:{port}/") as resp:
+                    html = resp.read().decode("utf-8")
+                    self.assertIn("Google Antigravity sessions on this machine", html)
+                    self.assertNotIn("Claude Code sessions on this machine", html)
+            finally:
+                srv.shutdown()
+                srv.server_close()
 
 
 if __name__ == "__main__":

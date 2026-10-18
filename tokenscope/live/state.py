@@ -438,8 +438,10 @@ class Session:
 
 class LiveState:
     def __init__(self, redact=True, on_goal=None, on_prompt=None, clock=time.time, model_labels=False,
-                 alerts_config=None, alert_store=None):
+                 alerts_config=None, alert_store=None, harness=None, harness_label=None):
         self.redact = redact
+        self.harness = harness
+        self.harness_label = harness_label
         self.alerts_config = alerts_config or copy.deepcopy(alertsmod.DEFAULTS)   # alerts.load_config()
         # alert history with acknowledgement state (alertstore.py): on disk for the server, else in memory
         self.alert_store = alert_store if alert_store is not None else AlertStore(clock=clock)
@@ -1139,7 +1141,21 @@ class LiveState:
         now = self.clock() if now is None else now
         rows = [self.board_row(s, now) for s in self.sessions.values()
                 if s.last_ts is None or now - s.last_ts <= max_idle_s]
-        return {"now": now, "redacted": self.redact, "sessions": board_order(rows)}
+        h_name = getattr(self, "harness", None)
+        h_label = getattr(self, "harness_label", None)
+        if not h_label:
+            if h_name == "antigravity" or any(getattr(s, "path", "").endswith("transcript.jsonl") for s in self.sessions.values()):
+                h_name = "antigravity"
+                h_label = "Google Antigravity"
+            elif h_name == "claude" or any(".claude" in getattr(s, "path", "") for s in self.sessions.values()):
+                h_name = "claude"
+                h_label = "Claude Code"
+            else:
+                from ..harness import get_harness
+                h_name = get_harness().name
+                h_label = "Google Antigravity" if h_name == "antigravity" else "Claude Code"
+        return {"now": now, "redacted": self.redact, "sessions": board_order(rows),
+                "harness": h_name, "harness_label": h_label}
 
     def follow_tile(self, s, now=None, last_n=FOLLOW_STEPS):
         """One tile of the follow view (/api/follow): the session's latest main-thread steps (label, category, $,

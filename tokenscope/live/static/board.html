@@ -5,7 +5,7 @@
 <header>
   <div class="topbar">
     <div><h1>tokenscope live <span id="redacted" class="badge" style="display:none" title="prompts, paths and project names are masked">redacted</span></h1>
-      <div class="sub">Claude Code sessions on this machine · CW = cost-weighted tokens · $ = API list-price equivalent · <span id="conn" class="conn"></span><a id="follow-link" class="followlink" href="/follow" style="display:none" title="the pinned sessions side by side">follow →</a></div></div>
+      <div class="sub"><span id="harness-sub">Agent sessions on this machine</span> · CW = cost-weighted tokens · $ = API list-price equivalent · <span id="conn" class="conn"></span><a id="follow-link" class="followlink" href="/follow" style="display:none" title="the pinned sessions side by side">follow →</a></div></div>
     <div class="kpis">
       <div class="kpi"><div class="l">sessions</div><div class="v" id="k-sessions">–</div></div>
       <div class="kpi"><div class="l">working</div><div class="v" id="k-working" style="color:var(--ok)">–</div></div>
@@ -24,7 +24,7 @@
     <div id="top-cols" class="topcols"><div><h3 id="top-h1">Sessions</h3><div id="top-sessions"></div></div><div id="top-col2"><h3>Intents</h3><div id="top-intents"></div></div></div>
   </section>
   <div id="grid" class="grid"></div>
-  <div id="empty" class="empty" style="display:none">No active sessions in the last 6 h. Start Claude Code and it will show up here.</div>
+  <div id="empty" class="empty" style="display:none">No active sessions in the last 6 h. Start <span id="empty-harness">your agent</span> and it will show up here.</div>
 </main>
 <script src="/static/alerts.js"></script>
 <script src="/static/live.js"></script>
