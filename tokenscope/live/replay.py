@@ -102,7 +102,7 @@ class LiveReplay:
             got = tailer._read(tf)
             prev = None
             for k, r in enumerate(got[0] if got else ()):
-                t = parse_ts(r.get("timestamp")) if isinstance(r, dict) else None
+                t = parse_ts(r.get("timestamp") or r.get("created_at")) if isinstance(r, dict) else None
                 t = t if t is not None else prev
                 prev = t
                 items.append((t, n, k, tf, r))
