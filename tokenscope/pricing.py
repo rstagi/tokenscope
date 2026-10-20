@@ -52,12 +52,16 @@ def price_of(model):
                 best = key
     if best:
         return PRICES[best]
-    # Check normalized version for human / UI model names (e.g. 'Gemini 3.8 Flash (High)')
+    # Check normalized version for human / UI model names (e.g. 'Gemini 3.8 Flash (Low)', 'Gemini 3.8 Flash (High)')
     norm = re.sub(r"[()\[\]]", "", model.lower()).strip()
     norm = re.sub(r"[\s_]+", "-", norm)
     for key in PRICES:
         if norm == key or norm.startswith(key + "-") or norm.startswith(key):
-            if _SUFFIX_RE.match(norm[len(key):]) or norm.startswith(key + "-high") or norm.startswith(key + "-preview"):
+            rem = norm[len(key):]
+            if not rem or rem.startswith("-") or _SUFFIX_RE.match(rem):
+                # Ensure we don't match unpriced version numbers like claude-opus-5-7 as claude-opus-5
+                if key.startswith("claude-") and not _SUFFIX_RE.match(rem):
+                    continue
                 if best is None or len(key) > len(best):
                     best = key
     return PRICES[best] if best else None
