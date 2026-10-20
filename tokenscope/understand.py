@@ -34,7 +34,7 @@ STATUS_FIX_SHARE = 0.30     # fixes claim this share of the goal's tokens => Cos
 IN_PROGRESS_SECONDS = 300   # last request of a session written this recently may still be running
 RESULT_TEXT_TAIL = 6000     # chars of tool/hook output kept for test parsing
 
-EDIT_TOOLS = ("Edit", "MultiEdit", "Write", "NotebookEdit")
+EDIT_TOOLS = ("Edit", "MultiEdit", "Write", "NotebookEdit", "edit_file", "write_file", "write_to_file", "replace_file_content", "multi_replace_file_content")
 SUBCOMMAND_PROGRAMS = ("npm", "yarn", "pnpm", "git", "node", "python", "python3", "pytest", "go", "cargo", "make")
 WRAPPERS = ("sudo", "time", "env", "nice", "nohup", "command", "exec")
 SCRIPT_EXT = (".sh", ".py", ".js", ".mjs", ".cjs", ".ts", ".rb", ".pl", ".bash")

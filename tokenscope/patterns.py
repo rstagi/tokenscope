@@ -55,8 +55,8 @@ MCP_UNUSED_MIN_SESSIONS = 3
 EXAMPLES = 5
 
 SUGGESTION_TYPES = ("skill", "claude_md", "script", "hook", "permission", "mcp_config", "workflow", "none")
-EDIT_TOOLS = ("Edit", "MultiEdit", "Write", "NotebookEdit")
-FILE_TOOLS = ("Read",) + EDIT_TOOLS
+EDIT_TOOLS = ("Edit", "MultiEdit", "Write", "NotebookEdit", "edit_file", "write_file", "write_to_file", "replace_file_content", "multi_replace_file_content")
+FILE_TOOLS = ("Read", "read_file", "view_file") + EDIT_TOOLS
 SUBCMD = ("npm", "pnpm", "yarn", "git", "gh", "uv", "npx", "bunx", "pnpx", "docker", "docker-compose", "make",
           "cargo", "go", "kubectl", "bun", "pip", "pip3", "poetry", "terraform", "brew", "apt", "apt-get")
 WRAPPERS = ("sudo", "time", "env", "nice", "nohup", "command", "exec", "xargs")

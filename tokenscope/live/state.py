@@ -105,7 +105,7 @@ STUCK_N = 3
 REREAD_N = 4
 BROWSER_N = 20
 CONTEXT_PCT = 0.85
-EDIT_TOOLS = ("Edit", "Write", "MultiEdit", "NotebookEdit")
+EDIT_TOOLS = ("Edit", "Write", "MultiEdit", "NotebookEdit", "edit_file", "write_file", "write_to_file", "replace_file_content", "multi_replace_file_content")
 READONLY_INTENTS = {"locate", "read_code", "read_docs", "review_changes", "research", "gather_context",
                     "discover_tools", "plan", "wait", "communicate", "report", "query_data"}
 BROWSER_ERR_N = 5   # a long browser run is only a loop when it keeps failing
