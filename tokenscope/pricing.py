@@ -19,6 +19,7 @@ PRICES = {'claude-fable-5-1': (10, 12.5, 20, 0.25, 50), 'claude-fable-5': (10, 1
           'claude-sonnet-4-6': (3, 3.75, 6, 0.3, 15), 'claude-sonnet-4-5': (3, 3.75, 6, 0.3, 15),
           'claude-haiku-4-5': (1, 1.25, 2, 0.1, 5),
           # Gemini models (Google Antigravity)
+          'gemini-4-argon': (2.00, 2.00, 2.00, 0.10, 10.00),
           'gemini-3.8-flash': (0.15, 0.20, 0.20, 0.0375, 0.60),
           'gemini-3.8-pro': (1.50, 2.00, 2.50, 0.375, 6.00),
           'gemini-2.5-pro': (1.25, 1.50, 2.00, 0.3125, 5.00),

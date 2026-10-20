@@ -21,6 +21,11 @@ class TestAntigravityHarness(unittest.TestCase):
         self.assertIsNotNone(p)
         self.assertEqual(p, (0.15, 0.20, 0.20, 0.0375, 0.60))
 
+        # Gemini 4 Argon
+        p_argon = price_of("gemini-4-argon")
+        self.assertEqual(p_argon, (2.00, 2.00, 2.00, 0.10, 10.00))
+        self.assertEqual(price_of("Gemini 4 Argon"), p_argon)
+
         # Human-formatted name from settings.json
         p_human = price_of("Gemini 3.8 Flash (High)")
         self.assertEqual(p_human, p)
