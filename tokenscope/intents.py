@@ -119,28 +119,28 @@ def _bash_intent(t, cmd):
 
 def tool_intent(t):
     n = t["name"]
-    if n in ("Edit", "Write", "MultiEdit", "NotebookEdit"):
+    if n in ("Edit", "Write", "MultiEdit", "NotebookEdit", "edit_file", "write_file", "write_to_file", "replace_file_content", "multi_replace_file_content"):
         return "edit"
-    if n == "Bash":
+    if n in ("Bash", "run_command"):
         return bash_intent(t)
-    if n == "Read":
+    if n in ("Read", "read_file", "view_file"):
         f = t.get("file") or t.get("target") or ""
         return "read_docs" if _ext(f) in DOC_EXT or "SKILL" in f or "CLAUDE" in f else "read_code"
-    if n in ("Grep", "Glob", "LS"):
+    if n in ("Grep", "Glob", "LS", "grep_search", "list_dir", "list_directory"):
         return "locate"
-    if n in ("WebSearch", "WebFetch"):
+    if n in ("WebSearch", "WebFetch", "search_web", "read_url_content"):
         return "research"
     if n == "ToolSearch":
         return "discover_tools"
     if n == "Skill":
         return "use_skill"
-    if n in ("Agent", "Task", "Workflow", "SendMessage"):
+    if n in ("Agent", "Task", "Workflow", "SendMessage", "invoke_subagent", "manage_subagents", "send_message"):
         return "delegate"
-    if n in ("TaskOutput", "Monitor", "ScheduleWakeup", "TaskStop", "ListAgents", "ReadNotifications", "BashOutput", "KillShell"):
+    if n in ("TaskOutput", "Monitor", "ScheduleWakeup", "TaskStop", "ListAgents", "ReadNotifications", "BashOutput", "KillShell", "manage_task", "schedule"):
         return "wait"
     if n in ("StructuredOutput", "Artifact"):
         return "report"
-    if n in ("AskUserQuestion", "PushNotification", "SendUserFile"):
+    if n in ("AskUserQuestion", "PushNotification", "SendUserFile", "ask_question"):
         return "communicate"
     if n in ("TodoWrite", "ExitPlanMode", "TaskCreate", "TaskUpdate", "TaskList"):
         return "plan"
@@ -205,25 +205,36 @@ def record(name, inp):
     (is_capture_file) is dropped from "file" / "target" and flagged "capture"."""
     inp = inp if isinstance(inp, dict) else {}
     t = {"name": name or "?"}
-    if name == "Bash":
-        cmd = " ".join(str(inp.get("command", "")).split())
+    if name in ("Bash", "run_command"):
+        cmd = " ".join(str(inp.get("command") or inp.get("CommandLine") or "").split())
         t["cmd"] = cmd[:4000]   # classification only; never displayed
         t["segs"] = bash_segments(cmd) or [cmd]
         if t["segs"] and t["segs"][0].split() and t["segs"][0].split()[0] in PAGERS:
             t["file"] = bash_file_arg(cmd)
-    elif name in ("Read", "Edit", "Write", "MultiEdit", "NotebookEdit"):
-        t["file"] = str(inp.get("file_path") or inp.get("notebook_path") or "")
+    elif name in ("Read", "Edit", "Write", "MultiEdit", "NotebookEdit", "read_file", "edit_file", "write_file", "view_file", "write_to_file", "replace_file_content", "multi_replace_file_content"):
+        t["file"] = str(inp.get("file_path") or inp.get("Path") or inp.get("notebook_path") or inp.get("AbsolutePath") or inp.get("TargetFile") or "")
         t["target"] = t["file"]
-    elif name in ("Grep", "Glob"):
-        t["target"] = str(inp.get("pattern", ""))[:120]
+    elif name in ("Grep", "Glob", "grep_search", "list_dir", "list_directory"):
+        t["target"] = str(inp.get("pattern") or inp.get("query") or inp.get("dir_path") or inp.get("path") or inp.get("Path") or "")[:120]
     elif name in ("Agent", "Task"):
         t["target"] = str(inp.get("subagent_type") or "general-purpose")
+    elif name in ("invoke_subagent", "manage_subagents", "send_message"):
+        subs = inp.get("Subagents")
+        if isinstance(subs, list) and subs:
+            roles = [s.get("Role") or s.get("TypeName") for s in subs if isinstance(s, dict)]
+            t["target"] = ", ".join(filter(None, roles))[:120] or "subagent"
+        else:
+            t["target"] = str(inp.get("Role") or inp.get("TypeName") or inp.get("Action") or "subagent")
     elif name == "Skill":
         t["target"] = str(inp.get("skill") or inp.get("name") or inp.get("command") or "")
-    elif name in ("WebFetch",):
-        t["target"] = str(inp.get("url", ""))[:200]
-    elif name in ("WebSearch",):
-        t["target"] = str(inp.get("query", ""))[:200]
+    elif name in ("WebFetch", "read_url_content"):
+        t["target"] = str(inp.get("url") or inp.get("Url") or "")[:200]
+    elif name in ("WebSearch", "search_web"):
+        t["target"] = str(inp.get("query") or inp.get("pattern") or "")[:200]
+    elif name in ("manage_task", "schedule"):
+        t["target"] = str(inp.get("TaskId") or inp.get("Action") or inp.get("Prompt") or "")[:120]
+    elif name in ("AskUserQuestion", "ask_question"):
+        t["target"] = str(inp.get("question") or inp.get("prompt") or "")[:120]
     if t.get("file") and is_capture_file(t["file"]):
         t["capture"] = True
         t["file"] = ""

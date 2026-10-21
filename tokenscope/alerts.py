@@ -388,7 +388,7 @@ def tok(v):
 
 # ---------------------------------------------------------------- call facts (computed at ingest)
 
-EDIT_TOOLS = ("Edit", "Write", "MultiEdit", "NotebookEdit")
+EDIT_TOOLS = ("Edit", "Write", "MultiEdit", "NotebookEdit", "edit_file", "write_file", "write_to_file", "replace_file_content", "multi_replace_file_content")
 SKIP_TOOLS = {"TodoWrite", "TodoRead", "TaskCreate", "TaskUpdate", "TaskList", "TaskOutput", "ToolSearch", "Agent",
               "Task", "Workflow", "ExitPlanMode", "Skill"}   # bookkeeping / delegation: never a "trivial" loop
 

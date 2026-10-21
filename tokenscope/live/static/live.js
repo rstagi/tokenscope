@@ -340,6 +340,12 @@
       var tot = {cw: 0, usd: 0, w: 0};
       ss.forEach(function (s) { tot.cw += +s.cw || 0; tot.usd += +s.usd || 0; if (s.status === "working") tot.w++; });
       k.sessions.set(ss.length); k.working.set(tot.w); k.cw.set(tot.cw); k.usd.set(tot.usd);
+      if (d.harness_label) {
+        var hSub = $("#harness-sub", root);
+        if (hSub) hSub.textContent = d.harness_label + " sessions on this machine";
+        var eh = $("#empty-harness", root);
+        if (eh) eh.textContent = d.harness_label;
+      }
       $("#empty", root).style.display = ss.length ? "none" : "";
 
       // FLIP: remember positions

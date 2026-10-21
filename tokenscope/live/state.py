@@ -105,7 +105,7 @@ STUCK_N = 3
 REREAD_N = 4
 BROWSER_N = 20
 CONTEXT_PCT = 0.85
-EDIT_TOOLS = ("Edit", "Write", "MultiEdit", "NotebookEdit")
+EDIT_TOOLS = ("Edit", "Write", "MultiEdit", "NotebookEdit", "edit_file", "write_file", "write_to_file", "replace_file_content", "multi_replace_file_content")
 READONLY_INTENTS = {"locate", "read_code", "read_docs", "review_changes", "research", "gather_context",
                     "discover_tools", "plan", "wait", "communicate", "report", "query_data"}
 BROWSER_ERR_N = 5   # a long browser run is only a loop when it keeps failing
@@ -438,8 +438,10 @@ class Session:
 
 class LiveState:
     def __init__(self, redact=True, on_goal=None, on_prompt=None, clock=time.time, model_labels=False,
-                 alerts_config=None, alert_store=None):
+                 alerts_config=None, alert_store=None, harness=None, harness_label=None):
         self.redact = redact
+        self.harness = harness
+        self.harness_label = harness_label
         self.alerts_config = alerts_config or copy.deepcopy(alertsmod.DEFAULTS)   # alerts.load_config()
         # alert history with acknowledgement state (alertstore.py): on disk for the server, else in memory
         self.alert_store = alert_store if alert_store is not None else AlertStore(clock=clock)
@@ -507,6 +509,21 @@ class LiveState:
         if not tf.agent_id:
             s.path = tf.path
         agent_id = tf.agent_id
+        is_ag = tf.path.endswith("transcript.jsonl") or (bool(records) and records[0].get("step_index") is not None)
+        if is_ag:
+            from ..harness import get_harness
+            ag = get_harness("antigravity")
+            if s.goal is None:
+                meta = ag.load_summaries().get(s.id)
+                if meta and meta.get("preview"):
+                    s.goal = {"name": meta["preview"], "source": "summary", "prompt_chars": len(meta["preview"])}
+                if meta and meta.get("project") and not s.project_from_cwd:
+                    s.project_raw = meta["project"]
+                    s.project_from_cwd = True
+            converted = []
+            for r in records:
+                converted.extend(ag.normalize_record(r, s))
+            records = converted
         if agent_id:
             branch = self._agent_branch(s, agent_id, tf.load_meta() or {})
             if s.agents[agent_id].get("workflow") is None:
@@ -1124,7 +1141,21 @@ class LiveState:
         now = self.clock() if now is None else now
         rows = [self.board_row(s, now) for s in self.sessions.values()
                 if s.last_ts is None or now - s.last_ts <= max_idle_s]
-        return {"now": now, "redacted": self.redact, "sessions": board_order(rows)}
+        h_name = getattr(self, "harness", None)
+        h_label = getattr(self, "harness_label", None)
+        if not h_label:
+            if h_name == "antigravity" or any(getattr(s, "path", "").endswith("transcript.jsonl") for s in self.sessions.values()):
+                h_name = "antigravity"
+                h_label = "Google Antigravity"
+            elif h_name == "claude" or any(".claude" in getattr(s, "path", "") for s in self.sessions.values()):
+                h_name = "claude"
+                h_label = "Claude Code"
+            else:
+                from ..harness import get_harness
+                h_name = get_harness().name
+                h_label = "Google Antigravity" if h_name == "antigravity" else "Claude Code"
+        return {"now": now, "redacted": self.redact, "sessions": board_order(rows),
+                "harness": h_name, "harness_label": h_label}
 
     def follow_tile(self, s, now=None, last_n=FOLLOW_STEPS):
         """One tile of the follow view (/api/follow): the session's latest main-thread steps (label, category, $,

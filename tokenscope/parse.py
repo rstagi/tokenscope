@@ -10,14 +10,19 @@ from datetime import datetime, timezone
 from . import __version__
 
 DEFAULT_ROOT = os.path.join(os.path.expanduser("~"), ".claude", "projects")
-CACHE_FORMAT = 1  # bump when compact_event changes shape
+CACHE_FORMAT = 2  # bump when compact_event changes shape
 UUID_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
 NOISE_PREFIXES = ("<command-", "<local-command", "<system-reminder>", "Caveat:", "<bash-", "<user-memory-input>",
-                  "[Request interrupted")
+                  "[Request interrupted", "<SYSTEM_MESSAGE>", "The following is a <SYSTEM_MESSAGE>")
 
 
-def resolve_root(root=None):
-    return os.path.expanduser(root or os.environ.get("TOKENSCOPE_ROOT") or DEFAULT_ROOT)
+def resolve_root(root=None, harness=None):
+    if root:
+        return os.path.expanduser(root)
+    if os.environ.get("TOKENSCOPE_ROOT"):
+        return os.path.expanduser(os.environ["TOKENSCOPE_ROOT"])
+    from .harness import get_harness
+    return get_harness(name=harness).default_root()
 
 
 def parse_ts(s):
@@ -159,13 +164,8 @@ def compact_event(ev, tool_names):
 
 def read_events(path):
     """Compacted events of one transcript file (see compact_event)."""
-    names = {}
-    out = []
-    for ev in read_jsonl(path):
-        c = compact_event(ev, names)
-        if c is not None:
-            out.append(c)
-    return out
+    from .harness import get_harness
+    return get_harness(path=path).read_events(path)
 
 
 # ---------------------------------------------------------------- disk cache
@@ -260,7 +260,8 @@ def real_prompt_text(ev):
 # ---------------------------------------------------------------- request source
 # A request (real prompt) is "human" unless one of these conservative rules says it was automated:
 AUTOMATED_PREFIXES = ("<task-notification>", "<system-reminder>", "[SYSTEM", "<command-", "<local-command",
-                      "<bash-", "<user-memory-input>", "<scheduled-task", "<hook-")
+                      "<bash-", "<user-memory-input>", "<scheduled-task", "<hook-",
+                      "<SYSTEM_MESSAGE>", "The following is a <SYSTEM_MESSAGE>")
 HEADLESS_ENTRYPOINTS = ("sdk",)  # entrypoint sdk-cli / sdk-ts / sdk-py = `claude -p` or an SDK program
 SOURCES = ("human", "notification", "hook", "subagent", "headless")
 SOURCE_RULES = [
@@ -337,10 +338,21 @@ def subagent_files(sub_dir):
 
 
 class Session:
-    def __init__(self, path, slug):
+    def __init__(self, path, slug, harness=None):
         self.path = path
         self.slug = slug
-        self.id = os.path.basename(path)[:-len(".jsonl")]
+        self.harness = harness
+        if path.endswith(".jsonl"):
+            if os.path.basename(path) == "transcript.jsonl":
+                parts = os.path.normpath(path).split(os.sep)
+                if len(parts) >= 4 and parts[-2] == "logs" and parts[-3] == ".system_generated":
+                    self.id = parts[-4]
+                else:
+                    self.id = os.path.basename(os.path.dirname(path))
+            else:
+                self.id = os.path.basename(path)[:-len(".jsonl")]
+        else:
+            self.id = os.path.basename(path)
         self.events = []
         self.subagents = []  # dicts: agent_id, path, meta, events, workflow_id, agent_type, description, ...
         self.workflows = []  # dicts: id, launched, started, results, failed, phases (Counter), agents
@@ -359,6 +371,8 @@ class Session:
 
     @property
     def sub_dir(self):
+        if os.path.basename(self.path) == "transcript.jsonl":
+            return os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(self.path))), "subagents")
         return os.path.join(os.path.dirname(self.path), self.id, "subagents")
 
     def load(self):
@@ -412,30 +426,26 @@ class Session:
         return c
 
 
-def discover(root=None):
+def discover(root=None, harness=None):
     """Return unloaded Session objects for every main transcript under root."""
-    root = resolve_root(root)
-    out = []
-    if not os.path.isdir(root):
-        return out
-    for slug in sorted(os.listdir(root)):
-        d = os.path.join(root, slug)
-        if not os.path.isdir(d):
-            continue
-        for name in sorted(os.listdir(d)):
-            p = os.path.join(d, name)
-            if name.endswith(".jsonl") and os.path.isfile(p):
-                out.append(Session(p, slug))
-    return out
+    from .harness import get_harness
+    h = get_harness(name=harness, root=root)
+    resolved_root = resolve_root(root, harness=h.name)
+    found = h.discover(resolved_root)
+    if not found and root is None and h.name != "antigravity":
+        ag = get_harness("antigravity")
+        if ag.is_available():
+            found = ag.discover()
+    return found
 
 
-def load_sessions(root=None):
-    return [s.load() for s in discover(root)]
+def load_sessions(root=None, harness=None):
+    return [s.load() for s in discover(root, harness=harness)]
 
 
-def find_session(prefix, root=None):
+def find_session(prefix, root=None, harness=None):
     """Find a session by id or unique id prefix. Raises LookupError."""
-    matches = [s for s in discover(root) if s.id.startswith(prefix)]
+    matches = [s for s in discover(root, harness=harness) if s.id.startswith(prefix)]
     exact = [s for s in matches if s.id == prefix]
     if exact:
         matches = exact

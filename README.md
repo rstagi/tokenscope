@@ -2,14 +2,25 @@
 
 > I was tired of hitting session limits without knowing why, so I made it explicit.
 
-`tokenscope` reads your local Claude Code transcripts and explains where the tokens went: which calls spiked, which
+`tokenscope` reads your local agent transcripts (**Claude Code** and **Google Antigravity CLI/IDE**) and explains where the tokens went: which calls spiked, which
 file read or command output caused it, how much of it was re-read on every later call, and what you could change
 next time. It is a single Python package, standard library only, and writes self-contained HTML reports
 (no network, no external assets).
 
-It also has a **live mode**: a local board of your running Claude Code sessions and a per-session infinite canvas where
+It also has a **live mode**: a local board of your running agent sessions and a per-session infinite canvas where
 the goal -> intent -> tool flow builds up as the agent works, plus an optional in-terminal pane (a Claude Code mod), and
 a **top spenders** view: the costliest sessions, goals, prompts or intents of the last 5 h, day, week or month.
+
+## Multi-Harness Support (Claude Code & Google Antigravity)
+
+`tokenscope` natively supports multiple coding agent harnesses:
+- **Google Antigravity CLI / IDE**: Tails `~/.gemini/antigravity-cli/brain/**/*.jsonl` transcripts, tracks conversations from `conversation_summaries.db`, normalizes Gemini models (`gemini-3.8-flash`, `gemini-3.8-pro`, `gemini-2.0-flash`, etc.), and attributes tools (`view_file`, `run_command`, `write_to_file`, `replace_file_content`, `grep_search`, `search_web`, `invoke_subagent`).
+- **Claude Code**: Tails `~/.claude/projects/**/*.jsonl`, supports Claude models (`claude-sonnet-4-6`, `claude-opus-4-8`, `claude-haiku-4-5`, etc.), subagents, and Claude Code extension hooks.
+
+Transcripts and harnesses are **auto-detected** by default. You can also explicitly specify `--harness [claude|antigravity|auto]` or set `$TOKENSCOPE_HARNESS`.
+
+> [!TIP]
+> **Complete Guide**: For detailed instructions on understanding Cost-Weighted (CW) tokens, API-equivalent costs, carry accumulation, and UI navigation, see [docs/guide.md](docs/guide.md).
 
 ## Live: watch sessions as they happen
 
@@ -29,7 +40,7 @@ main flow when they return.*
 ./bin/tokenscope live            # http://127.0.0.1:8765/  (redaction ON by default)
 ```
 
-`tokenscope live` tails `~/.claude/projects/**/*.jsonl` incrementally (byte offsets, partial lines buffered,
+`tokenscope live` tails transcripts incrementally (byte offsets, partial lines buffered,
 truncation handled) and shows:
 
 - **Board** (`/`, the landing page) and **follow view** (`/follow`): every live or recent session as a card, and up to
@@ -52,10 +63,8 @@ truncation handled) and shows:
   with a short hint): `stuck_error` (the same normalised error 3+ times with no edit in between, per thread),
   `reread_loop` (the same file read in full 4+ times with no edit to it and no compaction in between),
   `browser_loop` (20+ consecutive browser turns), `context_near_full` (>= 85% of the 200k / 1M context window).
-  `python3 tools/eval_warnings.py --root ~/.claude/projects --show` replays your transcripts offline and shows how
-  often each rule fires.
 
-Options: `--root DIR`, `--project GLOB` (only matching project dirs, e.g. `'*myrepo*'`), `--since-minutes N` (which
+Options: `--root DIR` (transcripts root), `--harness [claude|antigravity|auto]`, `--project GLOB` (only matching project dirs, e.g. `'*myrepo*'`), `--since-minutes N` (which
 existing transcripts to pick up at start, default 120), `--port`, `--host` (default 127.0.0.1), `--no-redact`,
 `--haiku` (name goals with `claude -p --model haiku` from the *masked* first 240 prompt characters; off by default,
 the default namer is a local keyword heuristic), `--haiku-odd` (the same, only for prompts that read oddly as a label:

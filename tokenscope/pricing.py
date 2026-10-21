@@ -17,7 +17,18 @@ PRICES = {'claude-fable-5-1': (10, 12.5, 20, 0.25, 50), 'claude-fable-5': (10, 1
           'claude-opus-4-8': (5, 6.25, 10, 0.5, 25), 'claude-opus-4-7': (5, 6.25, 10, 0.5, 25),
           'claude-sonnet-5-5': (2, 2.5, 4, 0.10, 10), 'claude-sonnet-5': (2, 2.5, 4, 0.2, 10),
           'claude-sonnet-4-6': (3, 3.75, 6, 0.3, 15), 'claude-sonnet-4-5': (3, 3.75, 6, 0.3, 15),
-          'claude-haiku-4-5': (1, 1.25, 2, 0.1, 5)}
+          'claude-haiku-4-5': (1, 1.25, 2, 0.1, 5),
+          # Gemini models (Google Antigravity)
+          'gemini-4-argon': (2.00, 2.00, 2.00, 0.10, 10.00),
+          'gemini-3.8-flash': (0.15, 0.20, 0.20, 0.0375, 0.60),
+          'gemini-3.8-pro': (1.50, 2.00, 2.50, 0.375, 6.00),
+          'gemini-2.5-pro': (1.25, 1.50, 2.00, 0.3125, 5.00),
+          'gemini-2.0-flash': (0.10, 0.15, 0.15, 0.025, 0.40),
+          'gemini-2.0-pro': (1.25, 1.50, 2.00, 0.3125, 5.00),
+          'gemini-1.5-flash': (0.075, 0.10, 0.10, 0.01875, 0.30),
+          'gemini-1.5-pro': (1.25, 1.50, 2.00, 0.3125, 5.00),
+          'gemini-flash': (0.15, 0.20, 0.20, 0.0375, 0.60),
+          'gemini-pro': (1.25, 1.50, 2.00, 0.3125, 5.00)}
 PRICES_SOURCE = "https://platform.claude.com/docs/en/about-claude/pricing (fetched 2026-10-10)"
 
 # cost-weighted tokens = input x W_INPUT + cache_write x W_CACHE_WRITE + cache_read x W_CACHE_READ + output x W_OUTPUT
@@ -39,6 +50,20 @@ def price_of(model):
         if model.startswith(key) and _SUFFIX_RE.match(model[len(key):]):
             if best is None or len(key) > len(best):
                 best = key
+    if best:
+        return PRICES[best]
+    # Check normalized version for human / UI model names (e.g. 'Gemini 3.8 Flash (Low)', 'Gemini 3.8 Flash (High)')
+    norm = re.sub(r"[()\[\]]", "", model.lower()).strip()
+    norm = re.sub(r"[\s_]+", "-", norm)
+    for key in PRICES:
+        if norm == key or norm.startswith(key + "-") or norm.startswith(key):
+            rem = norm[len(key):]
+            if not rem or rem.startswith("-") or _SUFFIX_RE.match(rem):
+                # Ensure we don't match unpriced version numbers like claude-opus-5-7 as claude-opus-5
+                if key.startswith("claude-") and not _SUFFIX_RE.match(rem):
+                    continue
+                if best is None or len(key) > len(best):
+                    best = key
     return PRICES[best] if best else None
 
 

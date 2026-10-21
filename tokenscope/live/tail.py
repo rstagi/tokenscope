@@ -41,6 +41,11 @@ class TrackedFile:
 
 def classify(root, path):
     """(session_id, project_dir, agent_id) for a transcript path under root, or None if it is not one."""
+    from ..harness import get_harness
+    h = get_harness(root=root, path=path)
+    res = h.classify_tail_path(root, path)
+    if res is not None:
+        return res
     rel = os.path.relpath(path, root).split(os.sep)
     name = rel[-1]
     if len(rel) == 2 and name.endswith(".jsonl"):
@@ -62,11 +67,18 @@ class Tailer:
         self.since_s = since_minutes * 60
 
     def _candidates(self):
+        from ..harness import get_harness
+        h = get_harness(root=self.root)
+        cands = h.tail_candidates(self.root, self.project)
         pats = (os.path.join(self.root, self.project, "*.jsonl"),
                 os.path.join(self.root, self.project, "*", "subagents", "**", "agent-*.jsonl"))
-        out = []
+        out = list(cands)
+        seen = set(out)
         for p in pats:
-            out.extend(glob.glob(p, recursive=True))
+            for match in glob.glob(p, recursive=True):
+                if match not in seen:
+                    seen.add(match)
+                    out.append(match)
         return out
 
     def _discover(self):

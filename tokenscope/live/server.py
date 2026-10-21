@@ -70,8 +70,12 @@ class Live:
     def __init__(self, root, redact=True, since_minutes=120, haiku=False,
                  events_path=None, hooks=True, project="*", xhints=False, index_root=None, skills_dirs=(),
                  cached_labels=False, odd_goals=False, cached_goals=False, goal_namer=None, alerts_config=None,
-                 alerts_history=None):
+                 alerts_history=None, harness=None):
         self.lock = threading.Lock()
+        from ..harness import get_harness
+        h = get_harness(name=harness, root=root)
+        self.harness = h.name
+        self.harness_label = "Google Antigravity" if h.name == "antigravity" else ("Claude Code" if h.name == "claude" else "Agent")
         # goal names from Haiku (disk-cached by prompt): every goal with --haiku; with --haiku-odd (odd_goals) only
         # those whose prompt reads oddly as a label (goalname.reads_oddly), goalname.goal_label until it arrives;
         # else (cached_goals) no model call: an odd prompt only gets the name an earlier run cached for it
@@ -90,7 +94,8 @@ class Live:
         self.state = LiveState(redact=redact, on_goal=self.namer.request if self.namer else None,
                                on_prompt=self._name_prompt if self.namer else None,
                                model_labels=self.step_namer is not None, alerts_config=alerts_config,
-                               alert_store=AlertStore(alerts_history))   # alerts_history: a file, None: memory
+                               alert_store=AlertStore(alerts_history),
+                               harness=self.harness, harness_label=self.harness_label)
         self.suggester = None
         if xhints:   # cross-session recap hints (tokenscope/xindex.py): the index builds in the background
             from ..xindex import Suggester
@@ -234,6 +239,21 @@ class Handler(BaseHTTPRequestHandler):
             return self._json({"error": "not found"}, 404)
         with open(path, "rb") as f:
             data = f.read()
+        if name == "board.html" and self.live is not None:
+            h_label = getattr(self.live, "harness_label", None) or "Agent"
+            data = data.replace(b">Agent sessions<", (">%s sessions<" % h_label).encode("utf-8"))
+            data = data.replace(b">Claude Code sessions<", (">%s sessions<" % h_label).encode("utf-8"))
+            data = data.replace(b"Claude Code sessions on this machine",
+                                ("%s sessions on this machine" % h_label).encode("utf-8"))
+            data = data.replace(b"Agent sessions on this machine",
+                                ("%s sessions on this machine" % h_label).encode("utf-8"))
+            data = data.replace(b">your agent<", (">%s<" % h_label).encode("utf-8"))
+            data = data.replace(b"Start Claude Code and it will show up here",
+                                ("Start %s and it will show up here" % h_label).encode("utf-8"))
+            data = data.replace(b"Start your agent and it will show up here",
+                                ("Start %s and it will show up here" % h_label).encode("utf-8"))
+            data = data.replace(b"Start an agent session and it will show up here",
+                                ("Start %s and it will show up here" % h_label).encode("utf-8"))
         ctype = mimetypes.guess_type(path)[0] or "application/octet-stream"
         if ctype.startswith("text/") or ctype.endswith("javascript"):
             ctype += "; charset=utf-8"
@@ -431,7 +451,8 @@ def make_server(live, host="127.0.0.1", port=8765):
 
 
 def add_arguments(p):
-    p.add_argument("--root", default=argparse.SUPPRESS, help="transcripts root (default ~/.claude/projects or $TOKENSCOPE_ROOT)")
+    p.add_argument("--root", default=argparse.SUPPRESS, help="transcripts root (default ~/.claude/projects, ~/.gemini/antigravity-cli/brain or $TOKENSCOPE_ROOT)")
+    p.add_argument("--harness", choices=["claude", "antigravity", "auto"], default=None, help="agent harness (default auto)")
     p.add_argument("--port", type=int, default=8765)
     p.add_argument("--host", default="127.0.0.1")
     p.add_argument("--no-redact", action="store_true",
@@ -472,13 +493,15 @@ def main(args=None):
     except (OSError, ValueError) as e:
         print("tokenscope live: %s" % (e,), file=sys.stderr)
         return 2
-    live = Live(resolve_root(getattr(args, "root", None)), redact=not args.no_redact,
+    root = resolve_root(getattr(args, "root", None), harness=getattr(args, "harness", None))
+    live = Live(root, redact=not args.no_redact,
                 since_minutes=args.since_minutes, project=args.project, haiku=args.haiku,
                 xhints=not args.no_xhints, index_root=args.index_root, skills_dirs=args.skills_dir,
                 cached_labels=True, odd_goals=getattr(args, "haiku_odd", False), cached_goals=True,
                 alerts_config=alerts_config,
                 alerts_history=None if getattr(args, "no_alerts_history", False) else
-                os.path.expanduser(getattr(args, "alerts_history", None) or alerts_history_path()))
+                os.path.expanduser(getattr(args, "alerts_history", None) or alerts_history_path()),
+                harness=getattr(args, "harness", None))
     srv = make_server(live, args.host, args.port)
     threading.Thread(target=live.run, daemon=True).start()
     print("tokenscope live: http://%s:%d/  (redaction %s; Ctrl-C to stop)" % (

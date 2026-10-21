@@ -11,6 +11,12 @@ def find_transcript(arg, root):
     """A main transcript path from a path or a session id / unique prefix under root; raises LookupError."""
     if os.path.isfile(arg):
         return os.path.abspath(arg)
+    from ..parse import find_session
+    try:
+        s = find_session(arg, root=root)
+        return s.path
+    except LookupError:
+        pass
     hits = sorted(glob.glob(os.path.join(root, "*", glob.escape(arg) + "*.jsonl")))
     exact = [h for h in hits if os.path.basename(h) == arg + ".jsonl"]
     hits = exact or hits
@@ -35,6 +41,15 @@ def replay(path, redact=False, model_labels=False, alerts_config=None):
 def transcript_files(path):
     """[TrackedFile] of a main transcript and its subagent transcripts, and the transcripts root."""
     path = os.path.abspath(path)
+    if os.path.basename(path) == "transcript.jsonl":
+        from ..harness import get_harness
+        ag = get_harness("antigravity")
+        parts = os.path.normpath(path).split(os.sep)
+        sid = parts[-4] if len(parts) >= 4 and parts[-2] == "logs" else os.path.basename(os.path.dirname(path))
+        root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(path))))
+        c = ag.classify_tail_path(root, path) or (sid, "antigravity", None)
+        files = [TrackedFile(path, c[0], c[1], c[2])]
+        return files, root
     root = os.path.dirname(os.path.dirname(path))
     c = classify(root, path) or (os.path.basename(path)[:-len(".jsonl")], os.path.basename(os.path.dirname(path)), None)
     sid, proj, _ = c
@@ -87,7 +102,7 @@ class LiveReplay:
             got = tailer._read(tf)
             prev = None
             for k, r in enumerate(got[0] if got else ()):
-                t = parse_ts(r.get("timestamp")) if isinstance(r, dict) else None
+                t = parse_ts(r.get("timestamp") or r.get("created_at")) if isinstance(r, dict) else None
                 t = t if t is not None else prev
                 prev = t
                 items.append((t, n, k, tf, r))
