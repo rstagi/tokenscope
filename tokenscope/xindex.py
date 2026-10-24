@@ -105,7 +105,7 @@ STUB_FILES = 15               # files in a drafted SKILL.md
 # discovery (what a skill / file map given up front would spare): listing / search calls, full reads of files the
 # run does not edit later, ToolSearch, exploration subagents
 LIST_PROGS = {"ls", "find", "tree", "fd", "fdfind", "grep", "egrep", "rg", "ag", "locate", "exa", "eza"}
-SEARCH_TOOLS = {"Glob", "Grep", "LS"}
+SEARCH_TOOLS = {"Glob", "Grep", "LS", "grep_search", "list_dir", "list_directory"}
 EXPLORE_INTENTS = {"locate", "read_code", "read_docs", "discover_tools", "gather_context"}
 # existing skills
 SK_MIN_OVERLAP = 3            # shared words between a skill (name + description) and the workflow
