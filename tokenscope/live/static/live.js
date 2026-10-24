@@ -303,7 +303,8 @@
       }
       // NOW: the latest call (▶ while working) and its target; else the last step
       var ls = s.last_step || {}, last = $(".last", a), w = s.now || {}, on = st === "working" && w.tool;
-      last.textContent = on ? "▶ " + w.tool + (w.target ? " · " + w.target : "") : ls.label ? (ls.err ? "✗ " : "") + ls.label : "";
+      var what = w.target && (!w.tool || (!w.tool.endsWith(" " + w.target) && w.tool !== w.target)) ? " · " + w.target : "";
+      last.textContent = on ? "▶ " + w.tool + what : ls.label ? (ls.err ? "✗ " : "") + ls.label : "";
       last.className = "last" + (on ? " on" : ls.err ? " err" : "");
       a._now = on && w.since_s != null ? {since: w.since_s, at: data && data.now != null ? ts(data.now) : nowS()} : null;
       sparkline($(".spark", a), s.cw_series);
@@ -833,7 +834,8 @@
     }
     function tickTile(tile) {
       var w = tile._now, n = $(".fnow", tile);
-      n.textContent = w && w.tool ? "▶ " + (w.agent ? w.agent + " › " : "") + w.tool + (w.target ? " · " + w.target : "") + (w.since != null ? " · " + fmtWall(w.since + nowS() - w.at) : "") : "";
+      var what = w && w.target && (!w.tool || (!w.tool.endsWith(" " + w.target) && w.tool !== w.target)) ? " · " + w.target : "";
+      n.textContent = w && w.tool ? "▶ " + (w.agent ? w.agent + " › " : "") + w.tool + what + (w.since != null ? " · " + fmtWall(w.since + nowS() - w.at) : "") : "";
     }
     function render(d) {
       if (d.now != null) clockOff = ts(d.now) - Date.now() / 1000;
@@ -994,7 +996,7 @@
   }
   // an operation's label ("unittest 34 passed", "skill:tdd", "Edit store.py") and numbers ("3k CW · 4s")
   function opParts(o) {
-    var tool = /^Bash ./.test(o.tool) ? o.tool.slice(5) : String(o.tool || "?"), t0 = o.target;
+    var tool = /^(?:Bash|run_command) /.test(o.tool) ? o.tool.replace(/^(?:Bash|run_command) /, "") : String(o.tool || "?"), t0 = o.target;
     var target = t0 && t0 !== tool && !(new RegExp("[ :]" + t0.replace(/[.*+?^${}()|[\]\\]/g, "\\$&") + "$")).test(tool) ? " " + t0 : "";
     var t = o.test && typeof o.test === "object" ? o.test : null;
     var test = !t ? "" : t.failed > 0 ? t.failed + " failed" : t.passed != null ? t.passed + " passed" : "";
@@ -1149,7 +1151,8 @@
       var lb = el("b", null, "▶ " + label);
       lb.style.color = gcol(w.group);
       n.appendChild(lb);
-      if (w.target || w.tool) n.appendChild(document.createTextNode(" · " + (w.target || w.tool)));
+      var tgt = w.target || w.tool;
+      if (tgt && tgt !== label && !label.endsWith(" " + tgt)) n.appendChild(document.createTextNode(" · " + tgt));
       if (w.since_s != null) n.appendChild(el("span", "mut", " · " + fmtWall(w.since_s)));
       return n;
     }

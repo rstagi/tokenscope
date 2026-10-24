@@ -331,12 +331,36 @@ class AntigravityHarness(Harness):
             tool_calls = raw_record.get("tool_calls") or []
             for tidx, tc in enumerate(tool_calls):
                 call_id = f"call_{sidx}_{tidx}"
-                open_tool_calls.append((call_id, tc.get("name")))
+                tname = tc.get("name")
+                open_tool_calls.append((call_id, tname))
                 args = _unwrap_args(tc.get("args"))
+                # Canonical mapping for Antigravity tool arguments
+                if tname in ("run_command", "run_shell_command"):
+                    if "CommandLine" in args and "command" not in args:
+                        args["command"] = args["CommandLine"]
+                elif tname in ("read_file", "view_file", "edit_file", "write_file", "write_to_file", "replace_file_content"):
+                    f = args.get("Path") or args.get("AbsolutePath") or args.get("TargetFile")
+                    if f and "file_path" not in args:
+                        args["file_path"] = f
+                elif tname in ("grep_search", "list_dir", "list_directory"):
+                    pat = args.get("Query") or args.get("DirectoryPath") or args.get("SearchPath")
+                    if pat and "pattern" not in args:
+                        args["pattern"] = pat
+                elif tname in ("invoke_subagent", "manage_subagents", "send_message"):
+                    stype = args.get("Role") or args.get("TypeName")
+                    if stype and "subagent_type" not in args:
+                        args["subagent_type"] = stype
+                    desc = args.get("Prompt") or args.get("Message")
+                    if desc and "description" not in args:
+                        args["description"] = desc
+                sm = args.get("toolSummary") or args.get("summary") or args.get("Description") or args.get("Instruction")
+                if sm:
+                    args["toolSummary"] = sm
+                    args["summary"] = sm
                 blocks.append({
                     "type": "tool_use",
                     "id": call_id,
-                    "name": tc.get("name"),
+                    "name": tname,
                     "input": args
                 })
             model = self.get_configured_model()

@@ -260,7 +260,8 @@ def status_of(now, last_ts, last_kind, last_active_ts=None, hook=None):
 
 # ---------------------------------------------------------------- labels & targets
 
-GENERIC_SUB = {"git", "npm", "pnpm", "yarn", "cargo", "go", "docker", "uv", "make", "gh", "kubectl", "bun"}
+GENERIC_SUB = {"git", "npm", "pnpm", "yarn", "cargo", "go", "docker", "uv", "make", "gh", "kubectl", "bun", "pip", "npx",
+               "systemctl", "journalctl", "apt", "apt-get", "brew", "service", "gsettings"}
 
 
 def bash_what(rec, redact=True):
@@ -271,21 +272,35 @@ def bash_what(rec, redact=True):
     if tr:
         return tr if not redact or not tr.startswith(("./", "../", "/")) else "test script"
     # first segment with a program: skips FOO=1, time/sudo/..., "(cd x", shell syntax ("for f in *; do cat")
-    words = next((w for w in map(stepsmod._words, rec.get("segs") or []) if w), [])
+    segs = re.split(r"&&|\|\||[;|\n]", cmd) if cmd else (rec.get("segs") or [])
+    words = next((w for w in map(stepsmod._words, segs) if w), [])
     if not words:
         return None
     prog = os.path.basename(words[0])
     if prog in GENERIC_SUB and len(words) > 1 and re.fullmatch(r"[a-z][\w-]*", words[1]):
         return "%s %s" % (prog, words[1])
-    if re.fullmatch(r"python[\d.]*", prog) and len(words) > 2 and words[1] == "-m" and not redact:
-        return "%s -m %s" % (prog, words[2])
+    if re.fullmatch(r"python[\d.]*", prog) and len(words) > 1:
+        if len(words) > 2 and words[1] == "-m":
+            return ("%s -m %s" % (prog, words[2])) if not redact else "%s -m" % prog
+        if words[1] == "-c":
+            return "%s -c" % prog
+        if not words[1].startswith("-"):
+            script = os.path.basename(words[1])
+            if re.fullmatch(r"[A-Za-z_][\w.-]*", script):
+                return ("%s %s" % (prog, script)) if not redact else prog
+    if prog in ("bash", "sh", "zsh", "node", "ruby", "perl") and len(words) > 1 and not words[1].startswith("-"):
+        script = os.path.basename(words[1])
+        if re.fullmatch(r"[A-Za-z_][\w.-]*", script):
+            return ("%s %s" % (prog, script)) if not redact else prog
     return prog
 
 
 def tool_label(name, inp, rec, redactor=None):
-    """Short tool label: "Bash git", "mcp:srv.op", "skill:<name>", "Agent(<type>)", else the tool name."""
-    if name == "Bash":
-        return ("Bash " + (bash_what(rec, redactor is not None) or "")).strip()
+    """Short tool label: "Bash git", "run_command git", "mcp:srv.op", "skill:<name>", "Agent(<type>)", else the tool name."""
+    if name in ("Bash", "run_command"):
+        prefix = "run_command " if name == "run_command" else "Bash "
+        what = bash_what(rec, redactor is not None)
+        return (prefix + (what or "")).strip() if what else name
     if name.startswith("mcp__"):
         parts = name.split("__")
         srv = parts[1] if len(parts) > 1 else "?"
@@ -294,25 +309,34 @@ def tool_label(name, inp, rec, redactor=None):
         return "mcp:%s.%s" % (srv, parts[-1] if len(parts) > 2 else "?")
     if name == "Skill":
         return "skill:" + (rec.get("target") or "?")
-    if name in ("Agent", "Task"):
-        return "Agent(%s)" % (rec.get("target") or "general-purpose")
+    if name in ("Agent", "Task", "invoke_subagent"):
+        target = rec.get("target") or (inp.get("Role") if isinstance(inp, dict) else None) or "general-purpose"
+        return "Agent(%s)" % target
     return name
 
 
 def tool_target(name, inp, rec, redact):
     """File basename / bash program / url host / pattern; redacted: extension only / program only / "…"."""
     inp = inp if isinstance(inp, dict) else {}
-    if name == "Bash":
+    if name in ("Bash", "run_command"):
+        sm = inp.get("toolSummary") or inp.get("summary")
+        if sm and not redact:
+            return str(sm)[:60]
         return bash_what(rec, redact)
     f = rec.get("file")
     if f:
         return (os.path.splitext(f)[1] or "…") if redact else os.path.basename(f)
-    if name == "WebFetch" and inp.get("url"):
-        return "…" if redact else (urlparse(str(inp["url"])).hostname or "…")
-    if name in ("Agent", "Task"):   # the label already names the type: the target is what it was asked to do
-        return None if redact else (str(inp.get("description") or "")[:48] or None)
+    if name in ("WebFetch", "read_url_content") and (inp.get("url") or inp.get("Url")):
+        u = inp.get("url") or inp.get("Url")
+        return "…" if redact else (urlparse(str(u)).hostname or "…")
+    if name in ("Agent", "Task", "invoke_subagent"):   # the label already names the type: the target is what it was asked to do
+        desc = inp.get("description") or inp.get("Prompt") or inp.get("Role")
+        return None if redact else (str(desc or "")[:48] or None)
     if name == "Skill":
         return rec.get("target") or None
+    sm = inp.get("toolSummary") or inp.get("summary")
+    if sm and not redact:
+        return str(sm)[:60]
     t = rec.get("target")
     if t:
         return "…" if redact else t[:60]
@@ -909,10 +933,10 @@ class LiveState:
                 branch.file_events.append(("mutate", None))
             if name == "Workflow" and not agent_id:
                 s.wf_calls.append((ts or 0, tid))
-            if name in ("Agent", "Task"):
+            if name in ("Agent", "Task", "invoke_subagent"):
                 fo = {"k": "fanout", "ts": ts, "tool_use_id": tid, "agent_type": rec.get("target"), "agent_id": None}
                 if not self.redact and isinstance(inp, dict):
-                    fo["description"] = str(inp.get("description") or "")[:200]
+                    fo["description"] = str(inp.get("description") or inp.get("Prompt") or inp.get("Role") or "")[:200]
                 s.fanouts[tid] = fo
                 self._emit(s, branch, fo, agent_id)
                 linked = next((a for a in s.agents.values() if a["tool_use_id"] == tid), None)

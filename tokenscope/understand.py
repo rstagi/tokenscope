@@ -245,10 +245,13 @@ def test_runner(cmd):
 def step_kind(name, inp):
     """(kind, target) for a tool_use; kind has paths/patterns stripped (chains group by it)."""
     inp = inp if isinstance(inp, dict) else {}
-    if name == "Bash":
-        return "Bash(%s)" % normalize_command(inp.get("command")), " ".join(str(inp.get("command", "")).split())
-    if name in ("Task", "Agent"):
-        return "Agent(%s)" % (inp.get("subagent_type") or "general-purpose"), str(inp.get("description") or "")
+    if name in ("Bash", "run_command"):
+        cmd = inp.get("command") or inp.get("CommandLine") or ""
+        return "Bash(%s)" % normalize_command(cmd), " ".join(str(cmd).split())
+    if name in ("Task", "Agent", "invoke_subagent"):
+        role = inp.get("subagent_type") or inp.get("Role") or inp.get("TypeName") or "general-purpose"
+        desc = inp.get("description") or inp.get("Prompt") or ""
+        return "Agent(%s)" % role, str(desc)
     if name == "Skill":
         sk = inp.get("skill") or inp.get("name") or inp.get("command") or "?"
         return "Skill(%s)" % sk, str(sk)
@@ -257,8 +260,18 @@ def step_kind(name, inp):
         return "MCP(%s.%s)" % mp, ""
     if name in ("TodoWrite", "TodoRead", "TaskCreate", "TaskUpdate"):
         return "Todo", ""
-    if name == "MultiEdit":
+    if name in ("MultiEdit", "replace_file_content", "multi_replace_file_content"):
         return "Edit", None
+    if name in ("read_file", "view_file"):
+        path = inp.get("file_path") or inp.get("Path") or inp.get("AbsolutePath") or ""
+        return "Read", str(path)
+    if name in ("edit_file", "write_file", "write_to_file"):
+        path = inp.get("file_path") or inp.get("Path") or inp.get("TargetFile") or ""
+        return "Edit" if "edit" in name else "Write", str(path)
+    if name == "grep_search":
+        return "Grep", str(inp.get("pattern") or inp.get("Query") or "")
+    if name in ("list_dir", "list_directory"):
+        return "Glob", str(inp.get("pattern") or inp.get("DirectoryPath") or inp.get("dir_path") or "")
     return name, None
 
 
@@ -1234,7 +1247,7 @@ def _bash_wrote(steps):
     """True if a Bash step wrote a repo file (redirect, tee, sed -i, python open(..., 'w')): not read-only."""
     from .goals import bash_write_targets
     for st in steps:
-        if st.get("tool") == "Bash" and isinstance(st.get("detail"), str):
+        if st.get("tool") in ("Bash", "run_command") and isinstance(st.get("detail"), str):
             if [t for t in bash_write_targets(st["detail"]) if not t.startswith("/dev/") and not t.startswith("/tmp/")]:
                 return True
     return False
