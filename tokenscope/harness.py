@@ -1,8 +1,9 @@
 """Harness-agnostic adapter framework for coding agent transcripts.
 
-Supports multiple agent harnesses (Claude Code, Google Antigravity CLI/IDE)
+Supports multiple agent harnesses (Claude Code, Google Antigravity CLI/IDE, OpenAI Codex CLI)
 with automatic detection and canonical event normalization.
 """
+import fnmatch
 import glob
 import json
 import os
@@ -432,11 +433,103 @@ class AntigravityHarness(Harness):
         return [cev] if cev is not None else []
 
 
+class CodexHarness(Harness):
+    """Adapter for OpenAI Codex CLI rollouts (conversion in tokenscope/codex.py, imported lazily)."""
+    name = "codex"
+
+    def default_root(self) -> str:
+        env_root = os.environ.get("TOKENSCOPE_ROOT")
+        if env_root:
+            return os.path.expanduser(env_root)
+        home = os.environ.get("CODEX_HOME")
+        if home:
+            return os.path.join(os.path.expanduser(home), "sessions")
+        return os.path.join(os.path.expanduser("~"), ".codex", "sessions")
+
+    def is_available(self) -> bool:
+        return os.path.isdir(self.default_root())
+
+    def detect(self, path_or_root: str) -> bool:
+        if not path_or_root:
+            return False
+        norm = os.path.normpath(path_or_root)
+        name = os.path.basename(norm)
+        if name.startswith("rollout-") and name.endswith(".jsonl"):
+            return True
+        if ".codex" in norm.split(os.sep):
+            return True
+        if os.path.isdir(norm):
+            return bool(glob.glob(os.path.join(glob.escape(norm), "rollout-*.jsonl"))
+                        or glob.glob(os.path.join(glob.escape(norm), "*", "*", "*", "rollout-*.jsonl")))
+        if norm.endswith(".jsonl"):
+            try:
+                with open(norm, "rb") as f:
+                    first = f.readline(1 << 16)
+                return b'"type":"session_meta"' in first or b'"type": "session_meta"' in first
+            except OSError:
+                pass
+        return False
+
+    def discover(self, root: Optional[str] = None) -> list:
+        from . import codex
+        return codex.discover(os.path.expanduser(root or self.default_root()))
+
+    def read_events(self, path: str) -> list:
+        from . import codex
+        return codex.read_events(path)
+
+    def tail_candidates(self, root: str, project: str = "*") -> list:
+        from . import codex
+        files = codex.rollout_files(root)
+        proj = project or "*"
+        if proj == "*":
+            return files
+        return [p for p in files if fnmatch.fnmatch(codex.project_of(codex.head_meta(p)), proj)]
+
+    def classify_tail_path(self, root: str, path: str) -> Optional[Tuple[str, str, Optional[str]]]:
+        from . import codex
+        if not codex.is_rollout_name(os.path.basename(path)):
+            return None
+        meta = codex.head_meta(path)
+        if not meta["complete"]:
+            return None   # its session_meta is not fully written yet: main or subagent is still unknown
+        own = codex.rollout_id(path)
+        if not meta["parent"]:
+            return own, codex.project_of(meta), None
+        files = codex.rollout_files(root) if root and os.path.isdir(root) else []
+        return codex.root_session_id(path, files) if files else meta["parent"], codex.project_of(meta), own
+
+    def normalize_record(self, raw_record: dict, state: Any = None) -> list:
+        """Streaming translation for LiveState.ingest; `state` is the per-file object (tail.TrackedFile)."""
+        from . import codex
+        conv = getattr(state, "_codex_conv", None)
+        if conv is None:
+            conv = codex.CodexConverter()
+            state._codex_conv = conv
+        return conv.feed(raw_record)
+
+    def transcript_files(self, path: str) -> Tuple[list, str]:
+        """([(path, session id, project, agent id)] of a rollout and its subagent rollouts, sessions root)."""
+        from . import codex
+        root = codex.sessions_root(path)
+        files = codex.rollout_files(root)
+        if path not in files:
+            files.append(path)
+        sid, proj, agent = self.classify_tail_path(root, path) or (codex.rollout_id(path), "codex", None)
+        out = [(path, sid, proj, agent)]
+        for sub, _depth in codex.descendants(codex.rollout_id(path), files):
+            if sub != path:
+                out.append((sub, sid, proj, codex.rollout_id(sub)))
+        return out, root
+
+
 # Registry of harnesses
 HARNESSES: Dict[str, Harness] = {
     "claude": ClaudeHarness(),
     "antigravity": AntigravityHarness(),
+    "codex": CodexHarness(),
 }
+HARNESS_LABELS = {"claude": "Claude Code", "antigravity": "Google Antigravity", "codex": "OpenAI Codex"}
 
 
 def get_harness(name: Optional[str] = None, root: Optional[str] = None, path: Optional[str] = None) -> Harness:
@@ -451,25 +544,45 @@ def get_harness(name: Optional[str] = None, root: Optional[str] = None, path: Op
     if target:
         if HARNESSES["antigravity"].detect(target):
             return HARNESSES["antigravity"]
+        if HARNESSES["codex"].detect(target):
+            return HARNESSES["codex"]
         if HARNESSES["claude"].detect(target):
             return HARNESSES["claude"]
         return HARNESSES["claude"]
 
     # 3. Environment Auto-detection
-    # Prefer Antigravity if available and has brain records, else Claude
+    # Prefer Antigravity if available and has brain records, else Claude; Codex only when neither has sessions
     ag = HARNESSES["antigravity"]
     cl = HARNESSES["claude"]
+    cx = HARNESSES["codex"]
+    has = {}
+    if cx.is_available() and not _has_sessions(ag, has) and not _has_sessions(cl, has) and _has_sessions(cx, has):
+        return cx
     if ag.is_available() and not cl.is_available():
         return ag
     if cl.is_available() and not ag.is_available():
         return cl
     if ag.is_available() and cl.is_available():
         # Check which has sessions
-        ag_has = bool(ag.discover())
-        cl_has = bool(cl.discover())
+        ag_has = _has_sessions(ag, has)
+        cl_has = _has_sessions(cl, has)
         if ag_has and not cl_has:
             return ag
         if cl_has and not ag_has:
             return cl
 
     return HARNESSES["antigravity"] if ag.is_available() else HARNESSES["claude"]
+
+
+def _has_sessions(h: Harness, memo: dict) -> bool:
+    """Whether h's default root has a session (memoised per get_harness call; for Claude the scan stops at the first
+    transcript instead of listing every project)."""
+    if h.name not in memo:
+        if not h.is_available():
+            memo[h.name] = False
+        elif h.name == "claude":
+            pat = os.path.join(glob.escape(h.default_root()), "*", "*.jsonl")
+            memo[h.name] = any(os.path.isfile(p) for p in glob.iglob(pat))
+        else:
+            memo[h.name] = bool(h.discover())
+    return memo[h.name]

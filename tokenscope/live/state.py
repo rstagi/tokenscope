@@ -524,6 +524,8 @@ class LiveState:
             for r in records:
                 converted.extend(ag.normalize_record(r, s))
             records = converted
+        elif tf.path.endswith(".jsonl") and os.path.basename(tf.path).startswith("rollout-"):
+            records = self._codex_records(tf, records, reset)
         if agent_id:
             branch = self._agent_branch(s, agent_id, tf.load_meta() or {})
             if s.agents[agent_id].get("workflow") is None:
@@ -542,6 +544,23 @@ class LiveState:
         self._warnings(s)
         self.version += 1
         return s
+
+    def _codex_records(self, tf, records, reset):
+        """Codex rollout records -> canonical events through a converter kept on the TrackedFile (one per file)."""
+        from ..harness import get_harness
+        h = get_harness("codex")   # by name: $TOKENSCOPE_HARNESS must not route a rollout elsewhere
+        if reset:
+            tf.__dict__.pop("_codex_conv", None)
+        if getattr(tf, "_codex_conv", None) is None and any(
+                isinstance(r, dict) and r.get("type") == "token_usage_record" for r in records):
+            from ..codex import CodexConverter
+            tf._codex_conv = CodexConverter(use_usage_records=True)   # token_count repeats these numbers
+        if tf.agent_id and tf.meta is None:
+            tf.meta = {"agentType": "subagent"}
+        converted = []
+        for r in records:
+            converted.extend(h.normalize_record(r, tf))
+        return converted
 
     def _agent_branch(self, s, agent_id, meta):
         a = s.agents.get(agent_id)
@@ -1147,13 +1166,17 @@ class LiveState:
             if h_name == "antigravity" or any(getattr(s, "path", "").endswith("transcript.jsonl") for s in self.sessions.values()):
                 h_name = "antigravity"
                 h_label = "Google Antigravity"
+            elif h_name == "codex" or any(os.path.basename(getattr(s, "path", None) or "").startswith("rollout-")
+                                          for s in self.sessions.values()):
+                h_name = "codex"
+                h_label = "OpenAI Codex"
             elif h_name == "claude" or any(".claude" in getattr(s, "path", "") for s in self.sessions.values()):
                 h_name = "claude"
                 h_label = "Claude Code"
             else:
-                from ..harness import get_harness
+                from ..harness import HARNESS_LABELS, get_harness
                 h_name = get_harness().name
-                h_label = "Google Antigravity" if h_name == "antigravity" else "Claude Code"
+                h_label = HARNESS_LABELS.get(h_name, "Claude Code")
         return {"now": now, "redacted": self.redact, "sessions": board_order(rows),
                 "harness": h_name, "harness_label": h_label}
 

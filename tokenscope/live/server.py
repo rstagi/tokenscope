@@ -72,10 +72,10 @@ class Live:
                  cached_labels=False, odd_goals=False, cached_goals=False, goal_namer=None, alerts_config=None,
                  alerts_history=None, harness=None):
         self.lock = threading.Lock()
-        from ..harness import get_harness
+        from ..harness import HARNESS_LABELS, get_harness
         h = get_harness(name=harness, root=root)
         self.harness = h.name
-        self.harness_label = "Google Antigravity" if h.name == "antigravity" else ("Claude Code" if h.name == "claude" else "Agent")
+        self.harness_label = HARNESS_LABELS.get(h.name, "Agent")
         # goal names from Haiku (disk-cached by prompt): every goal with --haiku; with --haiku-odd (odd_goals) only
         # those whose prompt reads oddly as a label (goalname.reads_oddly), goalname.goal_label until it arrives;
         # else (cached_goals) no model call: an odd prompt only gets the name an earlier run cached for it
@@ -451,8 +451,8 @@ def make_server(live, host="127.0.0.1", port=8765):
 
 
 def add_arguments(p):
-    p.add_argument("--root", default=argparse.SUPPRESS, help="transcripts root (default ~/.claude/projects, ~/.gemini/antigravity-cli/brain or $TOKENSCOPE_ROOT)")
-    p.add_argument("--harness", choices=["claude", "antigravity", "auto"], default=None, help="agent harness (default auto)")
+    p.add_argument("--root", default=argparse.SUPPRESS, help="transcripts root (default ~/.claude/projects, ~/.gemini/antigravity-cli/brain, ~/.codex/sessions or $TOKENSCOPE_ROOT)")
+    p.add_argument("--harness", choices=["claude", "antigravity", "codex", "auto"], default=None, help="agent harness (default auto)")
     p.add_argument("--port", type=int, default=8765)
     p.add_argument("--host", default="127.0.0.1")
     p.add_argument("--no-redact", action="store_true",

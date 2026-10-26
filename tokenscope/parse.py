@@ -394,6 +394,11 @@ class Session:
                 self.first_prompt = real_prompt_text(ev)
         if times:
             self.start, self.end = min(times), max(times)
+        self.load_subagents()
+        return self
+
+    def load_subagents(self):
+        """Fill self.subagents / self.workflows from <session>/subagents/** (harness sessions may override)."""
         sub_dir = self.sub_dir
         if os.path.isdir(sub_dir):
             files, journals = subagent_files(sub_dir)
@@ -410,7 +415,6 @@ class Session:
                     "spawn_depth": meta.get("spawnDepth")})
             for p in journals:
                 self.workflows.append(parse_journal(p, _workflow_of(p, sub_dir) or os.path.basename(os.path.dirname(p))))
-        return self
 
     def prompt_sources(self):
         """Counter of request sources over main + subagent transcripts."""
@@ -436,6 +440,10 @@ def discover(root=None, harness=None):
         ag = get_harness("antigravity")
         if ag.is_available():
             found = ag.discover()
+    if not found and root is None and h.name != "codex":
+        cx = get_harness("codex")
+        if cx.is_available():
+            found = cx.discover()
     return found
 
 
