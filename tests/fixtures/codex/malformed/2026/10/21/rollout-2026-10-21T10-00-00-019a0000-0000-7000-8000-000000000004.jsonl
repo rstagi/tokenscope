@@ -1,0 +1,29 @@
+{"timestamp":"2026-10-21T10:00:00.000Z","type":"session_meta","payload":{"id":"019a0000-0000-7000-8000-000000000004","timestamp":"2026-10-21T10:00:00.000Z","cwd":"/home/user/project","originator":"codex_cli_rs","cli_version":"0.120.0"}}
+this line is not json at all
+{"timestamp":"2026-10-21T10:00:01.000Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_te
+[1,2,3]
+42
+"just a string"
+null
+
+{"timestamp":"2026-10-21T10:00:02.000Z","type":"response_item","payload":"oops"}
+{"timestamp":12345,"type":"response_item","payload":{"type":"message","role":"user","content":7}}
+{"timestamp":"2026-10-21T10:00:03.000Z","type":["response_item"],"payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"wrong type field"}]}}
+{"timestamp":"2026-10-21T10:00:04.000Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"Count the lines of the readme"}]}}
+{"timestamp":"2026-10-21T10:00:04.000Z","type":"turn_context","payload":{"cwd":42,"model":["gpt-5"]}}
+{"timestamp":"2026-10-21T10:00:04.000Z","type":"turn_context","payload":{"cwd":"/home/user/project","model":"gpt-5"}}
+{"timestamp":"2026-10-21T10:00:05.000Z","type":"response_item","payload":{"type":"function_call","name":"shell","arguments":"{not json","call_id":"call_m1"}}
+{"timestamp":"2026-10-21T10:00:05.000Z","type":"response_item","payload":{"type":"function_call","name":7,"arguments":["x"],"call_id":{"x":1}}}
+{"timestamp":"2026-10-21T10:00:05.000Z","type":"response_item","payload":{"type":"function_call","name":"shell","arguments":"{\"command\":[\"wc\",\"-l\",\"README.md\"]}","call_id":"call_m2"}}
+{"timestamp":"2026-10-21T10:00:06.000Z","type":"token_usage_record","payload":{"response_id":"resp_m1","usage":{"input_tokens":"lots","cached_input_tokens":-5,"output_tokens":"7"}}}
+{"timestamp":"2026-10-21T10:00:06.000Z","type":"token_usage_record","payload":{"response_id":"resp_m1","usage":"nope"}}
+{"timestamp":"2026-10-21T10:00:07.000Z","type":"response_item","payload":{"type":"function_call_output","call_id":"call_m2","output":"3 README.md"}}
+{"timestamp":"2026-10-21T10:00:07.000Z","type":"response_item","payload":{"type":"function_call_output","call_id":"call_unknown","output":"orphan output"}}
+{"timestamp":"2026-10-21T10:00:07.000Z","type":"response_item","payload":{"type":"function_call_output","call_id":"call_m1","output":{"content":42,"success":"maybe"}}}
+{"timestamp":"2026-10-21T10:00:08.000Z","type":"event_msg","payload":{"type":"token_count","info":"x"}}
+{"timestamp":"2026-10-21T10:00:08.000Z","type":"event_msg","payload":[1,2]}
+{"timestamp":"2026-10-21T10:00:08.000Z","type":"mystery_kind","payload":{"anything":true}}
+{"timestamp":"2026-10-21T10:00:09.000Z","type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"The readme has three lines."}]}}
+{"timestamp":"2026-10-21T10:00:10.000Z","type":"token_usage_record","payload":{"response_id":"resp_m2","usage":{"input_tokens":1000,"cached_input_tokens":0,"output_tokens":10}}}
+{"timestamp":"2026-10-21T10:00:11.000Z","type":"response_item","payload":{"type":"custom_tool_call","name":"exec","call_id":"call_m3","input":"text(await tools.exec_command({cmd: unterminated"}}
+{"timestamp":"2026-10-21T10:00:11.000Z","type":"response_item","payload":{"type":"custom_tool_call","name":"apply_patch","call_id":"call_m4","input":"no headers here"}}
