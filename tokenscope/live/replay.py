@@ -50,6 +50,10 @@ def transcript_files(path):
         c = ag.classify_tail_path(root, path) or (sid, "antigravity", None)
         files = [TrackedFile(path, c[0], c[1], c[2])]
         return files, root
+    if os.path.basename(path).startswith("rollout-"):
+        from ..harness import get_harness
+        found, root = get_harness("codex").transcript_files(path)
+        return [TrackedFile(*f) for f in found], root
     root = os.path.dirname(os.path.dirname(path))
     c = classify(root, path) or (os.path.basename(path)[:-len(".jsonl")], os.path.basename(os.path.dirname(path)), None)
     sid, proj, _ = c
@@ -101,9 +105,14 @@ class LiveReplay:
         for n, tf in enumerate(files):
             got = tailer._read(tf)
             prev = None
+            # a Codex subagent rollout starts with its own session_meta, then the parent's forked history (older
+            # timestamps): its records keep file order, or the history would come before the identity
+            in_order = os.path.basename(tf.path).startswith("rollout-")
             for k, r in enumerate(got[0] if got else ()):
                 t = parse_ts(r.get("timestamp") or r.get("created_at")) if isinstance(r, dict) else None
                 t = t if t is not None else prev
+                if in_order and t is not None and prev is not None and t < prev:
+                    t = prev
                 prev = t
                 items.append((t, n, k, tf, r))
         t0 = min((x[0] for x in items if x[0] is not None), default=0.0)

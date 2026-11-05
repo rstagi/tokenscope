@@ -1,14 +1,16 @@
 """API-equivalent prices and cost-weighted tokens.
 
-Prices: USD per million tokens, from https://platform.claude.com/docs/en/about-claude/pricing (fetched 2026-10-10).
+Prices: USD per million tokens, from https://platform.claude.com/docs/en/about-claude/pricing (fetched 2026-10-10);
+the OpenAI rows name their source in the comment above them.
 Tuple = (input, 5-minute cache write, 1-hour cache write, cache read, output). Model ids match a key exactly or the
-key followed by a date suffix (-20251001) or a bracket tag ([1m]); the longest such key wins. Anything else (and
-"<synthetic>") is unpriced: cost None, counted as "unpriced". On a subscription none of this is billed; it is the
-price the same calls would have on the API.
+key followed by a date suffix (-20251001, OpenAI -2025-08-07) or a bracket tag ([1m]); the longest such key wins.
+Anything else (and "<synthetic>") is unpriced: cost None, counted as "unpriced". On a subscription none of this is
+billed; it is the price the same calls would have on the API.
 
-Cost-weighted tokens put the four token types on one scale using the standard price ratios relative to uncached
-input (the same for every model in the table): a cache read costs a tenth of an input token, a cache write 1.25x
-(5m TTL), an output token 5x. Unlike "all-in" (a plain sum), cache reads no longer dominate.
+Cost-weighted tokens put the four token types on one scale using fixed weights relative to uncached input, taken
+from the standard Claude API price ratios: a cache read costs a tenth of an input token, a cache write 1.25x (5m TTL),
+an output token 5x. The weights are the same for every model; dollar costs use each row's own prices (the OpenAI
+rows follow their own table, whose ratios differ). Unlike "all-in" (a plain sum), cache reads no longer dominate.
 """
 import re
 
@@ -28,7 +30,19 @@ PRICES = {'claude-fable-5-1': (10, 12.5, 20, 0.25, 50), 'claude-fable-5': (10, 1
           'gemini-1.5-flash': (0.075, 0.10, 0.10, 0.01875, 0.30),
           'gemini-1.5-pro': (1.25, 1.50, 2.00, 0.3125, 5.00),
           'gemini-flash': (0.15, 0.20, 0.20, 0.0375, 0.60),
-          'gemini-pro': (1.25, 1.50, 2.00, 0.3125, 5.00)}
+          'gemini-pro': (1.25, 1.50, 2.00, 0.3125, 5.00),
+          # OpenAI models (Codex CLI), from https://developers.openai.com/api/docs/pricing (fetched 2026-10-26, short-context
+          # standard tier); the two cache write columns are the 5-minute-or-30-minute and 1-hour-or-12-hour rates
+          'gpt-6-astra': (10, 12.5, 25, 1, 50), 'gpt-6.1-sol': (2, 2.5, 5, 0.10, 10),
+          'gpt-6-sol': (2, 2.5, 5, 0.20, 10), 'gpt-6-luna': (0.10, 0.125, 0.25, 0.01, 0.50),
+          'gpt-5.6-sol': (4, 5, 10, 0.40, 20), 'gpt-5.6-terra': (2, 2.5, 5, 0.20, 12),
+          'gpt-5.6-luna': (0.20, 0.25, 0.50, 0.02, 1.20), 'gpt-5.5': (5, 5, 5, 0.50, 30),
+          'gpt-5.4': (2.5, 2.5, 2.5, 0.25, 15), 'gpt-5.4-mini': (0.75, 0.75, 0.75, 0.075, 4.5),
+          'gpt-5.4-nano': (0.20, 0.20, 0.20, 0.02, 1.25), 'gpt-5.3-codex': (1.75, 1.75, 1.75, 0.175, 14),
+          'gpt-5.2': (1.75, 1.75, 1.75, 0.175, 14), 'gpt-5.1': (1.25, 1.25, 1.25, 0.125, 10),
+          'gpt-5-codex': (1.25, 1.25, 1.25, 0.125, 10), 'gpt-5': (1.25, 1.25, 1.25, 0.125, 10),
+          'gpt-5-mini': (0.25, 0.25, 0.25, 0.025, 2), 'gpt-5-nano': (0.05, 0.05, 0.05, 0.005, 0.40),
+          'codex-mini-latest': (1.5, 1.5, 1.5, 0.375, 6)}
 PRICES_SOURCE = "https://platform.claude.com/docs/en/about-claude/pricing (fetched 2026-10-10)"
 
 # cost-weighted tokens = input x W_INPUT + cache_write x W_CACHE_WRITE + cache_read x W_CACHE_READ + output x W_OUTPUT
@@ -38,7 +52,7 @@ W_CACHE_READ = 0.1
 W_OUTPUT = 5.0
 COST_WEIGHTED_FORMULA = "input x1 + cache write x1.25 + cache read x0.1 + output x5"
 
-_SUFFIX_RE = re.compile(r"^(-\d{8})?(\[[^\]]*\])?$")
+_SUFFIX_RE = re.compile(r"^(-\d{8}|-\d{4}-\d{2}-\d{2})?(\[[^\]]*\])?$")   # -20251001 / OpenAI -2025-08-07
 
 
 def price_of(model):
@@ -56,6 +70,8 @@ def price_of(model):
     norm = re.sub(r"[()\[\]]", "", model.lower()).strip()
     norm = re.sub(r"[\s_]+", "-", norm)
     for key in PRICES:
+        if norm != key and not key.startswith(("gemini-", "claude-")):
+            continue   # OpenAI ids match exactly (above): gpt-5.1-codex-max must not fall to gpt-5.1
         if norm == key or norm.startswith(key + "-") or norm.startswith(key):
             rem = norm[len(key):]
             if not rem or rem.startswith("-") or _SUFFIX_RE.match(rem):

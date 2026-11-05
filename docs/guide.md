@@ -1,6 +1,6 @@
 # TokenScope User & Metric Interpretation Guide
 
-`tokenscope` is an agent token visualizer, live tracker, and economic analyzer for local coding agents. It supports both **Google Antigravity CLI/IDE** and **Claude Code** through a zero-dependency, harness-agnostic architecture.
+`tokenscope` is an agent token visualizer, live tracker, and economic analyzer for local coding agents. It supports **Google Antigravity CLI/IDE**, **Claude Code** and **OpenAI Codex CLI** through a zero-dependency, harness-agnostic architecture.
 
 This guide explains how to run TokenScope, how to configure harnesses, and how to interpret every metric, gauge, and visualization.
 
@@ -15,7 +15,7 @@ TokenScope runs on standard Python 3.11+ without any third-party runtime depende
 Launch the live monitoring board:
 
 ```sh
-# Auto-detects available harness (Antigravity or Claude Code)
+# Auto-detects available harness (Antigravity, Claude Code, or Codex)
 python3 -m tokenscope live
 
 # Explicitly monitor Google Antigravity sessions:
@@ -23,6 +23,9 @@ python3 -m tokenscope live --harness antigravity
 
 # Explicitly monitor Claude Code sessions:
 python3 -m tokenscope live --harness claude
+
+# Explicitly monitor OpenAI Codex CLI sessions (auto-detect picks Codex only when the others have no sessions):
+python3 -m tokenscope live --harness codex
 
 # Run with privacy redaction turned off (shows raw prompts, paths, commands):
 python3 -m tokenscope live --no-redact --port 8765
@@ -43,6 +46,7 @@ Lists local agent sessions with call count, cost-weighted tokens, API-equivalent
 ```sh
 python3 -m tokenscope sessions
 python3 -m tokenscope sessions --harness antigravity --since 24h
+python3 -m tokenscope sessions --harness codex
 python3 -m tokenscope sessions --project myrepo --json
 ```
 
@@ -145,13 +149,13 @@ When an agent reads a 10,000-token file on Turn 2 of a 40-turn session:
 
 TokenScope normalizes agent actions into standard categories regardless of which harness generated them:
 
-| Normalized Kind | Antigravity Tool Name | Claude Code Tool Name | Attribution Description |
-| :--- | :--- | :--- | :--- |
-| `file_read` | `view_file` | `Read` | File inspections, slice reads, notebook views |
-| `bash` | `run_command` | `Bash` | Terminal executions, test runners, build commands |
-| `edit` | `write_to_file`, `replace_file_content` | `Edit`, `Write`, `MultiEdit` | Code modifications and file writes |
-| `search` | `grep_search`, `search_web`, `read_url_content`, `list_dir` | `Grep`, `Glob`, `WebSearch`, `WebFetch` | Code search, workspace discovery, web lookup |
-| `subagent_result` | `invoke_subagent`, `manage_subagents`, `send_message` | `Agent`, `Task` | Subagent dispatch, multi-agent results |
+| Normalized Kind | Antigravity Tool Name | Claude Code Tool Name | Codex Tool Name | Attribution Description |
+| :--- | :--- | :--- | :--- | :--- |
+| `file_read` | `view_file` | `Read` | `read_file`, `view_image` | File inspections, slice reads, notebook views |
+| `bash` | `run_command` | `Bash` | `shell`, `exec_command`, `local_shell`, code-mode `exec` | Terminal executions, test runners, build commands |
+| `edit` | `write_to_file`, `replace_file_content` | `Edit`, `Write`, `MultiEdit` | `apply_patch` (one `Edit` / `Write` per file) | Code modifications and file writes |
+| `search` | `grep_search`, `search_web`, `read_url_content`, `list_dir` | `Grep`, `Glob`, `WebSearch`, `WebFetch` | `grep_files`, `list_dir`, `web_search` | Code search, workspace discovery, web lookup |
+| `subagent_result` | `invoke_subagent`, `manage_subagents`, `send_message` | `Agent`, `Task` | `spawn_agent`, `send_input`, `wait_agent` | Subagent dispatch, multi-agent results |
 
 #### Measured Usage vs Estimated Size (`~`)
 - **Measured counts**: Exact per-turn totals from the model's `usage` payload (input, cache_read, output).
@@ -207,7 +211,57 @@ Designed for continuous monitoring on a secondary monitor:
 
 ---
 
-## 4. Summary & Best Practices
+## 4. OpenAI Codex CLI
+
+### What TokenScope reads
+- **Rollouts**: `~/.codex/sessions/YYYY/MM/DD/rollout-<timestamp>-<uuid>.jsonl` (or `$CODEX_HOME/sessions`). A flat directory of `rollout-*.jsonl` files (for example an archive copy) also works with `--root DIR`.
+- **Record types used**: `session_meta` (session id, working directory, parent thread of a subagent), `turn_context` (model, working directory), `response_item` (user and assistant messages, reasoning, tool calls and their outputs, web search calls), `event_msg` `token_count` and `token_usage_record` (usage). TokenScope ignores the other record types.
+
+```sh
+python3 -m tokenscope sessions --harness codex
+python3 -m tokenscope live --harness codex --root /home/user/codex-archive
+```
+
+### Token semantics
+Codex reports usage in the OpenAI shape. TokenScope converts it to the canonical shape:
+- `input_tokens` includes the cached tokens. TokenScope subtracts them: fresh input = input - cached - cache writes.
+- `cached_input_tokens` becomes **cache read**. `cache_write_input_tokens` (when present) becomes **cache write**.
+- `output_tokens` includes the reasoning tokens. TokenScope counts them as **output**.
+
+TokenScope makes one canonical assistant event per model response (its reasoning, message and tool call items). In a rollout, the usage of a response can arrive after its tool call. The live board shows the call when its usage record arrives.
+
+### Subagents
+A subagent writes its own rollout. TokenScope reads its `session_meta` and attaches the rollout to the main session of its parent thread. The subagent rollout starts with a copy of the parent's history. TokenScope ignores this forked history and counts only the subagent's own records.
+
+### Redaction
+Redaction works as for the other harnesses: the converter turns Codex records into the same canonical events, so the same redaction applies. Live mode redacts by default (`--no-redact` turns it off):
+- Commands are reduced to their program names; arguments (emails, IPs, tokens, URLs) are not shown.
+- Prompts, assistant text, reasoning summaries, subagent prompts and task names never reach a tool field or a label: a `spawn_agent` call is recorded as a plain subagent launch, and a patch is recorded as its file names only.
+- Module names (`python3 -m ...`) are not shown.
+
+Known gaps, the same as for Claude Code transcripts (they come from shared code, not from the Codex converter): a script run as a bare command can still show its file name in a tool label, an edited file name can show in a step label, a plan item (`update_plan`, like a Claude todo) can show in an intent group label, an MCP server name that is not a well-known one can show in a tool name, and an unusual word of the first prompt can show in the goal name.
+
+### Known limitations
+- One harness per board. To watch Codex next to Claude Code, run a second `tokenscope live --harness codex --port 8766`.
+- A subagent is attached to its main session, but not to the exact spawn call.
+- Prices are API-equivalent estimates (`tokenscope/pricing.py`). Models that are not in the table have no price.
+- The rollout format can change between Codex versions. Unknown records and tools are skipped or shown by their raw name.
+
+---
+
+## 5. Adding a harness
+
+1. Subclass `Harness` in `tokenscope/harness.py`.
+2. Implement `default_root`, `is_available`, `detect`, `discover`, `read_events`, `tail_candidates`, `classify_tail_path` and `normalize_record`. Implement `transcript_files` when replay must find subagent files.
+3. Convert each raw record to canonical (Claude-shaped) events: `user` / `assistant` events with `tool_use` / `tool_result` blocks, canonical tool names (`Bash`, `Read`, `Edit`, ...) and `message.usage`.
+4. Register the harness in `HARNESSES` (and `HARNESS_LABELS`), in the detection order of `get_harness`, and in the `--harness` choices of the CLI and of `live`.
+5. Add the model prices to `tokenscope/pricing.py`.
+6. Add tests with synthetic fixtures only (fake ids and paths such as `/home/user/project`): parsing, usage mapping, tool mapping, subagents and live tailing.
+7. Add redaction tests: no prompts, commands, paths or other free text in the redacted live output.
+
+---
+
+## 6. Summary & Best Practices
 
 1. **Keep Context Trim**: Avoid commands that output megabytes of raw text into the terminal; pipe through `head`, `grep`, or use targeted file slice viewers.
 2. **Watch for Warning Chips**: If `stuck_error` or `reread_loop` appears on the Board, intervene early with guidance before the agent burns through tokens.

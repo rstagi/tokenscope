@@ -2,7 +2,7 @@
 
 > I was tired of hitting session limits without knowing why, so I made it explicit.
 
-`tokenscope` reads your local agent transcripts (**Claude Code** and **Google Antigravity CLI/IDE**) and explains where the tokens went: which calls spiked, which
+`tokenscope` reads your local agent transcripts (**Claude Code**, **Google Antigravity CLI/IDE** and **OpenAI Codex CLI**) and explains where the tokens went: which calls spiked, which
 file read or command output caused it, how much of it was re-read on every later call, and what you could change
 next time. It is a single Python package, standard library only, and writes self-contained HTML reports
 (no network, no external assets).
@@ -11,13 +11,16 @@ It also has a **live mode**: a local board of your running agent sessions and a 
 the goal -> intent -> tool flow builds up as the agent works, plus an optional in-terminal pane (a Claude Code mod), and
 a **top spenders** view: the costliest sessions, goals, prompts or intents of the last 5 h, day, week or month.
 
-## Multi-Harness Support (Claude Code & Google Antigravity)
+## Multi-Harness Support (Claude Code, Google Antigravity & OpenAI Codex)
 
 `tokenscope` natively supports multiple coding agent harnesses:
 - **Google Antigravity CLI / IDE**: Tails `~/.gemini/antigravity-cli/brain/**/*.jsonl` transcripts, tracks conversations from `conversation_summaries.db`, normalizes Gemini models (`gemini-3.8-flash`, `gemini-3.8-pro`, `gemini-2.0-flash`, etc.), and attributes tools (`view_file`, `run_command`, `write_to_file`, `replace_file_content`, `grep_search`, `search_web`, `invoke_subagent`).
 - **Claude Code**: Tails `~/.claude/projects/**/*.jsonl`, supports Claude models (`claude-sonnet-4-6`, `claude-opus-4-8`, `claude-haiku-4-5`, etc.), subagents, and Claude Code extension hooks.
+- **OpenAI Codex CLI**: Tails `~/.codex/sessions/**/rollout-*.jsonl` (or `$CODEX_HOME/sessions`), supports GPT models (`gpt-5.5`, `gpt-5.3-codex`, `gpt-5-mini`, etc.) at API-equivalent prices, and maps tools to the canonical names: `shell` / `exec_command` / code-mode `exec` -> `Bash`, `apply_patch` -> `Edit` / `Write` per file, MCP tools, web search, `update_plan` -> todo list. Subagent rollouts attach to their main session.
 
-Transcripts and harnesses are **auto-detected** by default. You can also explicitly specify `--harness [claude|antigravity|auto]` or set `$TOKENSCOPE_HARNESS`.
+Transcripts and harnesses are **auto-detected** by default. You can also explicitly specify `--harness [claude|antigravity|codex|auto]` or set `$TOKENSCOPE_HARNESS`.
+Auto-detect picks Codex only when Claude Code and Antigravity have no sessions. To read Codex rollouts next to
+the other harnesses, use `--harness codex` (or `$TOKENSCOPE_HARNESS=codex`).
 
 > [!TIP]
 > **Complete Guide**: For detailed instructions on understanding Cost-Weighted (CW) tokens, API-equivalent costs, carry accumulation, and UI navigation, see [docs/guide.md](docs/guide.md).
@@ -64,7 +67,7 @@ truncation handled) and shows:
   `reread_loop` (the same file read in full 4+ times with no edit to it and no compaction in between),
   `browser_loop` (20+ consecutive browser turns), `context_near_full` (>= 85% of the 200k / 1M context window).
 
-Options: `--root DIR` (transcripts root), `--harness [claude|antigravity|auto]`, `--project GLOB` (only matching project dirs, e.g. `'*myrepo*'`), `--since-minutes N` (which
+Options: `--root DIR` (transcripts root), `--harness [claude|antigravity|codex|auto]`, `--project GLOB` (only matching project dirs, e.g. `'*myrepo*'`), `--since-minutes N` (which
 existing transcripts to pick up at start, default 120), `--port`, `--host` (default 127.0.0.1), `--no-redact`,
 `--haiku` (name goals with `claude -p --model haiku` from the *masked* first 240 prompt characters; off by default,
 the default namer is a local keyword heuristic), `--haiku-odd` (the same, only for prompts that read oddly as a label:
@@ -444,7 +447,8 @@ or set `TOKENSCOPE_ROOT=DIR`.
 
 ## Usage
 
-Every subcommand accepts `--root DIR` (default `~/.claude/projects`, or `$TOKENSCOPE_ROOT`). Session ids can be
+Every subcommand accepts `--root DIR` (default: the harness root, e.g. `~/.claude/projects` or `~/.codex/sessions`,
+or `$TOKENSCOPE_ROOT`) and `--harness [claude|antigravity|codex|auto]`. Session ids can be
 given as any unique prefix (`764818da`).
 
 Large corpora (thousands of subagent transcripts): every subcommand also accepts

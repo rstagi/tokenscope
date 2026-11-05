@@ -547,6 +547,9 @@ class XIndex:
         from .harness import get_harness
         h = get_harness(root=self.root)
         candidates = set(h.tail_candidates(self.root, "*"))
+        if h.name == "codex":   # a subagent rollout is replayed with its main session, not indexed on its own
+            candidates = {p for p in candidates
+                          if (h.classify_tail_path(self.root, p) or (None, None, None))[2] is None}
         for p in glob.glob(os.path.join(self.root, "*", "*.jsonl")):
             candidates.add(p)
         for path in sorted(candidates):

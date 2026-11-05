@@ -118,7 +118,11 @@ def _work(job):
     path, slug, args, since, what = job
     set_cache(not args.no_cache)
     before = dict(STATS)
-    s = Session(path, slug, harness=getattr(args, "harness", None)).load()
+    if os.path.basename(path).startswith("rollout-"):
+        from .codex import CodexSession
+        s = CodexSession(path, slug).load()
+    else:
+        s = Session(path, slug, harness=getattr(args, "harness", None)).load()
     stats = {k: STATS[k] - before[k] for k in STATS}
     if not _keep(s, args, since):
         return None, None, stats
@@ -778,13 +782,13 @@ def cmd_top(args):
 
 
 def main(argv=None):
-    p = argparse.ArgumentParser(prog="tokenscope", description="Explain where agent tokens go (Claude Code, Google Antigravity).")
+    p = argparse.ArgumentParser(prog="tokenscope", description="Explain where agent tokens go (Claude Code, Google Antigravity, OpenAI Codex).")
     p.add_argument("--version", action="version", version="tokenscope " + __version__)
     root_parent = argparse.ArgumentParser(add_help=False)
     root_parent.add_argument("--root", default=argparse.SUPPRESS,
-                             help="transcripts root (default ~/.claude/projects, ~/.gemini/antigravity-cli/brain or $TOKENSCOPE_ROOT)")
-    root_parent.add_argument("--harness", choices=["claude", "antigravity", "auto"], default=None,
-                             help="agent harness (claude, antigravity, or auto-detect)")
+                             help="transcripts root (default ~/.claude/projects, ~/.gemini/antigravity-cli/brain, ~/.codex/sessions or $TOKENSCOPE_ROOT)")
+    root_parent.add_argument("--harness", choices=["claude", "antigravity", "codex", "auto"], default=None,
+                             help="agent harness (claude, antigravity, codex, or auto-detect)")
     goal_parent = argparse.ArgumentParser(add_help=False)
     goal_parent.add_argument("--goal-threshold", type=float, metavar="F",
                              help="similarity at which requests merge into one goal (default %.2f)" % GOAL_THRESHOLD)
@@ -913,9 +917,9 @@ def main(argv=None):
     ap = sub.add_parser("alerts", help="cost / off-task / looping alerts of one session (replays its transcript)")
     ap.add_argument("session", help="transcript path (.jsonl) or session id / unique prefix")
     ap.add_argument("--root", default=argparse.SUPPRESS,
-                    help="transcripts root (default ~/.claude/projects, ~/.gemini/antigravity-cli/brain or $TOKENSCOPE_ROOT)")
-    ap.add_argument("--harness", choices=["claude", "antigravity", "auto"], default=None,
-                    help="agent harness (claude, antigravity, or auto-detect)")
+                    help="transcripts root (default ~/.claude/projects, ~/.gemini/antigravity-cli/brain, ~/.codex/sessions or $TOKENSCOPE_ROOT)")
+    ap.add_argument("--harness", choices=["claude", "antigravity", "codex", "auto"], default=None,
+                    help="agent harness (claude, antigravity, codex, or auto-detect)")
     ap.add_argument("--json", action="store_true")
     from .alerts import add_arguments as alert_arguments
     alert_arguments(ap)
@@ -924,9 +928,9 @@ def main(argv=None):
     ip = sub.add_parser("intents", help="steps and intent groups of one session (replays its transcript)")
     ip.add_argument("session", help="transcript path (.jsonl) or session id / unique prefix")
     ip.add_argument("--root", default=argparse.SUPPRESS,
-                    help="transcripts root (default ~/.claude/projects, ~/.gemini/antigravity-cli/brain or $TOKENSCOPE_ROOT)")
-    ip.add_argument("--harness", choices=["claude", "antigravity", "auto"], default=None,
-                    help="agent harness (claude, antigravity, or auto-detect)")
+                    help="transcripts root (default ~/.claude/projects, ~/.gemini/antigravity-cli/brain, ~/.codex/sessions or $TOKENSCOPE_ROOT)")
+    ip.add_argument("--harness", choices=["claude", "antigravity", "codex", "auto"], default=None,
+                    help="agent harness (claude, antigravity, codex, or auto-detect)")
     ip.add_argument("--haiku", action="store_true",
                     help="label steps without own signals with `claude -p --model haiku` (masked text, cached)")
     ip.add_argument("--json", action="store_true")
@@ -939,8 +943,8 @@ def main(argv=None):
                          "per user prompt) or intents (default: sessions, intents and steps)")
     tp.add_argument("--index-root", default=None, metavar="DIR",
                     help="transcripts to rank (default $TOKENSCOPE_INDEX_ROOT, else default harness root)")
-    tp.add_argument("--harness", choices=["claude", "antigravity", "auto"], default=None,
-                    help="agent harness (claude, antigravity, or auto-detect)")
+    tp.add_argument("--harness", choices=["claude", "antigravity", "codex", "auto"], default=None,
+                    help="agent harness (claude, antigravity, codex, or auto-detect)")
     tp.add_argument("--now", metavar="ISO", help="end of the window (default: now), e.g. 2026-10-12T09:00:00Z")
     tp.add_argument("--limit", type=int, default=10, metavar="N", help="rows per section (default 10)")
     tp.add_argument("--json", action="store_true")
