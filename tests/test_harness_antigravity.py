@@ -78,14 +78,31 @@ class TestAntigravityHarness(unittest.TestCase):
             "thinking": "Need to run tests",
             "tool_calls": [{
                 "name": "run_command",
-                "args": {"CommandLine": "\"pytest tests/\"", "Cwd": "\"/home/user/repo\""}
+                "args": {"CommandLine": "\"pytest tests/\"", "Cwd": "\"/home/user/repo\"", "toolSummary": "\"Run test suite\""}
             }]
         }
         cev_assistant = self.harness.to_canonical_event(planner_line, open_tools)
         self.assertEqual(cev_assistant["type"], "assistant")
         self.assertEqual(cev_assistant["message"]["usage"]["input_tokens"], 12000)
+        tool_use = cev_assistant["message"]["content"][1]
+        self.assertEqual(tool_use["input"]["command"], "pytest tests/")
+        self.assertEqual(tool_use["input"]["toolSummary"], "Run test suite")
+        self.assertEqual(tool_use["input"]["summary"], "Run test suite")
         self.assertEqual(len(open_tools), 1)
         self.assertEqual(open_tools[0][0], "call_1_0")
+
+        # LiveState tool_label and tool_target helpers
+        from tokenscope.live import state as livestate
+        rec = {"cmd": "pytest tests/", "segs": ["pytest tests/"]}
+        self.assertEqual(livestate.tool_label("run_command", tool_use["input"], rec), "run_command pytest")
+        self.assertEqual(livestate.tool_target("run_command", tool_use["input"], rec, redact=False), "Run test suite")
+        self.assertEqual(livestate.tool_target("run_command", tool_use["input"], rec, redact=True), "pytest")
+
+        # Command without summary (e.g. bash commands or run_command without toolSummary)
+        rec_py = {"cmd": "python3 train.py --lr 0.01", "segs": ["python3 train.py --lr 0.01"]}
+        self.assertEqual(livestate.tool_label("run_command", {"command": "python3 train.py"}, rec_py), "run_command python3 train.py")
+        self.assertEqual(livestate.tool_target("run_command", {"command": "python3 train.py"}, rec_py, redact=False), "python3 train.py")
+        self.assertEqual(livestate.tool_label("Bash", {"command": "pip install requests"}, {"cmd": "pip install requests", "segs": ["pip install requests"]}), "Bash pip install")
 
         tool_result_line = {
             "step_index": 2,

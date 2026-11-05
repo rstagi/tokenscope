@@ -266,7 +266,7 @@ const NODE_TYPES = {intent: IntentNode, agent: AgentNode};
 
 // ---------- side panel: a node's steps and calls ----------
 function opParts(o) {
-  const tool = /^Bash ./.test(o.tool) ? o.tool.slice(5) : String(o.tool || "?"), t0 = o.target;
+  const tool = /^(?:Bash|run_command) /.test(o.tool) ? o.tool.replace(/^(?:Bash|run_command) /, "") : String(o.tool || "?"), t0 = o.target;
   const esc = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
   const target = t0 && t0 !== tool && !new RegExp("[ :]" + esc(String(t0)) + "$").test(tool) ? " " + t0 : "";
   const t = o.test && typeof o.test === "object" ? o.test : null;
@@ -340,7 +340,9 @@ function NowNode({C}) {
   const run = (C.agents || []).filter(running);
   if (run.length) return <b style={{color: gcol("delegate")}}>▶ {run.length} subagent{run.length === 1 ? "" : "s"} working</b>;
   const w = C.now || {}, label = w.label || String(w.intent || C.current_intent || "working").replace(/_/g, " ");
-  return <span><b style={{color: gcol(w.group)}}>▶ {label}</b>{w.target || w.tool ? " · " + (w.target || w.tool) : ""}{w.since_s != null ? <span className="mut"> · {fmtWall(w.since_s)}</span> : null}</span>;
+  const tgt = w.target || w.tool;
+  const showTgt = tgt && tgt !== label && !label.endsWith(" " + tgt);
+  return <span><b style={{color: gcol(w.group)}}>▶ {label}</b>{showTgt ? " · " + tgt : ""}{w.since_s != null ? <span className="mut"> · {fmtWall(w.since_s)}</span> : null}</span>;
 }
 function Head({C, elapsed, open, setOpen, conn, replay, onRestart}) {
   const H = C.header || {}, T = H.totals || {}, a = C.asked || {}, goal = a.goal || goalName(H.goal) || C.goal;

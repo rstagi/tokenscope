@@ -31,7 +31,8 @@ from .understand import test_runner
 TEXT_CHARS = 300
 MAX_WORDS = 7
 NEUTRAL = {"TodoWrite", "TodoRead", "TaskCreate", "TaskUpdate", "TaskList"}   # bookkeeping: no category of its own
-SUB_PROGS = {"git", "npm", "pnpm", "yarn", "cargo", "go", "docker", "uv", "make", "gh", "kubectl", "bun", "pip", "npx"}
+SUB_PROGS = {"git", "npm", "pnpm", "yarn", "cargo", "go", "docker", "uv", "make", "gh", "kubectl", "bun", "pip", "npx",
+             "systemctl", "journalctl", "apt", "apt-get", "brew", "service", "gsettings"}
 INTERPRETERS = {"python", "python3", "node", "bash", "sh", "zsh", "deno", "bun", "ruby", "perl"}
 WRAPPERS = {"env", "time", "sudo", "nohup", "exec", "timeout"}
 SHELL_WORDS = {"while", "until", "if", "then", "else", "elif", "fi", "do", "done", "esac", "in", "{", "}", "!", "[[",
@@ -40,7 +41,9 @@ SHELL_HEADERS = {"for", "select", "case", "function"}   # "for f in *": the body
 KIND_CAT = {"investigate": "investigate", "plan": "plan", "change": "change", "verify": "verify"}   # declared kind
 PROG_NAME = re.compile(r"[A-Za-z_][\w.+-]*")   # a program name: never a bare number, flag, "T()" or "["
 SLIM_KEYS = ("file_path", "notebook_path", "pattern", "skill", "name", "command", "description", "subagent_type",
-             "url", "query", "label", "kind", "offset", "limit")
+             "url", "query", "label", "kind", "offset", "limit",
+             "CommandLine", "toolSummary", "summary", "Path", "AbsolutePath", "TargetFile",
+             "Instruction", "Role", "TypeName", "Prompt", "DirectoryPath")
 
 
 def is_declare(name):
@@ -93,19 +96,32 @@ def program(cmd):
     prog = os.path.basename(w[0])
     if prog in SUB_PROGS and len(w) > 1 and re.fullmatch(r"[a-z][\w-]*", w[1]):
         return "%s %s" % (prog, w[1])
+    if prog in INTERPRETERS and len(w) > 1:
+        if w[1] == "-m" and len(w) > 2 and re.fullmatch(r"[A-Za-z_][\w.]*", w[2]):
+            return "%s -m %s" % (prog, w[2])
+        if not w[1].startswith("-"):
+            base = os.path.basename(w[1])
+            if re.fullmatch(r"[A-Za-z_][\w.-]*", base) and not base.startswith("-"):
+                return "%s %s" % (prog, base)
     return prog
 
 
 def display_name(name, inp):
     """Tool display name: "Bash <program>", "✦ <skill name>", "<server>.<tool>" for MCP, else the tool name."""
     inp = inp if isinstance(inp, dict) else {}
-    if name == "Bash":
-        return ("Bash " + (program(" ".join(str(inp.get("command") or "").split())) or "")).strip()
+    if name in ("Bash", "run_command"):
+        cmd = inp.get("command") or inp.get("CommandLine") or ""
+        p = program(" ".join(str(cmd).split())) or ""
+        prefix = "run_command " if name == "run_command" else "Bash "
+        return (prefix + p).strip() if p else name
     if name == "Skill":
         return ("✦ " + (tool_skill(name, inp) or "skill")).strip()
     if name.startswith("mcp__"):
         parts = name.split("__")
         return "%s.%s" % (parts[1] if len(parts) > 1 else "?", parts[-1] if len(parts) > 2 else "?")
+    if name in ("Agent", "Task", "invoke_subagent"):
+        role = inp.get("subagent_type") or inp.get("Role") or inp.get("TypeName")
+        return f"Agent({role})" if role else name
     return name
 
 
@@ -117,6 +133,7 @@ def _digest(turn):
         return hit[1]
     recs, names, files, cmds, agents, todos, declared, plan, runners, loads = [], [], [], [], [], [], None, None, [], []
     skills = []
+    summaries = []
     kind = None
     for t in tools:
         name, inp = str(t.get("name") or "?"), t.get("input") if isinstance(t.get("input"), dict) else {}
@@ -134,6 +151,9 @@ def _digest(turn):
         if name == "ExitPlanMode":
             n = len(re.findall(r"(?m)^\s*(?:[-*]|\d+[.)])\s+\S", str(inp.get("plan") or "")))
             plan = "Plan %d steps" % n if n >= 2 else "Write a plan"
+        sm = inp.get("toolSummary") or inp.get("summary")
+        if sm and isinstance(sm, str) and sm.strip():
+            summaries.append(sm.strip())
         rec = intents.record(name, inp)
         names.append(display_name(name, inp))
         if name not in NEUTRAL:
@@ -141,19 +161,20 @@ def _digest(turn):
         base = os.path.basename(rec.get("file") or "")
         if re.fullmatch(r"[\w.@+-]+", base):
             files.append(base)
-        if name == "Bash":
+        if name in ("Bash", "run_command"):
             p = program(rec.get("cmd") or "")
             if p:
                 cmds.append(p)
             tr = test_runner(rec.get("cmd") or "")
             if tr:
                 runners.append(names[-1])
-        if name in ("Agent", "Task"):
-            agents.append(" ".join(str(inp.get("description") or inp.get("subagent_type") or "subagent").split()))
+        if name in ("Agent", "Task", "invoke_subagent"):
+            agent_desc = inp.get("description") or inp.get("Prompt") or inp.get("Role") or inp.get("subagent_type") or "subagent"
+            agents.append(" ".join(str(agent_desc).split()))
     intent = intents.turn_intent(recs)[0] if recs else None
     d = {"intent": intent, "group": intents.GROUP.get(intent, "other") if intent else None, "names": names,
          "files": files, "cmds": cmds, "agents": agents, "todos": todos, "declared": declared, "plan": plan,
-         "runners": runners, "kind": kind, "loads": loads, "skills": skills}
+         "runners": runners, "kind": kind, "loads": loads, "skills": skills, "summaries": summaries}
     turn["_d"] = (len(tools), d)
     return d
 
@@ -221,7 +242,7 @@ def _new_step(i, k, turn, cat, prompt_before, part=None):
             "cw": 0.0, "usd": 0.0, "turns": 0, "tools": Counter(), "thinking": 0, "files": [], "cmds": [],
             "tested": None, "todo": None, "declared": None, "kind": None, "agents": [], "prompt_before": prompt_before,
             "closed": False, "text": "", "intents": Counter(), "plan": None, "runners": [], "wf_agents": 0,
-            "loads": [], "skills": []}
+            "loads": [], "skills": [], "summaries": []}
 
 
 def segment(turns, events=(), open_last=True):
@@ -296,6 +317,9 @@ def segment(turns, events=(), open_last=True):
         for n in (slash.get(k, []) if not part else []) + d["skills"]:
             if n not in cur["skills"]:
                 cur["skills"].append(n)
+        for sm in d.get("summaries", []):
+            if sm not in cur["summaries"]:
+                cur["summaries"].append(sm)
         if d["intent"]:
             cur["intents"][d["intent"]] += 1
         if turn.get("test"):
@@ -446,6 +470,8 @@ def label_from_signals(step):
         return subagent_label(step["agents"]), "subagent"
     if step.get("declared") and step.get("declared_span", 1) < 2:
         return clip_words(step["declared"]), "declared"
+    if step.get("summaries"):
+        return clip_words(step["summaries"][-1]), "summary"
     return None, None
 
 
@@ -454,7 +480,10 @@ def rule_label(step):
     its = step.get("intents") or Counter()
     intent = its.most_common(1)[0][0] if its else None
     base = intents.label(intent) if intent else {"plan": "planning"}.get(step.get("cat"), "working")
-    targets = (step.get("files") or [])[:2] or [c for c in step.get("cmds") or () if c not in INTERPRETERS][:2]
+    targets = (step.get("files") or [])[:2]
+    if not targets:
+        non_interp = [c for c in step.get("cmds") or () if c not in INTERPRETERS]
+        targets = (non_interp or (step.get("cmds") or ()))[:2]
     return base + (" · " + ", ".join(targets) if targets else "")
 
 

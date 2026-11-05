@@ -516,21 +516,70 @@ const LIVE_LABELS = {
   Write: ['editing files', 'change'], NotebookEdit: ['editing files', 'change'], WebFetch: ['researching the web', 'research'],
   WebSearch: ['researching the web', 'research'], Agent: ['delegating to a subagent', 'delegate'],
   Task: ['delegating to a subagent', 'delegate'], Skill: ['using a skill', 'delegate'], TodoWrite: ['planning', 'plan'],
+  Bash: ['running a command', 'verify'],
+  run_command: ['running a command', 'verify'], read_file: ['reading code', 'investigate'], view_file: ['reading code', 'investigate'],
+  edit_file: ['editing files', 'change'], replace_file_content: ['editing files', 'change'],
+  write_file: ['editing files', 'change'], write_to_file: ['editing files', 'change'],
+  grep_search: ['searching the code', 'investigate'], list_dir: ['searching the code', 'investigate'],
+  invoke_subagent: ['delegating to a subagent', 'delegate'],
+  search_web: ['researching the web', 'research'], read_url_content: ['researching the web', 'research'],
 }
 
 function liveTarget(ev) {
   const e = ev && ev.input && typeof ev.input === 'object' ? ev.input : ev
-  const f = e && (e.file_path || e.notebook_path || e.path)
+  const sm = e && (e.toolSummary || e.summary)
+  if (typeof sm === 'string' && sm.trim()) return sm.trim().slice(0, 48)
+  const f = e && (e.file_path || e.notebook_path || e.path || e.Path || e.AbsolutePath || e.TargetFile)
   if (typeof f === 'string' && f) return f.split('/').filter(Boolean).pop() || f
-  if (e && typeof e.command === 'string') {
-    const w = e.command.trim().split(/\s+/)
-    const prog = (w[0] || '').split('/').pop()
-    if (/^python[\d.]*$/.test(prog) && w[1] === '-m' && w[2]) return w[2]
-    return ['git', 'npm', 'pnpm', 'yarn', 'cargo', 'go', 'make', 'uv', 'docker'].includes(prog) && w[1] ? prog + ' ' + w[1] : prog
+  const cmd = e && (e.command || e.CommandLine)
+  if (typeof cmd === 'string') {
+    const segs = cmd.trim().split(/&&|\|\||[;|\n]/)
+    const firstCmd = (segs[0] || '').trim()
+    const w = firstCmd.split(/\s+/).filter(Boolean)
+    if (!w.length) return null
+    let idx = 0
+    while (idx < w.length && (/^\w+=/.test(w[idx]) || ['sudo', 'env', 'nohup', 'time', 'timeout', 'exec'].includes(w[idx]))) {
+      const isWrapper = ['sudo', 'env', 'nohup', 'time', 'timeout', 'exec'].includes(w[idx])
+      idx++
+      while (isWrapper && idx < w.length && (/^-\S*/.test(w[idx]) || /^\d[\d.]*[smhd]?$/.test(w[idx]) || /^[A-Z][A-Z0-9]*$/.test(w[idx]))) {
+        idx++
+      }
+    }
+    const prog = (w[idx] || '').split('/').pop()
+    const rest = w.slice(idx + 1)
+    if (!prog || !/^[A-Za-z_]/.test(prog)) return null
+    const subProgs = ['git', 'npm', 'pnpm', 'yarn', 'cargo', 'go', 'make', 'uv', 'docker', 'pip', 'bun', 'npx',
+                      'systemctl', 'journalctl', 'apt', 'apt-get', 'brew', 'service', 'gsettings', 'gh', 'kubectl']
+    if (subProgs.includes(prog)) {
+      const sub = rest.find((arg) => !arg.startsWith('-'))
+      if (sub && /^[a-z][\w-]*$/i.test(sub)) return prog + ' ' + sub
+      return prog
+    }
+    if (/^python[\d.]*$/.test(prog)) {
+      if (rest[0] === '-m' && rest[1]) return prog + ' -m ' + rest[1]
+      if (rest[0] === '-c') return prog + ' -c'
+      const script = rest.find((arg) => !arg.startsWith('-'))
+      if (script) {
+        const base = script.split('/').filter(Boolean).pop() || script
+        if (/^[a-z_][\w.-]*$/i.test(base)) return prog + ' ' + base
+      }
+      return prog
+    }
+    if (['bash', 'sh', 'zsh', 'node', 'ruby', 'perl'].includes(prog)) {
+      const script = rest.find((arg) => !arg.startsWith('-'))
+      if (script) {
+        const base = script.split('/').filter(Boolean).pop() || script
+        if (/^[a-z_][\w.-]*$/i.test(base)) return prog + ' ' + base
+      }
+      return prog
+    }
+    return prog
   }
   if (e && typeof e.skill === 'string') return e.skill
   if (e && typeof e.subagent_type === 'string') return e.subagent_type
+  if (e && typeof e.Role === 'string') return e.Role
   if (e && typeof e.pattern === 'string') return e.pattern.slice(0, 24)
+  if (e && typeof e.Query === 'string') return e.Query.slice(0, 24)
   return null
 }
 
@@ -539,15 +588,25 @@ function pendingTurns(r) {
   if (r.toolCalls == null) return []
   return (local.liveCalls || []).filter((c) => c.calls > r.toolCalls && (r.status === 'working' || fresh(c))).map((c) => {
     const [label, group] = liveLabel(c)
-    return { intent: null, label, group, cw: 0, tools: [c.tool === 'Bash' && c.target ? 'Bash ' + c.target : c.tool],
-             targets: [c.tool === 'Bash' ? null : c.target], toolErr: [false], error: false, agents: [] }
+    const isCmd = c.tool === 'Bash' || c.tool === 'run_command'
+    return { intent: null, label, group, cw: 0,
+             tools: [isCmd && c.target ? c.tool + ' ' + c.target : c.tool],
+             targets: [c.target || null], toolErr: [false], error: false, agents: [] }
   })
 }
 
 function liveLabel(l) {
   let [label, group] = LIVE_LABELS[l.tool] || (l.tool.startsWith('mcp__') ? ['calling ' + l.tool.split('__')[1], 'research'] : ['running a command', 'verify'])
-  if (l.tool === 'Bash' && /test|pytest|unittest|jest|vitest/i.test(l.target || '')) label = 'running tests'
-  if (l.tool === 'Bash' && /^git /.test(l.target || '')) [label, group] = ['checking git state', 'investigate']
+  if (l.tool === 'Bash' || l.tool === 'run_command') {
+    const tgt = l.target || ''
+    if (/test|pytest|unittest|jest|vitest/i.test(tgt)) return ['running tests', 'verify']
+    if (/^git /.test(tgt)) return ['checking git state', 'investigate']
+    if (/^curl|^wget|^http/i.test(tgt)) return ['fetching ' + tgt, 'research']
+    if (tgt) {
+      if (/^[A-Z][a-z]/.test(tgt) && tgt.includes(' ')) return [tgt, group || 'verify']
+      return ['running ' + tgt, group || 'verify']
+    }
+  }
   return [label, group]
 }
 
@@ -569,7 +628,7 @@ function liveNow(r) {
     const [label, group] = liveLabel(l)
     return [
       { text: '▶ ' + label, color: GROUP_COLORS[group], bold: true },
-      l.target && { text: ' · ' + l.target },
+      l.target && !label.endsWith(l.target) && label !== l.target && { text: ' · ' + l.target },
     ]
   }
   const running = runningAgents(r)
@@ -597,7 +656,7 @@ function nowSegs(r) {
   const what = n ? n.target || n.tool : null
   return [
     { text: '▶ ' + label, color: GROUP_COLORS[group], bold: true },
-    what && { text: ' · ' + what },
+    what && !label.endsWith(what) && label !== what && { text: ' · ' + what },
     n && n.since_s != null && { text: ' · ' + fmtDur(n.since_s), dimColor: true },
   ]
 }
@@ -835,7 +894,7 @@ function detailRow(Box, Text, key, text, width) {
 
 // An operation row's label ("unittest 22 passed", "skill:pr-review") and numbers (" · 3k · 4s")
 function opParts(o) {
-  const tool = /^Bash ./.test(o.tool) ? o.tool.slice(5) : o.tool
+  const tool = /^(?:Bash|run_command) /i.test(o.tool) ? o.tool.replace(/^(?:Bash|run_command) /i, '') : o.tool
   const t0 = o.target
   const target = t0 && t0 !== tool && !tool.endsWith(' ' + t0) && !tool.endsWith(':' + t0) ? ' ' + t0 : ''
   const t = o.test
@@ -868,12 +927,15 @@ function opSegs(o, prefix, width) {
 function pendingOps(r) {
   if (r.toolCalls == null) return []
   return (local.liveCalls || []).filter((c) => c.calls > r.toolCalls && (r.status === 'working' || fresh(c)) && !isDeclare(c.tool))
-    .map((c) => ({
-      tool: c.tool === 'Bash' && c.target ? 'Bash ' + c.target : c.tool === 'Skill' ? 'skill:' + (c.target || '?') : c.tool,
-      target: c.tool === 'Bash' || c.tool === 'Skill' ? null : c.target, cw: 0, err: null, test: null,
-      skill: c.tool === 'Skill' ? c.target || '?' : null,
-      dur: c.atMs != null ? Math.max(0, (local.nowMs - c.atMs) / 1000) : null,
-    }))
+    .map((c) => {
+      const isCmd = c.tool === 'Bash' || c.tool === 'run_command'
+      return {
+        tool: isCmd && c.target ? c.tool + ' ' + c.target : c.tool === 'Skill' ? 'skill:' + (c.target || '?') : c.tool,
+        target: isCmd || c.tool === 'Skill' ? null : c.target, cw: 0, err: null, test: null,
+        skill: c.tool === 'Skill' ? c.target || '?' : null,
+        dur: c.atMs != null ? Math.max(0, (local.nowMs - c.atMs) / 1000) : null,
+      }
+    })
 }
 
 function opRows(Box, Text, width, s, prefix, extra) {

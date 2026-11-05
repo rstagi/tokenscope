@@ -118,6 +118,20 @@ class Segment(unittest.TestCase):
         self.assertEqual(sp.display_name("Bash", {"command": "h=$(git rev-parse HEAD) && echo $h"}), "Bash git rev-parse")
         self.assertEqual(sp.display_name("Skill", {"skill": "pr-review"}), "✦ pr-review")
         self.assertEqual(sp.display_name("Bash", {"command": "FOO=1 python3 -m pytest -q"}), "Bash pytest")
+        self.assertEqual(sp.display_name("Bash", {"command": "python3 train.py --epochs 10"}), "Bash python3 train.py")
+        self.assertEqual(sp.display_name("run_command", {"CommandLine": "python3 train.py"}), "run_command python3 train.py")
+        self.assertEqual(sp.display_name("Bash", {"command": "pip install -r requirements.txt"}), "Bash pip install")
+        self.assertEqual(sp.display_name("Bash", {"command": "bash setup.sh"}), "Bash bash setup.sh")
+        self.assertEqual(sp.display_name("Bash", {"command": "systemctl restart nginx"}), "Bash systemctl restart")
+        self.assertEqual(sp.program("python3 train.py"), "python3 train.py")
+        self.assertEqual(sp.program("python3 -m http.server 8080"), "python3 -m http.server")
+        self.assertEqual(sp.program("bash deploy.sh"), "bash deploy.sh")
+        self.assertEqual(sp.program("pip install torch"), "pip install")
+        # rule_label reflects actual command / script target
+        s_py = sp.segment([T(bash("python3 train.py"))], open_last=False)[0]
+        self.assertEqual(sp.rule_label(s_py), "running a script · python3 train.py")
+        s_pip = sp.segment([T(bash("pip install flask"))], open_last=False)[0]
+        self.assertEqual(sp.rule_label(s_pip), "running a build/command · pip install")
 
     def test_program_skips_shell_syntax(self):
         for cmd, want in [("for f in *; do cat \"$f\"; done", "cat"), ("if [ -f x ]; then make; fi", "make"),
